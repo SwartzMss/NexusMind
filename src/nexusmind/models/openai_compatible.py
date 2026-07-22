@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -44,10 +45,14 @@ class OpenAICompatibleChatModel(ChatModel):
                     if response.status_code >= 400:
                         body = await response.aread()
                         raise ChatModelError(_safe_http_error(response.status_code, body, self._config.api_key))
+                    completed = False
                     async for line in response.aiter_lines():
-                        delta = _parse_sse_text_delta(line, self._config.api_key)
-                        if delta:
-                            yield RuntimeEvent(RuntimeEventType.TEXT_DELTA, text=delta)
+                        chunk = _parse_sse_chunk(line, self._config.api_key)
+                        completed = completed or chunk.completed
+                        if chunk.text:
+                            yield RuntimeEvent(RuntimeEventType.TEXT_DELTA, text=chunk.text)
+                    if not completed:
+                        raise ChatModelError("Model stream ended before completion")
         except ChatModelError:
             raise
         except httpx.TimeoutException as exc:
@@ -65,18 +70,26 @@ def _to_openai_message(message: Message) -> dict[str, Any]:
     return payload
 
 
-def _parse_sse_text_delta(line: str, api_key: str) -> str | None:
+@dataclass(frozen=True, slots=True)
+class _SSEChunk:
+    text: str | None = None
+    completed: bool = False
+
+
+def _parse_sse_chunk(line: str, api_key: str) -> _SSEChunk:
     if not line.startswith("data:"):
-        return None
+        return _SSEChunk()
     data = line.removeprefix("data:").strip()
-    if not data or data == "[DONE]":
-        return None
+    if not data:
+        return _SSEChunk()
+    if data == "[DONE]":
+        return _SSEChunk(completed=True)
     try:
         payload = json.loads(data)
     except json.JSONDecodeError as exc:
         raise ChatModelError("Model stream returned malformed JSON") from exc
     if not isinstance(payload, dict):
-        return None
+        return _SSEChunk()
     error = payload.get("error")
     if isinstance(error, dict):
         message = error.get("message")
@@ -85,17 +98,18 @@ def _parse_sse_text_delta(line: str, api_key: str) -> str | None:
         raise ChatModelError(_redact_secret(error, api_key))
     choices = payload.get("choices") or []
     if not isinstance(choices, list):
-        return None
+        return _SSEChunk()
     if not choices:
-        return None
+        return _SSEChunk()
     choice = choices[0]
     if not isinstance(choice, dict):
-        return None
+        return _SSEChunk()
+    completed = bool(choice.get("finish_reason"))
     delta = choice.get("delta", {})
     if not isinstance(delta, dict):
-        return None
+        return _SSEChunk(completed=completed)
     content = delta.get("content")
-    return content if isinstance(content, str) else None
+    return _SSEChunk(text=content if isinstance(content, str) else None, completed=completed)
 
 
 def _safe_http_error(status_code: int, body: bytes, api_key: str) -> str:

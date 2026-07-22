@@ -134,6 +134,7 @@ def test_adapter_ignores_non_object_json_empty_choices_and_usage_chunks() -> Non
                     _sse({"choices": []}),
                     _sse({"usage": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1}}),
                     _sse({"choices": [{"delta": {"content": "ok"}}]}),
+                    "data: [DONE]\n\n",
                 ]
             ),
         )
@@ -143,6 +144,45 @@ def test_adapter_ignores_non_object_json_empty_choices_and_usage_chunks() -> Non
     events = _collect(model)
 
     assert "".join(event.text or "" for event in events) == "ok"
+
+
+def test_adapter_accepts_finish_reason_as_completion_signal() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=_sse({"choices": [{"delta": {"content": "done"}, "finish_reason": "stop"}]}),
+        )
+
+    model = OpenAICompatibleChatModel(_config(), transport=httpx.MockTransport(handler))
+
+    events = _collect(model)
+
+    assert "".join(event.text or "" for event in events) == "done"
+
+
+def test_adapter_raises_when_stream_ends_after_partial_text_without_completion() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=_sse({"choices": [{"delta": {"content": "partial"}}]}))
+
+    model = OpenAICompatibleChatModel(_config(), transport=httpx.MockTransport(handler))
+
+    try:
+        _collect(model)
+    except ChatModelError as exc:
+        assert str(exc) == "Model stream ended before completion"
+    else:
+        raise AssertionError("expected ChatModelError")
+
+
+def test_adapter_raises_when_stream_is_empty() -> None:
+    model = OpenAICompatibleChatModel(_config(), transport=httpx.MockTransport(lambda request: httpx.Response(200)))
+
+    try:
+        _collect(model)
+    except ChatModelError as exc:
+        assert str(exc) == "Model stream ended before completion"
+    else:
+        raise AssertionError("expected ChatModelError")
 
 
 def test_adapter_rejects_tools_until_tool_call_events_are_supported() -> None:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 
@@ -13,7 +13,7 @@ class ConfigError(ValueError):
 @dataclass(frozen=True, slots=True)
 class ModelConfig:
     base_url: str
-    api_key: str
+    api_key: str = field(repr=False)
     model: str
     timeout: float = 60.0
 

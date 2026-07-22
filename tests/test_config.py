@@ -46,3 +46,13 @@ def test_load_model_config_reads_dotenv_file(monkeypatch, tmp_path: Path) -> Non
         model="test-model",
         timeout=12.5,
     )
+
+
+def test_model_config_repr_redacts_api_key() -> None:
+    config = ModelConfig(
+        base_url="https://provider.test/v1",
+        api_key="sk-test-secret",
+        model="test-model",
+    )
+
+    assert "sk-test-secret" not in repr(config)
