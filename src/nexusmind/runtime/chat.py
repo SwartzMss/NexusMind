@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from nexusmind.models.base import ChatModel, ToolDefinition
+from nexusmind.models.base import ChatModel
 from nexusmind.runtime.events import RuntimeEvent, RuntimeEventType
 from nexusmind.runtime.messages import Message, MessageRole
+from nexusmind.tools.contracts import ToolDefinition
 
 
 class ChatRuntime:

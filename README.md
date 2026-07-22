@@ -5,6 +5,7 @@ NexusMind is starting with a small, provider-decoupled model runtime. This basel
 - NexusMind-owned message and runtime event contracts.
 - A `ChatModel` abstraction with async streaming.
 - An OpenAI-compatible HTTP adapter.
+- A provider-neutral tool registry and executor baseline.
 - A CLI entrypoint for streaming chat output.
 - A fake model for offline tests.
 
@@ -39,6 +40,22 @@ You can also start a one-turn prompt interactively:
 
 ```powershell
 nexusmind chat
+```
+
+## Tools
+
+The tool system runs without model configuration or API keys.
+
+List registered built-in tools:
+
+```powershell
+nexusmind tools list
+```
+
+Call the built-in echo tool:
+
+```powershell
+nexusmind tools call echo '{"text":"hello"}'
 ```
 
 ## Test

@@ -8,9 +8,10 @@ from typing import Any
 import httpx
 
 from nexusmind.config import ModelConfig
-from nexusmind.models.base import ChatModel, ChatModelError, ToolDefinition
+from nexusmind.models.base import ChatModel, ChatModelError
 from nexusmind.runtime.events import RuntimeEvent, RuntimeEventType
 from nexusmind.runtime.messages import Message, MessageRole
+from nexusmind.tools.contracts import ToolDefinition
 
 
 class OpenAICompatibleChatModel(ChatModel):
