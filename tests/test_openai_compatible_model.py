@@ -4,10 +4,11 @@ import json
 import httpx
 
 from nexusmind.config import ModelConfig
-from nexusmind.models.base import ChatModelError, ToolDefinition
+from nexusmind.models.base import ChatModelError
 from nexusmind.models.openai_compatible import OpenAICompatibleChatModel
 from nexusmind.runtime.events import RuntimeEventType
 from nexusmind.runtime.messages import Message, MessageRole
+from nexusmind.tools import ToolDefinition
 
 
 def _config(timeout: float = 60) -> ModelConfig:
@@ -190,7 +191,7 @@ def test_adapter_rejects_tools_until_tool_call_events_are_supported() -> None:
 
     async def collect():
         messages = [Message(role=MessageRole.USER, content="hello")]
-        tools = [ToolDefinition(name="lookup", parameters={"type": "object", "properties": {}})]
+        tools = [ToolDefinition(name="lookup", input_schema={"type": "object", "properties": {}})]
         return [event async for event in model.stream(messages, tools=tools)]
 
     try:
