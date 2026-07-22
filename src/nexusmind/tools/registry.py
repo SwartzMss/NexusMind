@@ -22,7 +22,7 @@ class ToolNotFoundError(KeyError):
 
 
 @dataclass(frozen=True, slots=True)
-class RegisteredTool:
+class _RegisteredTool:
     tool: Tool
     definition: ToolDefinition
     validator: Draft202012Validator
@@ -30,23 +30,23 @@ class RegisteredTool:
 
 class ToolRegistry:
     def __init__(self) -> None:
-        self._tools: dict[str, RegisteredTool] = {}
+        self._tools: dict[str, _RegisteredTool] = {}
 
     def register(self, tool: Tool) -> None:
         definition = _copy_tool_definition(tool.definition)
         validate_tool_definition(definition)
         if definition.name in self._tools:
             raise ToolRegistryError(f"Tool already registered: {definition.name}")
-        self._tools[definition.name] = RegisteredTool(
+        self._tools[definition.name] = _RegisteredTool(
             tool=tool,
             definition=definition,
             validator=Draft202012Validator(definition.input_schema),
         )
 
     def get(self, name: str) -> Tool:
-        return self.get_registered(name).tool
+        return self._get_registered(name).tool
 
-    def get_registered(self, name: str) -> RegisteredTool:
+    def _get_registered(self, name: str) -> _RegisteredTool:
         try:
             return self._tools[name]
         except KeyError as exc:
@@ -56,7 +56,7 @@ class ToolRegistry:
         return name in self._tools
 
     def list_definitions(self) -> list[ToolDefinition]:
-        return [self._tools[name].definition for name in sorted(self._tools)]
+        return [_copy_tool_definition(self._tools[name].definition) for name in sorted(self._tools)]
 
 
 def validate_tool_definition(definition: ToolDefinition) -> None:

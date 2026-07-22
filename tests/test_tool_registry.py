@@ -46,3 +46,16 @@ def test_registry_lists_definitions_in_deterministic_order() -> None:
 
     assert [definition.name for definition in registry.list_definitions()] == ["alpha", "zeta"]
 
+
+def test_registry_list_definitions_returns_isolated_copies() -> None:
+    registry = ToolRegistry()
+    registry.register(EchoTool())
+
+    first = registry.list_definitions()[0]
+    first.input_schema["required"] = []
+    first.input_schema["additionalProperties"] = True
+
+    second = registry.list_definitions()[0]
+
+    assert second.input_schema["required"] == ["text"]
+    assert second.input_schema["additionalProperties"] is False

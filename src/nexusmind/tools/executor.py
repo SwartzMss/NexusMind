@@ -14,7 +14,7 @@ class ToolExecutor:
 
     async def execute(self, call: ToolCall) -> ToolResult:
         try:
-            registered = self._registry.get_registered(call.name)
+            registered = self._registry._get_registered(call.name)
         except ToolNotFoundError:
             return _failure(call, ToolErrorCode.TOOL_NOT_FOUND, f"Tool not found: {call.name}")
 

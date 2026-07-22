@@ -125,6 +125,22 @@ def test_executor_uses_registered_schema_snapshot() -> None:
     assert result.output == {"text": "hello"}
 
 
+def test_executor_validation_cannot_be_bypassed_by_mutating_listed_definition() -> None:
+    registry = _registry_with(EchoTool())
+    definition = registry.list_definitions()[0]
+    definition.input_schema["required"] = []
+    definition.input_schema["additionalProperties"] = True
+
+    async def run():
+        executor = ToolExecutor(registry)
+        return await executor.execute(ToolCall(id="call-1", name="echo", arguments={}))
+
+    result = asyncio.run(run())
+
+    assert result.error is not None
+    assert result.error.code == ToolErrorCode.INVALID_ARGUMENTS
+
+
 def test_executor_validation_error_does_not_include_secret_argument_value() -> None:
     async def run():
         executor = ToolExecutor(_registry_with(SecretArgumentTool()))
