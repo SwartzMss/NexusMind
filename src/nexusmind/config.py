@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from dotenv import load_dotenv
+
 
 class ConfigError(ValueError):
     pass
@@ -17,6 +19,8 @@ class ModelConfig:
 
 
 def load_model_config_from_env() -> ModelConfig:
+    load_dotenv()
+
     base_url = os.getenv("NEXUSMIND_MODEL_BASE_URL", "").strip()
     api_key = os.getenv("NEXUSMIND_MODEL_API_KEY", "").strip()
     model = os.getenv("NEXUSMIND_MODEL_NAME", "").strip()

@@ -13,8 +13,9 @@ from nexusmind.runtime.messages import Message, MessageRole
 
 
 class OpenAICompatibleChatModel(ChatModel):
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(self, config: ModelConfig, transport: httpx.AsyncBaseTransport | None = None) -> None:
         self._config = config
+        self._transport = transport
 
     async def stream(
         self,
@@ -29,7 +30,7 @@ class OpenAICompatibleChatModel(ChatModel):
             "stream": True,
         }
         if tools:
-            request["tools"] = [_to_openai_tool(tool) for tool in tools]
+            raise ChatModelError("Tool calls are not supported by the OpenAI-compatible adapter yet")
 
         headers = {
             "Authorization": f"Bearer {self._config.api_key}",
@@ -38,13 +39,13 @@ class OpenAICompatibleChatModel(ChatModel):
         url = f"{self._config.base_url.rstrip('/')}/chat/completions"
 
         try:
-            async with httpx.AsyncClient(timeout=self._config.timeout) as client:
+            async with httpx.AsyncClient(timeout=self._config.timeout, transport=self._transport) as client:
                 async with client.stream("POST", url, json=request, headers=headers) as response:
                     if response.status_code >= 400:
                         body = await response.aread()
-                        raise ChatModelError(_safe_http_error(response.status_code, body))
+                        raise ChatModelError(_safe_http_error(response.status_code, body, self._config.api_key))
                     async for line in response.aiter_lines():
-                        delta = _parse_sse_text_delta(line)
+                        delta = _parse_sse_text_delta(line, self._config.api_key)
                         if delta:
                             yield RuntimeEvent(RuntimeEventType.TEXT_DELTA, text=delta)
         except ChatModelError:
@@ -64,18 +65,7 @@ def _to_openai_message(message: Message) -> dict[str, Any]:
     return payload
 
 
-def _to_openai_tool(tool: ToolDefinition) -> dict[str, Any]:
-    return {
-        "type": "function",
-        "function": {
-            "name": tool.name,
-            "description": tool.description or "",
-            "parameters": tool.parameters or {"type": "object", "properties": {}},
-        },
-    }
-
-
-def _parse_sse_text_delta(line: str) -> str | None:
+def _parse_sse_text_delta(line: str, api_key: str) -> str | None:
     if not line.startswith("data:"):
         return None
     data = line.removeprefix("data:").strip()
@@ -85,21 +75,48 @@ def _parse_sse_text_delta(line: str) -> str | None:
         payload = json.loads(data)
     except json.JSONDecodeError:
         return None
+    if not isinstance(payload, dict):
+        return None
+    error = payload.get("error")
+    if isinstance(error, dict):
+        message = error.get("message")
+        raise ChatModelError(_redact_secret(str(message or "Model stream returned an error"), api_key))
+    if isinstance(error, str):
+        raise ChatModelError(_redact_secret(error, api_key))
     choices = payload.get("choices") or []
+    if not isinstance(choices, list):
+        return None
     if not choices:
         return None
-    content = choices[0].get("delta", {}).get("content")
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        return None
+    delta = choice.get("delta", {})
+    if not isinstance(delta, dict):
+        return None
+    content = delta.get("content")
     return content if isinstance(content, str) else None
 
 
-def _safe_http_error(status_code: int, body: bytes) -> str:
+def _safe_http_error(status_code: int, body: bytes, api_key: str) -> str:
     text = body.decode("utf-8", errors="replace")
     try:
         payload = json.loads(text)
-        message = payload.get("error", {}).get("message") or payload.get("message")
+        message = None
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if isinstance(error, dict):
+                message = error.get("message")
+            message = message or payload.get("message")
         if isinstance(message, str) and message:
-            return f"Model provider returned HTTP {status_code}: {message}"
+            return _redact_secret(f"Model provider returned HTTP {status_code}: {message}", api_key)
     except json.JSONDecodeError:
         pass
     return f"Model provider returned HTTP {status_code}"
+
+
+def _redact_secret(text: str, secret: str) -> str:
+    if not secret:
+        return text
+    return text.replace(secret, "[REDACTED]")
 
