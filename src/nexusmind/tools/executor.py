@@ -3,8 +3,6 @@ from __future__ import annotations
 import asyncio
 
 from jsonschema import ValidationError
-from jsonschema.validators import Draft202012Validator
-
 from nexusmind.tools.contracts import ToolCall, ToolError, ToolErrorCode, ToolResult
 from nexusmind.tools.registry import ToolNotFoundError, ToolRegistry
 
@@ -16,17 +14,17 @@ class ToolExecutor:
 
     async def execute(self, call: ToolCall) -> ToolResult:
         try:
-            tool = self._registry.get(call.name)
+            registered = self._registry.get_registered(call.name)
         except ToolNotFoundError:
             return _failure(call, ToolErrorCode.TOOL_NOT_FOUND, f"Tool not found: {call.name}")
 
         try:
-            Draft202012Validator(tool.definition.input_schema).validate(call.arguments)
+            registered.validator.validate(call.arguments)
         except ValidationError as exc:
             return _failure(call, ToolErrorCode.INVALID_ARGUMENTS, _validation_message(exc))
 
         try:
-            output = await asyncio.wait_for(tool.invoke(call.arguments), timeout=self._timeout)
+            output = await asyncio.wait_for(registered.tool.invoke(call.arguments), timeout=self._timeout)
         except asyncio.TimeoutError:
             return _failure(call, ToolErrorCode.EXECUTION_TIMEOUT, f"Tool timed out after {self._timeout:g} seconds")
         except asyncio.CancelledError:
@@ -42,8 +40,25 @@ def _failure(call: ToolCall, code: ToolErrorCode, message: str) -> ToolResult:
 
 
 def _validation_message(exc: ValidationError) -> str:
+    expected = _expected_type(exc)
     if exc.path:
         path = ".".join(str(part) for part in exc.path)
-        return f"Invalid arguments at {path}: {exc.message}"
-    return f"Invalid arguments: {exc.message}"
+        if expected:
+            return f"Invalid arguments at {path}: expected {expected}"
+        return f"Invalid arguments at {path}"
+    if expected:
+        return f"Invalid arguments: expected {expected}"
+    return "Invalid arguments"
 
+
+def _expected_type(exc: ValidationError) -> str | None:
+    if exc.validator == "type":
+        expected = exc.validator_value
+        if isinstance(expected, list):
+            return " or ".join(str(value) for value in expected)
+        return str(expected)
+    if exc.validator == "required":
+        return "required property"
+    if exc.validator == "additionalProperties":
+        return "no additional properties"
+    return None

@@ -33,6 +33,43 @@ class CancelledTool:
         raise asyncio.CancelledError()
 
 
+class MutableSchemaTool:
+    def __init__(self) -> None:
+        self._definition = ToolDefinition(
+            name="mutable",
+            input_schema={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+        )
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return self._definition
+
+    async def invoke(self, arguments):
+        return {"text": arguments["text"]}
+
+
+class SecretArgumentTool:
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="secret_arg",
+            input_schema={
+                "type": "object",
+                "properties": {"token": {"type": "integer"}},
+                "required": ["token"],
+                "additionalProperties": False,
+            },
+        )
+
+    async def invoke(self, arguments):
+        return arguments
+
+
 def _registry_with(*tools) -> ToolRegistry:
     registry = ToolRegistry()
     for tool in tools:
@@ -73,6 +110,36 @@ def test_executor_validates_arguments(arguments: dict) -> None:
     assert result.error.code == ToolErrorCode.INVALID_ARGUMENTS
 
 
+def test_executor_uses_registered_schema_snapshot() -> None:
+    tool = MutableSchemaTool()
+    registry = _registry_with(tool)
+    tool.definition.input_schema["type"] = "invalid-type"
+
+    async def run():
+        executor = ToolExecutor(registry)
+        return await executor.execute(ToolCall(id="call-1", name="mutable", arguments={"text": "hello"}))
+
+    result = asyncio.run(run())
+
+    assert result.error is None
+    assert result.output == {"text": "hello"}
+
+
+def test_executor_validation_error_does_not_include_secret_argument_value() -> None:
+    async def run():
+        executor = ToolExecutor(_registry_with(SecretArgumentTool()))
+        return await executor.execute(
+            ToolCall(id="call-1", name="secret_arg", arguments={"token": "sk-live-secret"})
+        )
+
+    result = asyncio.run(run())
+
+    assert result.error is not None
+    assert result.error.code == ToolErrorCode.INVALID_ARGUMENTS
+    assert "sk-live-secret" not in result.error.message
+    assert result.error.message == "Invalid arguments at token: expected integer"
+
+
 def test_executor_converts_ordinary_exception_to_failed_result() -> None:
     async def run():
         executor = ToolExecutor(_registry_with(FailingTool()))
@@ -103,4 +170,3 @@ def test_executor_propagates_cancelled_error() -> None:
 
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(run())
-

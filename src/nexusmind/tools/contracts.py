@@ -5,14 +5,15 @@ from enum import Enum
 from typing import Any
 
 
-DEFAULT_INPUT_SCHEMA: dict[str, Any] = {"type": "object", "properties": {}, "additionalProperties": False}
+def _default_input_schema() -> dict[str, Any]:
+    return {"type": "object", "properties": {}, "additionalProperties": False}
 
 
 @dataclass(frozen=True, slots=True)
 class ToolDefinition:
     name: str
     description: str | None = None
-    input_schema: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_INPUT_SCHEMA))
+    input_schema: dict[str, Any] = field(default_factory=_default_input_schema)
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,4 +44,3 @@ class ToolResult:
     output: Any | None = None
     error: ToolError | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-

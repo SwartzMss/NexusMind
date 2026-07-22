@@ -41,8 +41,17 @@ def test_tools_call_validation_error_returns_nonzero(monkeypatch, capsys) -> Non
     assert "INVALID_ARGUMENTS" in captured.err
 
 
+def test_tools_call_validation_error_does_not_echo_secret_value(monkeypatch, capsys) -> None:
+    _clear_model_env(monkeypatch)
+
+    assert cli.main(["tools", "call", "echo", '{"text":42,"token":"sk-live-secret"}']) == 2
+
+    captured = capsys.readouterr()
+    assert "INVALID_ARGUMENTS" in captured.err
+    assert "sk-live-secret" not in captured.err
+
+
 def _clear_model_env(monkeypatch) -> None:
     for name in list(os.environ):
         if name.startswith("NEXUSMIND_MODEL_"):
             monkeypatch.delenv(name, raising=False)
-

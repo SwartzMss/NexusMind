@@ -12,6 +12,23 @@ def test_valid_schema_can_be_registered() -> None:
     assert registry.contains("echo")
 
 
+def test_default_input_schema_is_independent_between_definitions() -> None:
+    first = ToolDefinition(name="first")
+    second = ToolDefinition(name="second")
+
+    first.input_schema["properties"]["text"] = {"type": "string"}
+
+    assert second.input_schema["properties"] == {}
+
+
+def test_default_input_schema_nested_state_is_not_reused() -> None:
+    first = ToolDefinition(name="first")
+    second = ToolDefinition(name="second")
+
+    assert first.input_schema is not second.input_schema
+    assert first.input_schema["properties"] is not second.input_schema["properties"]
+
+
 @pytest.mark.parametrize(
     "definition",
     [
@@ -57,4 +74,3 @@ def test_non_object_schema_is_rejected() -> None:
 
     with pytest.raises(ToolRegistryError):
         ToolRegistry().register(ArraySchemaTool())
-

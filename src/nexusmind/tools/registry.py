@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+from dataclasses import dataclass
 import re
 
 from jsonschema.exceptions import SchemaError
@@ -19,18 +21,32 @@ class ToolNotFoundError(KeyError):
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class RegisteredTool:
+    tool: Tool
+    definition: ToolDefinition
+    validator: Draft202012Validator
+
+
 class ToolRegistry:
     def __init__(self) -> None:
-        self._tools: dict[str, Tool] = {}
+        self._tools: dict[str, RegisteredTool] = {}
 
     def register(self, tool: Tool) -> None:
-        definition = tool.definition
+        definition = _copy_tool_definition(tool.definition)
         validate_tool_definition(definition)
         if definition.name in self._tools:
             raise ToolRegistryError(f"Tool already registered: {definition.name}")
-        self._tools[definition.name] = tool
+        self._tools[definition.name] = RegisteredTool(
+            tool=tool,
+            definition=definition,
+            validator=Draft202012Validator(definition.input_schema),
+        )
 
     def get(self, name: str) -> Tool:
+        return self.get_registered(name).tool
+
+    def get_registered(self, name: str) -> RegisteredTool:
         try:
             return self._tools[name]
         except KeyError as exc:
@@ -56,3 +72,10 @@ def validate_tool_definition(definition: ToolDefinition) -> None:
     if schema.get("type") != "object":
         raise ToolRegistryError("Tool input_schema must describe a JSON object")
 
+
+def _copy_tool_definition(definition: ToolDefinition) -> ToolDefinition:
+    return ToolDefinition(
+        name=definition.name,
+        description=definition.description,
+        input_schema=deepcopy(definition.input_schema),
+    )
