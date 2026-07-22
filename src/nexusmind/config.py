@@ -18,8 +18,9 @@ class ModelConfig:
     timeout: float = 60.0
 
 
-def load_model_config_from_env() -> ModelConfig:
-    load_dotenv()
+def load_model_config_from_env(*, load_dotenv_file: bool = True) -> ModelConfig:
+    if load_dotenv_file:
+        load_dotenv(dotenv_path=".env")
 
     base_url = os.getenv("NEXUSMIND_MODEL_BASE_URL", "").strip()
     api_key = os.getenv("NEXUSMIND_MODEL_API_KEY", "").strip()

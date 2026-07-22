@@ -1,7 +1,7 @@
 import asyncio
 
 from nexusmind import cli
-from nexusmind.config import ModelConfig
+from nexusmind.config import ConfigError, ModelConfig
 from nexusmind.runtime.events import RuntimeEvent, RuntimeEventType
 
 
@@ -58,6 +58,7 @@ def test_cli_returns_nonzero_on_model_failure(monkeypatch, capsys) -> None:
 
 
 def test_cli_returns_nonzero_on_missing_config(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "load_model_config_from_env", lambda: (_ for _ in ()).throw(ConfigError("missing config")))
     monkeypatch.delenv("NEXUSMIND_MODEL_BASE_URL", raising=False)
     monkeypatch.delenv("NEXUSMIND_MODEL_API_KEY", raising=False)
     monkeypatch.delenv("NEXUSMIND_MODEL_NAME", raising=False)

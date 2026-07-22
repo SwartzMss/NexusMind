@@ -110,15 +110,29 @@ def test_adapter_raises_on_timeout() -> None:
         raise AssertionError("expected ChatModelError")
 
 
-def test_adapter_ignores_malformed_json_non_object_json_and_empty_choices() -> None:
+def test_adapter_raises_on_malformed_sse_json() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content="data: {malformed\n\n")
+
+    model = OpenAICompatibleChatModel(_config(), transport=httpx.MockTransport(handler))
+
+    try:
+        _collect(model)
+    except ChatModelError as exc:
+        assert str(exc) == "Model stream returned malformed JSON"
+    else:
+        raise AssertionError("expected ChatModelError")
+
+
+def test_adapter_ignores_non_object_json_empty_choices_and_usage_chunks() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
             content="".join(
                 [
-                    "data: {malformed\n\n",
                     "data: []\n\n",
                     _sse({"choices": []}),
+                    _sse({"usage": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1}}),
                     _sse({"choices": [{"delta": {"content": "ok"}}]}),
                 ]
             ),

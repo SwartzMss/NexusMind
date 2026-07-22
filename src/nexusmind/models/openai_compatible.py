@@ -73,8 +73,8 @@ def _parse_sse_text_delta(line: str, api_key: str) -> str | None:
         return None
     try:
         payload = json.loads(data)
-    except json.JSONDecodeError:
-        return None
+    except json.JSONDecodeError as exc:
+        raise ChatModelError("Model stream returned malformed JSON") from exc
     if not isinstance(payload, dict):
         return None
     error = payload.get("error")
