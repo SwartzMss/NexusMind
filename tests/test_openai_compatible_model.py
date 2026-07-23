@@ -94,8 +94,8 @@ def test_adapter_raises_on_stream_error_and_redacts_secret() -> None:
     else:
         raise AssertionError("expected ChatModelError")
 
+    assert message == "Model stream returned a provider error"
     assert "sk-test-secret" not in message
-    assert "[REDACTED]" in message
 
 
 def test_adapter_raises_on_timeout() -> None:

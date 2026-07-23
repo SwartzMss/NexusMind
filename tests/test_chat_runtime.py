@@ -60,6 +60,23 @@ def test_runtime_passes_through_tool_call_events() -> None:
         RuntimeEventType.TOOL_CALL_DELTA,
         RuntimeEventType.TOOL_CALL_COMPLETED,
         RuntimeEventType.MODEL_TURN_COMPLETED,
+    ]
+
+
+def test_runtime_completes_run_for_stop_model_turn() -> None:
+    class StopModel:
+        async def stream(self, messages, tools=None):
+            yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="stop")
+
+    async def collect():
+        runtime = ChatRuntime(StopModel())
+        return [event async for event in runtime.stream_user_message("hello")]
+
+    events = asyncio.run(collect())
+
+    assert [event.type for event in events] == [
+        RuntimeEventType.RUN_STARTED,
+        RuntimeEventType.MODEL_TURN_COMPLETED,
         RuntimeEventType.RUN_COMPLETED,
     ]
 

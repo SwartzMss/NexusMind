@@ -26,9 +26,13 @@ class ChatRuntime:
 
         yield RuntimeEvent(RuntimeEventType.RUN_STARTED)
         try:
+            model_turn_finish_reason: str | None = None
             async for event in self._model.stream(messages, tools=tools):
+                if event.type == RuntimeEventType.MODEL_TURN_COMPLETED:
+                    model_turn_finish_reason = event.finish_reason
                 yield event
-            yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
+            if model_turn_finish_reason != "tool_calls":
+                yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
         except Exception as exc:
             yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=str(exc))
 

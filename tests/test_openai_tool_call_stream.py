@@ -168,9 +168,14 @@ def test_stream_rejects_invalid_tool_call_fields_and_legacy_function_call() -> N
     bad_payloads = [
         {"choices": [{"delta": {"tool_calls": {}}, "finish_reason": None}]},
         {"choices": [{"delta": {"tool_calls": [{"index": "0"}]}, "finish_reason": None}]},
+        {"choices": [{"delta": {"tool_calls": [{"index": True}]}, "finish_reason": None}]},
         {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": {}}}]}, "finish_reason": None}]},
         {"choices": [{"delta": {"function_call": {"name": "echo"}}, "finish_reason": "stop"}]},
         {"choices": [{"delta": {}, "finish_reason": None}, {"delta": {}, "finish_reason": None}]},
+        {"choices": {}},
+        {"choices": ""},
+        {"choices": 0},
+        {"choices": False},
     ]
 
     for payload in bad_payloads:
@@ -181,3 +186,39 @@ def test_stream_rejects_invalid_tool_call_fields_and_legacy_function_call() -> N
         else:
             raise AssertionError(f"expected ChatModelError for {payload!r}")
 
+
+def test_provider_error_does_not_echo_secret_arguments() -> None:
+    content = "".join(
+        [
+            _sse(
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {"name": "echo", "arguments": '{"token":"sk-live-secret"}'},
+                                    }
+                                ]
+                            },
+                            "finish_reason": None,
+                        }
+                    ]
+                }
+            ),
+            _sse({"error": {"message": "bad argument sk-live-secret"}}),
+        ]
+    )
+
+    try:
+        asyncio.run(_collect_with_content(content))
+    except ChatModelError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("expected ChatModelError")
+
+    assert message == "Model stream returned a provider error"
+    assert "sk-live-secret" not in message

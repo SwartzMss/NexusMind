@@ -78,7 +78,7 @@ class ToolCallAssembler:
             if partial.call_id in seen_ids:
                 raise ToolCallAssemblyError("Model stream returned duplicate tool call ids")
             seen_ids.add(partial.call_id)
-            if partial.type_name and partial.type_name != "function":
+            if partial.type_name != "function":
                 raise ToolCallAssemblyError("Model stream returned an unsupported tool call type")
             if not partial.name:
                 raise ToolCallAssemblyError("Model stream ended with an incomplete tool call")
@@ -87,10 +87,14 @@ class ToolCallAssembler:
                 arguments = {}
             else:
                 try:
-                    arguments = json.loads(raw_arguments)
-                except json.JSONDecodeError as exc:
+                    arguments = json.loads(raw_arguments, parse_constant=_reject_json_constant)
+                except (ValueError, RecursionError) as exc:
                     raise ToolCallAssemblyError("Model stream returned invalid tool call arguments") from exc
                 if not isinstance(arguments, dict):
                     raise ToolCallAssemblyError("Model stream returned non-object tool call arguments")
             calls.append(ToolCall(id=partial.call_id, name=partial.name, arguments=arguments))
         return calls
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"Invalid JSON constant: {value}")

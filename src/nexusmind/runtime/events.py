@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from nexusmind.models.tool_calls import ToolCallDelta
-from nexusmind.tools.contracts import ToolCall
+if TYPE_CHECKING:
+    from nexusmind.models.tool_calls import ToolCallDelta
+    from nexusmind.tools.contracts import ToolCall
 
 
 class RuntimeEventType(str, Enum):

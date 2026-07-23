@@ -126,11 +126,12 @@ def _parse_sse_chunk(line: str, api_key: str) -> _SSEChunk:
         raise ChatModelError("Model stream returned a non-object payload")
     error = payload.get("error")
     if isinstance(error, dict):
-        message = error.get("message")
-        raise ChatModelError(_redact_secret(str(message or "Model stream returned an error"), api_key))
+        raise ChatModelError("Model stream returned a provider error")
     if isinstance(error, str):
-        raise ChatModelError(_redact_secret(error, api_key))
-    choices = payload.get("choices") or []
+        raise ChatModelError("Model stream returned a provider error")
+    if "choices" not in payload:
+        return _SSEChunk()
+    choices = payload.get("choices")
     if not isinstance(choices, list):
         raise ChatModelError("Model stream returned invalid choices")
     if not choices:
@@ -170,7 +171,7 @@ def _parse_tool_call_deltas(delta: dict[str, Any]) -> list[ToolCallDelta]:
         if not isinstance(item, dict):
             raise ChatModelError("Model stream returned an invalid tool call")
         index = item.get("index")
-        if not isinstance(index, int):
+        if not isinstance(index, int) or isinstance(index, bool):
             raise ChatModelError("Model stream returned a tool call without a valid index")
         call_id = item.get("id", "")
         if call_id is None:
