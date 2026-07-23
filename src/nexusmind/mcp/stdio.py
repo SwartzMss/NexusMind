@@ -38,14 +38,12 @@ class MCPStdioClient:
             self._stdio_context = stdio_client(params, errlog=self._errlog)
             async with _same_task_timeout(self._config.connect_timeout):
                 read_stream, write_stream = await self._stdio_context.__aenter__()
-            self._session_context = ClientSession(
-                read_stream,
-                write_stream,
-                read_timeout_seconds=timedelta(seconds=self._config.request_timeout),
-            )
-            async with _same_task_timeout(self._config.connect_timeout):
+                self._session_context = ClientSession(
+                    read_stream,
+                    write_stream,
+                    read_timeout_seconds=timedelta(seconds=self._config.request_timeout),
+                )
                 self._session = await self._session_context.__aenter__()
-            async with _same_task_timeout(self._config.connect_timeout):
                 await self._session.initialize()
         except asyncio.CancelledError:
             await self._cleanup(raise_errors=False)
@@ -82,22 +80,26 @@ class MCPStdioClient:
         self._session_context = None
         self._stdio_context = None
         self._errlog = None
-        cleanup_error: Exception | None = None
-        if session_context is not None:
+        cleanup_error: BaseException | None = None
+        try:
+            if session_context is not None:
+                try:
+                    await session_context.__aexit__(None, None, None)
+                except BaseException as exc:
+                    cleanup_error = cleanup_error or exc
+        finally:
             try:
-                await session_context.__aexit__(None, None, None)
-            except Exception as exc:
-                cleanup_error = cleanup_error or exc
-        if stdio_context is not None:
-            try:
-                await stdio_context.__aexit__(None, None, None)
-            except Exception as exc:
-                cleanup_error = cleanup_error or exc
-        if errlog is not None:
-            try:
-                errlog.close()
-            except Exception as exc:
-                cleanup_error = cleanup_error or exc
+                if stdio_context is not None:
+                    try:
+                        await stdio_context.__aexit__(None, None, None)
+                    except BaseException as exc:
+                        cleanup_error = cleanup_error or exc
+            finally:
+                if errlog is not None:
+                    try:
+                        errlog.close()
+                    except BaseException as exc:
+                        cleanup_error = cleanup_error or exc
         if cleanup_error is not None and raise_errors:
             raise MCPConnectionError("MCP stdio client cleanup failed") from cleanup_error
 
