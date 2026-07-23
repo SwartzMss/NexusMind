@@ -58,6 +58,38 @@ Call the built-in echo tool:
 nexusmind tools call echo '{"text":"hello"}'
 ```
 
+## MCP Stdio Tools
+
+MCP server configuration is read from a JSON file. Treat this file as sensitive if it contains environment variables or secrets.
+
+Example `mcp.json`:
+
+```json
+{
+  "servers": {
+    "demo": {
+      "transport": "stdio",
+      "command": "python",
+      "args": ["tests/fixtures/mcp_echo_server.py"],
+      "cwd": null,
+      "env": {}
+    }
+  }
+}
+```
+
+List tools exposed by the server:
+
+```powershell
+nexusmind mcp tools --config mcp.json --server demo
+```
+
+Call a discovered MCP tool through the NexusMind registry and executor:
+
+```powershell
+nexusmind mcp call --config mcp.json --server demo --tool demo__echo_290c9db7d5 --arguments '{"text":"hello"}'
+```
+
 ## Test
 
 ```powershell

@@ -43,6 +43,20 @@ class ToolRegistry:
             validator=Draft202012Validator(definition.input_schema),
         )
 
+    def register_many(self, tools: list[Tool]) -> None:
+        staged: dict[str, _RegisteredTool] = {}
+        for tool in tools:
+            definition = _copy_tool_definition(tool.definition)
+            validate_tool_definition(definition)
+            if definition.name in self._tools or definition.name in staged:
+                raise ToolRegistryError(f"Tool already registered: {definition.name}")
+            staged[definition.name] = _RegisteredTool(
+                tool=tool,
+                definition=definition,
+                validator=Draft202012Validator(definition.input_schema),
+            )
+        self._tools.update(staged)
+
     def get(self, name: str) -> Tool:
         return self._get_registered(name).tool
 
