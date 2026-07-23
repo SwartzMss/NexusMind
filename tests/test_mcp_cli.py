@@ -130,6 +130,38 @@ def test_mcp_call_outputs_result_through_executor(monkeypatch, tmp_path, capsys)
     assert captured.err == ""
 
 
+def test_mcp_call_success_output_escapes_c1_control_characters(monkeypatch, tmp_path, capsys) -> None:
+    class UnsafeResultClient(FakeClient):
+        async def call_tool(self, name, arguments):
+            return Result(content=[TextBlock("\u009b2J")], structuredContent={"text": "\u009b2J"})
+
+    monkeypatch.setattr(cli, "MCPStdioClient", UnsafeResultClient)
+    path = _config_file(tmp_path)
+
+    assert (
+        cli.main(
+            [
+                "mcp",
+                "call",
+                "--config",
+                str(path),
+                "--server",
+                "demo",
+                "--tool",
+                "demo__echo_290c9db7d5",
+                "--arguments",
+                '{"text":"hello"}',
+            ]
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert "\u009b" not in captured.out
+    assert "\\u009b2J" in captured.out
+    assert captured.err == ""
+
+
 def test_mcp_bad_config_returns_nonzero(tmp_path, capsys) -> None:
     path = tmp_path / "mcp.json"
     path.write_text(json.dumps({"servers": {"demo": {"transport": "stdio"}}}), encoding="utf-8")

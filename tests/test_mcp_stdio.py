@@ -159,3 +159,32 @@ def test_stdio_cleanup_attempts_all_resources_when_session_exit_raises_base_exce
     asyncio.run(run())
 
     assert events == ["session.exit", "stdio.exit", "errlog.close"]
+
+
+def test_stdio_cancel_during_normal_cleanup_propagates_cancelled_error(monkeypatch) -> None:
+    events: list[str] = []
+
+    class FakeErrlog:
+        def close(self):
+            events.append("errlog.close")
+
+    class FakeStdioContext:
+        async def __aexit__(self, exc_type, exc, tb):
+            events.append("stdio.exit")
+
+    class FakeSessionContext:
+        async def __aexit__(self, exc_type, exc, tb):
+            events.append("session.exit")
+            raise asyncio.CancelledError()
+
+    async def run():
+        client = stdio.MCPStdioClient(MCPStdioServerConfig(server_id="demo", command="python"))
+        client._session_context = FakeSessionContext()
+        client._stdio_context = FakeStdioContext()
+        client._errlog = FakeErrlog()
+        await client._cleanup(raise_errors=True)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(run())
+
+    assert events == ["session.exit", "stdio.exit", "errlog.close"]

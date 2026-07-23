@@ -80,26 +80,44 @@ class MCPStdioClient:
         self._session_context = None
         self._stdio_context = None
         self._errlog = None
-        cleanup_error: BaseException | None = None
+        cleanup_error: Exception | None = None
+        base_error: BaseException | None = None
         try:
             if session_context is not None:
                 try:
                     await session_context.__aexit__(None, None, None)
+                except (asyncio.CancelledError, KeyboardInterrupt, SystemExit) as exc:
+                    base_error = base_error or exc
                 except BaseException as exc:
-                    cleanup_error = cleanup_error or exc
+                    if isinstance(exc, Exception):
+                        cleanup_error = cleanup_error or exc
+                    else:
+                        base_error = base_error or exc
         finally:
             try:
                 if stdio_context is not None:
                     try:
                         await stdio_context.__aexit__(None, None, None)
+                    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit) as exc:
+                        base_error = base_error or exc
                     except BaseException as exc:
-                        cleanup_error = cleanup_error or exc
+                        if isinstance(exc, Exception):
+                            cleanup_error = cleanup_error or exc
+                        else:
+                            base_error = base_error or exc
             finally:
                 if errlog is not None:
                     try:
                         errlog.close()
+                    except (KeyboardInterrupt, SystemExit) as exc:
+                        base_error = base_error or exc
                     except BaseException as exc:
-                        cleanup_error = cleanup_error or exc
+                        if isinstance(exc, Exception):
+                            cleanup_error = cleanup_error or exc
+                        else:
+                            base_error = base_error or exc
+        if base_error is not None:
+            raise base_error
         if cleanup_error is not None and raise_errors:
             raise MCPConnectionError("MCP stdio client cleanup failed") from cleanup_error
 

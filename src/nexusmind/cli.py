@@ -95,7 +95,7 @@ async def _tools(args: argparse.Namespace) -> int:
         if result.error:
             print(f"{result.error.code.value}: {result.error.message}", file=sys.stderr)
             return 2 if result.error.code in {ToolErrorCode.TOOL_NOT_FOUND, ToolErrorCode.INVALID_ARGUMENTS} else 1
-        print(json.dumps(result.output, ensure_ascii=False, sort_keys=True))
+        print(json.dumps(result.output, ensure_ascii=True, sort_keys=True))
         return 0
     return 2
 
@@ -144,7 +144,7 @@ async def _mcp(args: argparse.Namespace) -> int:
                 if result.error:
                     print(f"{result.error.code.value}: {result.error.message}", file=sys.stderr)
                     return 2 if result.error.code in {ToolErrorCode.TOOL_NOT_FOUND, ToolErrorCode.INVALID_ARGUMENTS} else 1
-                print(json.dumps(result.output, ensure_ascii=False, sort_keys=True))
+                print(json.dumps(result.output, ensure_ascii=True, sort_keys=True))
                 return 0
     except MCPError as exc:
         print(f"MCP error: {exc}", file=sys.stderr)
