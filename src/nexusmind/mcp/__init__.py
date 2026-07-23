@@ -1,3 +1,4 @@
+from nexusmind.mcp.client import MCPRemoteTool
 from nexusmind.mcp.config import MCPStdioServerConfig, load_mcp_server_config
 from nexusmind.mcp.errors import MCPConfigError, MCPConnectionError, MCPDiscoveryError, MCPError, MCPToolCallError
 from nexusmind.mcp.naming import mcp_tool_local_name
@@ -9,6 +10,7 @@ __all__ = [
     "MCPConnectionError",
     "MCPDiscoveryError",
     "MCPError",
+    "MCPRemoteTool",
     "MCPStdioClient",
     "MCPStdioServerConfig",
     "MCPToolAdapter",

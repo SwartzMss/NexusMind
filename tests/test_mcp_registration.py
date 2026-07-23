@@ -5,6 +5,7 @@ import pytest
 
 from nexusmind.mcp.tool_adapter import register_mcp_tools
 from nexusmind.mcp.naming import mcp_tool_local_name
+from nexusmind.mcp.client import MCPRemoteTool
 from nexusmind.tools import ToolDefinition, ToolRegistry, ToolRegistryError
 from nexusmind.tools.builtin import EchoTool
 
@@ -31,7 +32,7 @@ def test_register_mcp_tools_registers_all_adapters() -> None:
     registry = ToolRegistry()
     definitions = asyncio.run(
         register_mcp_tools(
-            FakeClient([RemoteTool("echo", {"type": "object", "properties": {}})]),
+            FakeClient([MCPRemoteTool("echo", None, {"type": "object", "properties": {}})]),
             "demo",
             registry,
         )
@@ -55,7 +56,7 @@ def test_register_mcp_tools_rolls_back_on_conflict() -> None:
     registry.register(ConflictingTool())
 
     with pytest.raises(ToolRegistryError):
-        asyncio.run(register_mcp_tools(FakeClient([RemoteTool("echo", {"type": "object"})]), "demo", registry))
+        asyncio.run(register_mcp_tools(FakeClient([MCPRemoteTool("echo", None, {"type": "object"})]), "demo", registry))
 
     assert len(registry.list_definitions()) == 1
 
@@ -64,7 +65,7 @@ def test_mcp_tool_cannot_override_builtin_tool() -> None:
     registry = ToolRegistry()
     registry.register(EchoTool())
 
-    asyncio.run(register_mcp_tools(FakeClient([RemoteTool("echo", {"type": "object"})]), "demo", registry))
+    asyncio.run(register_mcp_tools(FakeClient([MCPRemoteTool("echo", None, {"type": "object"})]), "demo", registry))
 
     assert registry.contains("echo")
     assert len(registry.list_definitions()) == 2

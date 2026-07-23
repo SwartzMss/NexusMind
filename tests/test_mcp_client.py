@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from nexusmind.mcp.client import call_mcp_tool, list_all_mcp_tools
+from nexusmind.mcp.client import MCPRemoteTool, call_mcp_tool, list_all_mcp_tools
 from nexusmind.mcp.errors import MCPConnectionError, MCPDiscoveryError, MCPToolCallError
 
 
@@ -16,6 +16,11 @@ class Page:
 @dataclass
 class Tool:
     name: str
+    inputSchema: dict | None = None
+
+    def __post_init__(self) -> None:
+        if self.inputSchema is None:
+            self.inputSchema = {"type": "object", "properties": {}}
 
 
 class PagedSession:
@@ -36,6 +41,8 @@ def test_list_all_mcp_tools_reads_pages_and_sorts() -> None:
     tools = asyncio.run(run())
 
     assert [tool.name for tool in tools] == ["alpha", "zeta"]
+    assert all(isinstance(tool, MCPRemoteTool) for tool in tools)
+    assert all(not isinstance(tool, Tool) for tool in tools)
 
 
 def test_list_all_mcp_tools_rejects_repeated_cursor() -> None:

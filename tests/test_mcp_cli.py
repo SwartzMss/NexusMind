@@ -2,6 +2,7 @@ import json
 from dataclasses import dataclass
 
 from nexusmind import cli
+from nexusmind.mcp.client import MCPRemoteTool
 
 
 @dataclass
@@ -25,10 +26,13 @@ class Result:
 
 
 class FakeClient:
+    entered = 0
+
     def __init__(self, config) -> None:
         self.config = config
 
     async def __aenter__(self):
+        type(self).entered += 1
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
@@ -36,10 +40,10 @@ class FakeClient:
 
     async def list_tools(self):
         return [
-            RemoteTool(
+            MCPRemoteTool(
                 name="echo",
                 description="Echo text",
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {"text": {"type": "string"}},
                     "required": ["text"],
@@ -78,10 +82,10 @@ def test_mcp_tools_sanitizes_untrusted_terminal_output(monkeypatch, tmp_path, ca
     class UnsafeClient(FakeClient):
         async def list_tools(self):
             return [
-                RemoteTool(
+                MCPRemoteTool(
                     name="bad\nname\t\x1b]0;fake title\x07",
                     description="line1\nFAKE_TOOL\tadmin\t\x1b[2J" + ("x" * 200),
-                    inputSchema={"type": "object", "properties": {}},
+                    input_schema={"type": "object", "properties": {}},
                 )
             ]
 
@@ -137,6 +141,7 @@ def test_mcp_bad_config_returns_nonzero(tmp_path, capsys) -> None:
 
 
 def test_mcp_call_invalid_json_returns_nonzero(monkeypatch, tmp_path, capsys) -> None:
+    FakeClient.entered = 0
     monkeypatch.setattr(cli, "MCPStdioClient", FakeClient)
     path = _config_file(tmp_path)
 
@@ -144,3 +149,16 @@ def test_mcp_call_invalid_json_returns_nonzero(monkeypatch, tmp_path, capsys) ->
 
     captured = capsys.readouterr()
     assert "Invalid JSON arguments" in captured.err
+    assert FakeClient.entered == 0
+
+
+def test_mcp_call_non_object_arguments_do_not_start_client(monkeypatch, tmp_path, capsys) -> None:
+    FakeClient.entered = 0
+    monkeypatch.setattr(cli, "MCPStdioClient", FakeClient)
+    path = _config_file(tmp_path)
+
+    assert cli.main(["mcp", "call", "--config", str(path), "--server", "demo", "--tool", "echo", "--arguments", "[]"]) == 2
+
+    captured = capsys.readouterr()
+    assert "Tool arguments must be a JSON object" in captured.err
+    assert FakeClient.entered == 0

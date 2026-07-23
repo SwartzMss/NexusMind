@@ -107,6 +107,16 @@ def _build_builtin_tool_registry() -> ToolRegistry:
 
 
 async def _mcp(args: argparse.Namespace) -> int:
+    arguments = None
+    if args.mcp_command == "call":
+        try:
+            arguments = json.loads(args.arguments)
+        except json.JSONDecodeError as exc:
+            print(f"Invalid JSON arguments: {exc.msg}", file=sys.stderr)
+            return 2
+        if not isinstance(arguments, dict):
+            print("Tool arguments must be a JSON object.", file=sys.stderr)
+            return 2
     try:
         config = load_mcp_server_config(args.config, args.server)
         async with MCPStdioClient(config) as client:
@@ -129,14 +139,6 @@ async def _mcp(args: argparse.Namespace) -> int:
                     )
                 return 0
             if args.mcp_command == "call":
-                try:
-                    arguments = json.loads(args.arguments)
-                except json.JSONDecodeError as exc:
-                    print(f"Invalid JSON arguments: {exc.msg}", file=sys.stderr)
-                    return 2
-                if not isinstance(arguments, dict):
-                    print("Tool arguments must be a JSON object.", file=sys.stderr)
-                    return 2
                 call = ToolCall(id="cli-mcp-call-1", name=args.tool, arguments=arguments)
                 result = await ToolExecutor(registry, timeout=config.request_timeout).execute(call)
                 if result.error:

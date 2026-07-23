@@ -4,6 +4,8 @@ import asyncio
 import inspect
 from collections.abc import Sequence
 from copy import deepcopy
+from dataclasses import dataclass
+import math
 from typing import Any
 
 from jsonschema.exceptions import SchemaError
@@ -17,17 +19,24 @@ _MAX_DISCOVERED_TOOLS = 1000
 
 
 class MCPClient:
-    async def list_tools(self) -> list[Any]:
+    async def list_tools(self) -> list[MCPRemoteTool]:
         raise NotImplementedError
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         raise NotImplementedError
 
 
-async def list_all_mcp_tools(session: Any, request_timeout: float) -> list[Any]:
+@dataclass(frozen=True, slots=True)
+class MCPRemoteTool:
+    name: str
+    description: str | None
+    input_schema: dict[str, Any]
+
+
+async def list_all_mcp_tools(session: Any, request_timeout: float) -> list[MCPRemoteTool]:
     cursor: str | None = None
     seen_cursors: set[str] = set()
-    tools: list[Any] = []
+    tools: list[MCPRemoteTool] = []
     for _ in range(_MAX_TOOL_LIST_PAGES):
         try:
             result = await asyncio.wait_for(_call_list_tools(session, cursor), timeout=request_timeout)
@@ -40,12 +49,12 @@ async def list_all_mcp_tools(session: Any, request_timeout: float) -> list[Any]:
         page_tools = getattr(result, "tools", None)
         if not isinstance(page_tools, Sequence):
             raise MCPDiscoveryError("MCP tools/list returned invalid tools")
-        tools.extend(page_tools)
+        tools.extend(_mcp_tool_to_remote_tool(tool) for tool in page_tools)
         if len(tools) > _MAX_DISCOVERED_TOOLS:
             raise MCPDiscoveryError("MCP tools/list returned too many tools")
         cursor = getattr(result, "nextCursor", None) or getattr(result, "next_cursor", None)
         if not cursor:
-            return sorted(tools, key=lambda tool: str(getattr(tool, "name", "")))
+            return sorted(tools, key=lambda tool: tool.name)
         if cursor in seen_cursors:
             raise MCPDiscoveryError("MCP tools/list returned a repeated cursor")
         seen_cursors.add(cursor)
@@ -63,7 +72,21 @@ async def call_mcp_tool(session: Any, name: str, arguments: dict[str, Any], requ
         raise MCPToolCallError("MCP tool call failed") from exc
 
 
-def mcp_tool_to_definition(local_name: str, remote_tool: Any) -> ToolDefinition:
+def mcp_tool_to_definition(local_name: str, remote_tool: MCPRemoteTool) -> ToolDefinition:
+    try:
+        Draft202012Validator.check_schema(remote_tool.input_schema)
+    except SchemaError as exc:
+        raise MCPDiscoveryError(f"MCP tool {remote_tool.name} has an invalid input schema") from exc
+    if remote_tool.input_schema.get("type") != "object":
+        raise MCPDiscoveryError(f"MCP tool {remote_tool.name} input schema must describe an object")
+    return ToolDefinition(
+        name=local_name,
+        description=remote_tool.description,
+        input_schema=deepcopy(remote_tool.input_schema),
+    )
+
+
+def _mcp_tool_to_remote_tool(remote_tool: Any) -> MCPRemoteTool:
     remote_name = getattr(remote_tool, "name", None)
     if not isinstance(remote_name, str) or not remote_name:
         raise MCPDiscoveryError("MCP tool is missing a valid name")
@@ -77,8 +100,8 @@ def mcp_tool_to_definition(local_name: str, remote_tool: Any) -> ToolDefinition:
     if schema.get("type") != "object":
         raise MCPDiscoveryError(f"MCP tool {remote_name} input schema must describe an object")
     description = getattr(remote_tool, "description", None)
-    return ToolDefinition(
-        name=local_name,
+    return MCPRemoteTool(
+        name=remote_name,
         description=description if isinstance(description, str) else None,
         input_schema=schema,
     )
@@ -131,6 +154,8 @@ def _normalize_content_block(block: Any) -> dict[str, Any]:
 
 
 def _json_safe(value: Any) -> Any:
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, list):
