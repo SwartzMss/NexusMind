@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import pytest
 
 from nexusmind.mcp.client import call_mcp_tool, list_all_mcp_tools
-from nexusmind.mcp.errors import MCPConnectionError, MCPToolCallError
+from nexusmind.mcp.errors import MCPConnectionError, MCPDiscoveryError, MCPToolCallError
 
 
 @dataclass
@@ -36,6 +36,34 @@ def test_list_all_mcp_tools_reads_pages_and_sorts() -> None:
     tools = asyncio.run(run())
 
     assert [tool.name for tool in tools] == ["alpha", "zeta"]
+
+
+def test_list_all_mcp_tools_rejects_repeated_cursor() -> None:
+    class RepeatingCursorSession:
+        async def list_tools(self, cursor=None):
+            return Page([Tool("echo")], nextCursor="same-cursor")
+
+    async def run():
+        return await list_all_mcp_tools(RepeatingCursorSession(), 1)
+
+    with pytest.raises(MCPDiscoveryError, match="repeated cursor"):
+        asyncio.run(run())
+
+
+def test_list_all_mcp_tools_rejects_too_many_pages() -> None:
+    class ManyPagesSession:
+        def __init__(self) -> None:
+            self.index = 0
+
+        async def list_tools(self, cursor=None):
+            self.index += 1
+            return Page([], nextCursor=f"cursor-{self.index}")
+
+    async def run():
+        return await list_all_mcp_tools(ManyPagesSession(), 1)
+
+    with pytest.raises(MCPDiscoveryError, match="maximum page count"):
+        asyncio.run(run())
 
 
 def test_list_all_mcp_tools_times_out() -> None:
@@ -72,4 +100,3 @@ def test_call_mcp_tool_propagates_cancelled_error() -> None:
 
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(run())
-

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import tempfile
+import os
 from datetime import timedelta
 from typing import Any
 
@@ -34,7 +34,7 @@ class MCPStdioClient:
             env=self._config.env or None,
         )
         try:
-            self._errlog = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+            self._errlog = _open_errlog()
             self._stdio_context = stdio_client(params, errlog=self._errlog)
             read_stream, write_stream = await asyncio.wait_for(
                 self._stdio_context.__aenter__(), timeout=self._config.connect_timeout
@@ -92,3 +92,7 @@ class MCPStdioClient:
         if errlog is not None:
             with contextlib.suppress(Exception):
                 errlog.close()
+
+
+def _open_errlog() -> Any:
+    return open(os.devnull, "w", encoding="utf-8")

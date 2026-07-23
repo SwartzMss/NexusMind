@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 
 from nexusmind.config import ConfigError, load_model_config_from_env
@@ -114,8 +115,18 @@ async def _mcp(args: argparse.Namespace) -> int:
             if args.mcp_command == "tools":
                 for definition in definitions:
                     remote_name = _remote_name_from_registry_tool(registry, definition.name)
-                    description = definition.description or ""
-                    print(f"{definition.name}\t{remote_name}\t{description}")
+                    description = _safe_cli_field(definition.description or "", max_length=160)
+                    print(
+                        json.dumps(
+                            {
+                                "name": definition.name,
+                                "remote_name": _safe_cli_field(remote_name, max_length=160),
+                                "description": description,
+                            },
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        )
+                    )
                 return 0
             if args.mcp_command == "call":
                 try:
@@ -142,6 +153,17 @@ async def _mcp(args: argparse.Namespace) -> int:
 def _remote_name_from_registry_tool(registry: ToolRegistry, local_name: str) -> str:
     tool = registry.get(local_name)
     return str(getattr(tool, "remote_name", ""))
+
+
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def _safe_cli_field(value: str, *, max_length: int) -> str:
+    sanitized = _CONTROL_CHARS_RE.sub(" ", value)
+    sanitized = " ".join(sanitized.split())
+    if len(sanitized) <= max_length:
+        return sanitized
+    return sanitized[: max_length - 3].rstrip() + "..."
 
 
 if __name__ == "__main__":

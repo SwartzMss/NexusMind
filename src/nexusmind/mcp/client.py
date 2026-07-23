@@ -12,6 +12,9 @@ from jsonschema.validators import Draft202012Validator
 from nexusmind.mcp.errors import MCPConnectionError, MCPDiscoveryError, MCPToolCallError
 from nexusmind.tools.contracts import ToolDefinition, ToolErrorCode
 
+_MAX_TOOL_LIST_PAGES = 100
+_MAX_DISCOVERED_TOOLS = 1000
+
 
 class MCPClient:
     async def list_tools(self) -> list[Any]:
@@ -23,8 +26,9 @@ class MCPClient:
 
 async def list_all_mcp_tools(session: Any, request_timeout: float) -> list[Any]:
     cursor: str | None = None
+    seen_cursors: set[str] = set()
     tools: list[Any] = []
-    while True:
+    for _ in range(_MAX_TOOL_LIST_PAGES):
         try:
             result = await asyncio.wait_for(_call_list_tools(session, cursor), timeout=request_timeout)
         except asyncio.CancelledError:
@@ -37,9 +41,15 @@ async def list_all_mcp_tools(session: Any, request_timeout: float) -> list[Any]:
         if not isinstance(page_tools, Sequence):
             raise MCPDiscoveryError("MCP tools/list returned invalid tools")
         tools.extend(page_tools)
+        if len(tools) > _MAX_DISCOVERED_TOOLS:
+            raise MCPDiscoveryError("MCP tools/list returned too many tools")
         cursor = getattr(result, "nextCursor", None) or getattr(result, "next_cursor", None)
         if not cursor:
             return sorted(tools, key=lambda tool: str(getattr(tool, "name", "")))
+        if cursor in seen_cursors:
+            raise MCPDiscoveryError("MCP tools/list returned a repeated cursor")
+        seen_cursors.add(cursor)
+    raise MCPDiscoveryError("MCP tools/list exceeded the maximum page count")
 
 
 async def call_mcp_tool(session: Any, name: str, arguments: dict[str, Any], request_timeout: float) -> Any:
@@ -130,4 +140,3 @@ def _json_safe(value: Any) -> Any:
     if hasattr(value, "model_dump"):
         return _json_safe(value.model_dump())
     return str(type(value).__name__)
-

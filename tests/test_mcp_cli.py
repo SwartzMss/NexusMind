@@ -68,9 +68,35 @@ def test_mcp_tools_outputs_discovered_tools(monkeypatch, tmp_path, capsys) -> No
     assert cli.main(["mcp", "tools", "--config", str(path), "--server", "demo"]) == 0
 
     captured = capsys.readouterr()
-    assert "demo__echo_" in captured.out
-    assert "echo" in captured.out
+    line = json.loads(captured.out)
+    assert line["name"].startswith("demo__echo_")
+    assert line["remote_name"] == "echo"
     assert captured.err == ""
+
+
+def test_mcp_tools_sanitizes_untrusted_terminal_output(monkeypatch, tmp_path, capsys) -> None:
+    class UnsafeClient(FakeClient):
+        async def list_tools(self):
+            return [
+                RemoteTool(
+                    name="bad\nname\t\x1b]0;fake title\x07",
+                    description="line1\nFAKE_TOOL\tadmin\t\x1b[2J" + ("x" * 200),
+                    inputSchema={"type": "object", "properties": {}},
+                )
+            ]
+
+    monkeypatch.setattr(cli, "MCPStdioClient", UnsafeClient)
+    path = _config_file(tmp_path)
+
+    assert cli.main(["mcp", "tools", "--config", str(path), "--server", "demo"]) == 0
+
+    captured = capsys.readouterr()
+    assert "\nFAKE_TOOL" not in captured.out
+    assert "\t" not in captured.out
+    assert "\x1b" not in captured.out
+    assert "\x07" not in captured.out
+    line = json.loads(captured.out)
+    assert len(line["description"]) <= 160
 
 
 def test_mcp_call_outputs_result_through_executor(monkeypatch, tmp_path, capsys) -> None:
