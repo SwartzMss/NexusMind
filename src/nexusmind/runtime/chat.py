@@ -10,7 +10,7 @@ from nexusmind.models.base import ChatModel
 from nexusmind.models.tool_calls import ToolCallDelta
 from nexusmind.runtime.events import RuntimeEvent, RuntimeEventType
 from nexusmind.runtime.messages import Message, MessageRole
-from nexusmind.tools.contracts import ToolCall, ToolDefinition, ToolResult
+from nexusmind.tools.contracts import ToolCall, ToolDefinition, ToolError, ToolErrorCode, ToolResult
 from nexusmind.tools.executor import ToolExecutor
 
 _MODEL_EXECUTION_ERROR = "Model execution failed"
@@ -30,6 +30,8 @@ _LIMIT_ERROR = "Agent loop limit exceeded"
 class AgentLoopLimits:
     max_model_turns: int = 8
     max_tool_calls_total: int = 32
+    max_tool_arguments_bytes_per_call: int = 1024 * 1024
+    max_tool_arguments_bytes_total: int = 4 * 1024 * 1024
     max_tool_result_bytes_per_call: int = 1024 * 1024
     max_tool_result_bytes_total: int = 4 * 1024 * 1024
 
@@ -37,6 +39,8 @@ class AgentLoopLimits:
         for field_name in (
             "max_model_turns",
             "max_tool_calls_total",
+            "max_tool_arguments_bytes_per_call",
+            "max_tool_arguments_bytes_total",
             "max_tool_result_bytes_per_call",
             "max_tool_result_bytes_total",
         ):
@@ -72,8 +76,10 @@ class ChatRuntime:
         try:
             model_turns = 0
             tool_calls_total = 0
+            tool_arguments_bytes_total = 0
             tool_result_bytes_total = 0
             executed_tool_call_ids: set[str] = set()
+            allowed_tool_names = {tool.name for tool in tools or []}
             while True:
                 if model_turns >= self._limits.max_model_turns:
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
@@ -128,13 +134,28 @@ class ChatRuntime:
                 if any(call.id in executed_tool_call_ids for call in turn.tool_calls):
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                     return
-                safe_tool_calls = _snapshot_tool_calls(turn.tool_calls)
+                if any(call.name not in allowed_tool_names for call in turn.tool_calls):
+                    yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                    return
+                try:
+                    safe_tool_calls, arguments_size = _snapshot_tool_calls(
+                        turn.tool_calls,
+                        max_bytes_per_call=self._limits.max_tool_arguments_bytes_per_call,
+                        remaining_total_bytes=self._limits.max_tool_arguments_bytes_total - tool_arguments_bytes_total,
+                    )
+                except _JsonLimitExceeded:
+                    yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
+                    return
+                except RuntimeError:
+                    yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                    return
                 if safe_tool_calls is None:
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                     return
                 if tool_calls_total + len(turn.tool_calls) > self._limits.max_tool_calls_total:
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
                     return
+                tool_arguments_bytes_total += arguments_size
                 messages.append(
                     Message(
                         role=MessageRole.ASSISTANT,
@@ -162,7 +183,7 @@ class ChatRuntime:
                             max_bytes_per_call=self._limits.max_tool_result_bytes_per_call,
                             remaining_total_bytes=self._limits.max_tool_result_bytes_total - tool_result_bytes_total,
                         )
-                    except _ToolResultLimitExceeded:
+                    except _JsonLimitExceeded:
                         yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
                         return
                     except RuntimeError:
@@ -220,22 +241,40 @@ def _has_duplicate_call_ids(tool_calls: list[ToolCall]) -> bool:
     return False
 
 
-def _snapshot_tool_calls(tool_calls: list[ToolCall]) -> list[ToolCall] | None:
+def _snapshot_tool_calls(
+    tool_calls: list[ToolCall],
+    *,
+    max_bytes_per_call: int,
+    remaining_total_bytes: int,
+) -> tuple[list[ToolCall], int]:
     snapshotted: list[ToolCall] = []
+    total_size = 0
     for call in tool_calls:
         try:
-            arguments_json = json.dumps(call.arguments, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+            arguments_json, size = _bounded_json(
+                call.arguments,
+                max_bytes=min(max_bytes_per_call, remaining_total_bytes - total_size),
+            )
             arguments = json.loads(arguments_json)
         except (TypeError, ValueError, RecursionError):
-            return None
+            raise RuntimeError("Tool call arguments are not strict JSON") from None
         if not isinstance(arguments, dict):
-            return None
+            raise RuntimeError("Tool call arguments are not a JSON object")
         snapshotted.append(ToolCall(id=call.id, name=call.name, arguments=arguments))
-    return snapshotted
+        total_size += size
+    return snapshotted, total_size
 
 
 def _valid_tool_result(result: ToolResult) -> bool:
-    return (result.error is None) != (result.output is None)
+    if result.error is None:
+        return True
+    return (
+        result.output is None
+        and isinstance(result.error, ToolError)
+        and isinstance(result.error.code, ToolErrorCode)
+        and isinstance(result.error.message, str)
+        and isinstance(result.error.retryable, bool)
+    )
 
 
 def _tool_result_message_content(
@@ -261,20 +300,74 @@ def _tool_result_message_content(
         raise RuntimeError("Tool result is not JSON serializable") from exc
 
 
-class _ToolResultLimitExceeded(RuntimeError):
+class _JsonLimitExceeded(RuntimeError):
     pass
 
 
 def _bounded_json(payload: object, *, max_bytes: int) -> tuple[str, int]:
+    _validate_json_safe_with_budget(payload, remaining=max_bytes)
     encoder = json.JSONEncoder(ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     parts: list[str] = []
     size = 0
     for part in encoder.iterencode(payload):
         size += len(part.encode("utf-8"))
         if size > max_bytes:
-            raise _ToolResultLimitExceeded("Tool result exceeds size limit")
+            raise _JsonLimitExceeded("JSON payload exceeds size limit")
         parts.append(part)
     return "".join(parts), size
+
+
+def _validate_json_safe_with_budget(value: object, *, remaining: int) -> int:
+    remaining = _consume_json_overhead(remaining, 1)
+    if value is None or isinstance(value, bool):
+        return _consume_json_overhead(remaining, 4)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return _consume_json_overhead(remaining, len(str(value)))
+    if isinstance(value, float):
+        if value != value or value in {float("inf"), float("-inf")}:
+            raise ValueError("Non-finite JSON number")
+        return _consume_json_overhead(remaining, len(str(value)))
+    if isinstance(value, str):
+        return _consume_json_overhead(remaining, _json_string_size(value))
+    if isinstance(value, list):
+        current = remaining
+        for item in value:
+            current = _validate_json_safe_with_budget(item, remaining=current)
+        return current
+    if isinstance(value, dict):
+        current = remaining
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("JSON object keys must be strings")
+            current = _consume_json_overhead(current, _json_string_size(key))
+            current = _validate_json_safe_with_budget(item, remaining=current)
+        return current
+    raise TypeError("Value is not JSON serializable")
+
+
+def _consume_json_overhead(remaining: int, size: int) -> int:
+    if size > remaining:
+        raise _JsonLimitExceeded("JSON payload exceeds size limit")
+    return remaining - size
+
+
+def _json_string_size(value: str) -> int:
+    size = 2
+    for char in value:
+        codepoint = ord(char)
+        if char in {'"', "\\"}:
+            size += 2
+        elif codepoint <= 0x1F:
+            size += 6
+        elif codepoint <= 0x7F:
+            size += 1
+        elif codepoint <= 0x7FF:
+            size += 2
+        elif codepoint <= 0xFFFF:
+            size += 3
+        else:
+            size += 4
+    return size
 
 
 def _validate_model_event(event: RuntimeEvent, model_started: bool, model_turn_completed: bool) -> str | None:

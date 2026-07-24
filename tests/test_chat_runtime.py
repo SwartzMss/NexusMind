@@ -5,7 +5,7 @@ from nexusmind.models.tool_calls import ToolCallDelta
 from nexusmind.runtime.chat import AgentLoopLimits, ChatRuntime
 from nexusmind.runtime.events import RuntimeEvent, RuntimeEventType
 from nexusmind.tools.builtin import EchoTool
-from nexusmind.tools.contracts import ToolCall, ToolDefinition, ToolResult
+from nexusmind.tools.contracts import ToolCall, ToolDefinition, ToolError, ToolErrorCode, ToolResult
 from nexusmind.tools.executor import ToolExecutor
 from nexusmind.tools.registry import ToolRegistry
 
@@ -455,7 +455,13 @@ def test_runtime_executes_multiple_tool_calls_in_order_even_when_one_fails() -> 
 
     async def collect():
         runtime = ChatRuntime(MultiToolModel(), tool_executor=_executor_with_echo())
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo")])]
+        return [
+            event
+            async for event in runtime.stream_user_message(
+                "hello",
+                tools=[ToolDefinition(name="missing"), ToolDefinition(name="echo")],
+            )
+        ]
 
     events = asyncio.run(collect())
     results = [event.tool_result for event in events if event.type == RuntimeEventType.TOOL_RESULT]
@@ -707,4 +713,130 @@ def test_runtime_enforces_tool_result_size_limit_without_tool_result_event() -> 
 
     assert events[-1].type == RuntimeEventType.RUN_FAILED
     assert RuntimeEventType.TOOL_RESULT not in [event.type for event in events]
+
+
+def test_runtime_rejects_tool_call_name_not_advertised_for_this_run() -> None:
+    class CountingExecutor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute(self, call):
+            self.calls += 1
+            return ToolResult(call_id=call.id, name=call.name, output={"ok": True})
+
+    class UnadvertisedToolModel:
+        async def stream(self, messages, tools=None):
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=ToolCall(id="call_1", name="delete_files", arguments={}))
+            yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+
+    async def collect(executor):
+        runtime = ChatRuntime(UnadvertisedToolModel(), tool_executor=executor)
+        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo")])]
+
+    executor = CountingExecutor()
+    events = asyncio.run(collect(executor))
+
+    assert executor.calls == 0
+    assert events[-1].type == RuntimeEventType.RUN_FAILED
+
+
+def test_runtime_allows_successful_tool_result_with_null_output() -> None:
+    class NullExecutor:
+        async def execute(self, call):
+            return ToolResult(call_id=call.id, name=call.name, output=None)
+
+    class NullToolModel:
+        def __init__(self) -> None:
+            self.messages_by_turn = []
+
+        async def stream(self, messages, tools=None):
+            self.messages_by_turn.append(list(messages))
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            if len(self.messages_by_turn) == 1:
+                yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=ToolCall(id="call_1", name="nullable", arguments={}))
+                yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+            else:
+                yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="stop")
+
+    async def collect(model):
+        runtime = ChatRuntime(model, tool_executor=NullExecutor())
+        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="nullable")])]
+
+    model = NullToolModel()
+    events = asyncio.run(collect(model))
+
+    assert events[-1].type == RuntimeEventType.RUN_COMPLETED
+    assert model.messages_by_turn[1][-1].content == '{"ok":true,"output":null}'
+
+
+def test_runtime_rejects_invalid_tool_error_shape_before_event() -> None:
+    class BadExecutor:
+        async def execute(self, call):
+            return ToolResult(
+                call_id=call.id,
+                name=call.name,
+                error=ToolError(
+                    code=ToolErrorCode.EXECUTION_FAILED,
+                    message="failed",
+                    retryable="yes",  # type: ignore[arg-type]
+                ),
+            )
+
+    class ToolModel:
+        async def stream(self, messages, tools=None):
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=ToolCall(id="call_1", name="echo", arguments={}))
+            yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+
+    async def collect():
+        runtime = ChatRuntime(ToolModel(), tool_executor=BadExecutor())
+        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo")])]
+
+    events = asyncio.run(collect())
+
+    assert events[-1].type == RuntimeEventType.RUN_FAILED
+    assert RuntimeEventType.TOOL_RESULT not in [event.type for event in events]
+
+
+def test_runtime_enforces_tool_argument_size_limit_before_executing_tool() -> None:
+    class CountingExecutor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute(self, call):
+            self.calls += 1
+            return ToolResult(call_id=call.id, name=call.name, output={})
+
+    class BigArgumentModel:
+        async def stream(self, messages, tools=None):
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=ToolCall(id="call_1", name="echo", arguments={"text": "x" * 100}))
+            yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+
+    async def collect(executor):
+        runtime = ChatRuntime(
+            BigArgumentModel(),
+            tool_executor=executor,
+            limits=AgentLoopLimits(max_tool_arguments_bytes_per_call=20),
+        )
+        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo")])]
+
+    executor = CountingExecutor()
+    events = asyncio.run(collect(executor))
+
+    assert executor.calls == 0
+    assert events[-1].type == RuntimeEventType.RUN_FAILED
+
+
+def test_tool_result_repr_redacts_error_message_and_metadata() -> None:
+    result = ToolResult(
+        call_id="call_1",
+        name="echo",
+        error=ToolError(code=ToolErrorCode.EXECUTION_FAILED, message="sk-live-secret"),
+        metadata={"token": "secret"},
+    )
+
+    assert "sk-live-secret" not in repr(result)
+    assert "secret" not in repr(result)
 
