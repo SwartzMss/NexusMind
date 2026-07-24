@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -34,7 +35,7 @@ class Message:
             self,
             "tool_calls",
             tuple(
-                ToolCall(id=call.id, name=call.name, arguments=dict(call.arguments))
+                ToolCall(id=call.id, name=call.name, arguments=deepcopy(call.arguments))
                 for call in self.tool_calls
             ),
         )

@@ -73,34 +73,42 @@ class ChatRuntime:
             model_turns = 0
             tool_calls_total = 0
             tool_result_bytes_total = 0
+            executed_tool_call_ids: set[str] = set()
             while True:
                 if model_turns >= self._limits.max_model_turns:
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
                     return
                 model_turns += 1
                 turn = _ModelTurn()
-                async for event in self._model.stream(messages, tools=tools):
-                    validation_error = _validate_model_event(event, turn.model_started, turn.completed)
-                    if validation_error:
-                        yield RuntimeEvent(RuntimeEventType.MODEL_FAILED, error=validation_error)
-                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=validation_error)
-                        return
-                    if event.type == RuntimeEventType.MODEL_STARTED:
-                        turn.model_started = True
-                    elif event.type == RuntimeEventType.MODEL_FAILED:
-                        yield RuntimeEvent(RuntimeEventType.MODEL_FAILED, error=_MODEL_EXECUTION_ERROR)
-                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_MODEL_EXECUTION_ERROR)
-                        return
-                    elif event.type == RuntimeEventType.TEXT_DELTA:
-                        turn.text_parts.append(cast(str, event.text))
-                    elif event.type == RuntimeEventType.TOOL_CALL_COMPLETED:
-                        turn.tool_calls.append(cast(ToolCall, event.tool_call))
-                    elif event.type == RuntimeEventType.MODEL_TURN_COMPLETED:
-                        turn.completed = True
-                        turn.finish_reason = event.finish_reason
-                        turn.completed_event = event
-                        continue
-                    yield event
+                try:
+                    async for event in self._model.stream(messages, tools=tools):
+                        validation_error = _validate_model_event(event, turn.model_started, turn.completed)
+                        if validation_error:
+                            yield RuntimeEvent(RuntimeEventType.MODEL_FAILED, error=validation_error)
+                            yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=validation_error)
+                            return
+                        if event.type == RuntimeEventType.MODEL_STARTED:
+                            turn.model_started = True
+                        elif event.type == RuntimeEventType.MODEL_FAILED:
+                            yield RuntimeEvent(RuntimeEventType.MODEL_FAILED, error=_MODEL_EXECUTION_ERROR)
+                            yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_MODEL_EXECUTION_ERROR)
+                            return
+                        elif event.type == RuntimeEventType.TEXT_DELTA:
+                            turn.text_parts.append(cast(str, event.text))
+                        elif event.type == RuntimeEventType.TOOL_CALL_COMPLETED:
+                            turn.tool_calls.append(cast(ToolCall, event.tool_call))
+                        elif event.type == RuntimeEventType.MODEL_TURN_COMPLETED:
+                            turn.completed = True
+                            turn.finish_reason = event.finish_reason
+                            turn.completed_event = event
+                            continue
+                        yield event
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    yield RuntimeEvent(RuntimeEventType.MODEL_FAILED, error=_MODEL_EXECUTION_ERROR)
+                    yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_MODEL_EXECUTION_ERROR)
+                    return
                 terminal_error = _validate_completed_turn(turn)
                 if terminal_error:
                     yield RuntimeEvent(RuntimeEventType.MODEL_FAILED, error=terminal_error)
@@ -111,12 +119,17 @@ class ChatRuntime:
                 if turn.finish_reason != "tool_calls":
                     yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
                     return
-                if self._tool_executor is None and tools:
+                if self._tool_executor is None:
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error="Tool executor is not configured")
                     return
-                if self._tool_executor is None:
-                    return
                 if _has_duplicate_call_ids(turn.tool_calls):
+                    yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                    return
+                if any(call.id in executed_tool_call_ids for call in turn.tool_calls):
+                    yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                    return
+                safe_tool_calls = _snapshot_tool_calls(turn.tool_calls)
+                if safe_tool_calls is None:
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                     return
                 if tool_calls_total + len(turn.tool_calls) > self._limits.max_tool_calls_total:
@@ -126,28 +139,38 @@ class ChatRuntime:
                     Message(
                         role=MessageRole.ASSISTANT,
                         content="".join(turn.text_parts) or None,
-                        tool_calls=tuple(turn.tool_calls),
+                        tool_calls=tuple(safe_tool_calls),
                     )
                 )
-                for call in turn.tool_calls:
-                    result = await self._tool_executor.execute(call)
+                for call in safe_tool_calls:
+                    try:
+                        result = await self._tool_executor.execute(call)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                        return
                     if result.call_id != call.id or result.name != call.name:
                         yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                         return
+                    if not _valid_tool_result(result):
+                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                        return
                     try:
-                        content_json = _tool_result_message_content(result)
+                        content_json, size = _tool_result_message_content(
+                            result,
+                            max_bytes_per_call=self._limits.max_tool_result_bytes_per_call,
+                            remaining_total_bytes=self._limits.max_tool_result_bytes_total - tool_result_bytes_total,
+                        )
+                    except _ToolResultLimitExceeded:
+                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
+                        return
                     except RuntimeError:
                         yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                         return
-                    size = len(content_json.encode("utf-8"))
-                    if size > self._limits.max_tool_result_bytes_per_call:
-                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
-                        return
-                    if tool_result_bytes_total + size > self._limits.max_tool_result_bytes_total:
-                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
-                        return
                     tool_result_bytes_total += size
                     tool_calls_total += 1
+                    executed_tool_call_ids.add(call.id)
                     yield RuntimeEvent(RuntimeEventType.TOOL_RESULT, tool_result=result)
                     messages.append(
                         Message(
@@ -161,8 +184,7 @@ class ChatRuntime:
         except asyncio.CancelledError:
             raise
         except Exception:
-            yield RuntimeEvent(RuntimeEventType.MODEL_FAILED, error=_MODEL_EXECUTION_ERROR)
-            yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_MODEL_EXECUTION_ERROR)
+            yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
 
 
 class _ModelTurn:
@@ -198,7 +220,30 @@ def _has_duplicate_call_ids(tool_calls: list[ToolCall]) -> bool:
     return False
 
 
-def _tool_result_message_content(result: ToolResult) -> str:
+def _snapshot_tool_calls(tool_calls: list[ToolCall]) -> list[ToolCall] | None:
+    snapshotted: list[ToolCall] = []
+    for call in tool_calls:
+        try:
+            arguments_json = json.dumps(call.arguments, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+            arguments = json.loads(arguments_json)
+        except (TypeError, ValueError, RecursionError):
+            return None
+        if not isinstance(arguments, dict):
+            return None
+        snapshotted.append(ToolCall(id=call.id, name=call.name, arguments=arguments))
+    return snapshotted
+
+
+def _valid_tool_result(result: ToolResult) -> bool:
+    return (result.error is None) != (result.output is None)
+
+
+def _tool_result_message_content(
+    result: ToolResult,
+    *,
+    max_bytes_per_call: int,
+    remaining_total_bytes: int,
+) -> tuple[str, int]:
     if result.error is not None:
         payload = {
             "ok": False,
@@ -211,9 +256,25 @@ def _tool_result_message_content(result: ToolResult) -> str:
     else:
         payload = {"ok": True, "output": result.output}
     try:
-        return json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        return _bounded_json(payload, max_bytes=min(max_bytes_per_call, remaining_total_bytes))
     except (TypeError, ValueError, RecursionError) as exc:
         raise RuntimeError("Tool result is not JSON serializable") from exc
+
+
+class _ToolResultLimitExceeded(RuntimeError):
+    pass
+
+
+def _bounded_json(payload: object, *, max_bytes: int) -> tuple[str, int]:
+    encoder = json.JSONEncoder(ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    parts: list[str] = []
+    size = 0
+    for part in encoder.iterencode(payload):
+        size += len(part.encode("utf-8"))
+        if size > max_bytes:
+            raise _ToolResultLimitExceeded("Tool result exceeds size limit")
+        parts.append(part)
+    return "".join(parts), size
 
 
 def _validate_model_event(event: RuntimeEvent, model_started: bool, model_turn_completed: bool) -> str | None:
