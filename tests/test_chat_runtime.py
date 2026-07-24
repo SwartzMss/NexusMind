@@ -128,6 +128,88 @@ def test_runtime_treats_model_failed_as_terminal() -> None:
     assert events[-1].error == "provider failed"
 
 
+def test_runtime_fails_when_tool_finish_has_no_completed_tool_call() -> None:
+    class MissingToolCallModel:
+        async def stream(self, messages, tools=None):
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            yield RuntimeEvent(
+                RuntimeEventType.MODEL_TURN_COMPLETED,
+                finish_reason="tool_calls",
+            )
+
+    async def collect():
+        return [
+            event
+            async for event in ChatRuntime(MissingToolCallModel()).stream_user_message("hello")
+        ]
+
+    events = asyncio.run(collect())
+
+    assert [event.type for event in events] == [
+        RuntimeEventType.RUN_STARTED,
+        RuntimeEventType.MODEL_STARTED,
+        RuntimeEventType.MODEL_TURN_COMPLETED,
+        RuntimeEventType.MODEL_FAILED,
+        RuntimeEventType.RUN_FAILED,
+    ]
+
+
+def test_runtime_rejects_model_events_outside_the_model_whitelist() -> None:
+    invalid_types = [
+        RuntimeEventType.RUN_STARTED,
+        RuntimeEventType.RUN_COMPLETED,
+        RuntimeEventType.RUN_FAILED,
+        RuntimeEventType.TOOL_CALL,
+        RuntimeEventType.TOOL_RESULT,
+    ]
+
+    for invalid_type in invalid_types:
+        class InvalidEventModel:
+            async def stream(self, messages, tools=None):
+                yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+                yield RuntimeEvent(invalid_type)
+
+        async def collect():
+            return [
+                event
+                async for event in ChatRuntime(InvalidEventModel()).stream_user_message(
+                    "hello"
+                )
+            ]
+
+        events = asyncio.run(collect())
+        assert events[-2].type == RuntimeEventType.MODEL_FAILED
+        assert events[-1].type == RuntimeEventType.RUN_FAILED
+
+
+def test_runtime_rejects_model_events_with_missing_payloads() -> None:
+    invalid_events = [
+        RuntimeEvent(RuntimeEventType.TEXT_DELTA),
+        RuntimeEvent(RuntimeEventType.TOOL_CALL_DELTA),
+        RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED),
+        RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED),
+        RuntimeEvent(RuntimeEventType.MODEL_FAILED),
+    ]
+
+    for invalid_event in invalid_events:
+        class InvalidPayloadModel:
+            async def stream(self, messages, tools=None):
+                yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+                yield invalid_event
+
+        async def collect():
+            return [
+                event
+                async for event in ChatRuntime(InvalidPayloadModel()).stream_user_message(
+                    "hello"
+                )
+            ]
+
+        events = asyncio.run(collect())
+        assert events[-2].type == RuntimeEventType.MODEL_FAILED
+        assert events[-1].type == RuntimeEventType.RUN_FAILED
+
+
 def test_runtime_fails_when_model_turn_completion_is_missing() -> None:
     class MissingCompletionModel:
         async def stream(self, messages, tools=None):

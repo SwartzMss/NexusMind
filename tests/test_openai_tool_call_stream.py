@@ -42,9 +42,9 @@ def test_stream_parses_fragmented_tool_call_and_turn_completion() -> None:
                                 "tool_calls": [
                                     {
                                         "index": 0,
-                                        "id": "call_1",
-                                        "type": "function",
-                                        "function": {"name": "echo", "arguments": '{"te'},
+                                        "id": "call_",
+                                        "type": "func",
+                                        "function": {"name": "ec", "arguments": '{"te'},
                                     }
                                 ]
                             },
@@ -61,7 +61,9 @@ def test_stream_parses_fragmented_tool_call_and_turn_completion() -> None:
                                 "tool_calls": [
                                     {
                                         "index": 0,
-                                        "function": {"arguments": 'xt":"hello"}'},
+                                        "id": "1",
+                                        "type": "tion",
+                                        "function": {"name": "ho", "arguments": 'xt":"hello"}'},
                                     }
                                 ]
                             },

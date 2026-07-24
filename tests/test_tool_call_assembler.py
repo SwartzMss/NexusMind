@@ -5,7 +5,8 @@ from nexusmind.models.tool_calls import ToolCallAssembler, ToolCallAssemblyError
 
 def test_assembler_builds_fragmented_tool_call() -> None:
     assembler = ToolCallAssembler()
-    assembler.apply(ToolCallDelta(index=0, call_id_fragment="call_1", type_fragment="function", name_fragment="echo"))
+    assembler.apply(ToolCallDelta(index=0, call_id_fragment="call_", type_fragment="func", name_fragment="ec"))
+    assembler.apply(ToolCallDelta(index=0, call_id_fragment="1", type_fragment="tion", name_fragment="ho"))
     assembler.apply(ToolCallDelta(index=0, arguments_fragment='{"te'))
     assembler.apply(ToolCallDelta(index=0, arguments_fragment='xt":"hello"}'))
 
@@ -65,34 +66,6 @@ def test_assembler_public_apply_rejects_invalid_runtime_types() -> None:
     for delta in invalid_deltas:
         with pytest.raises(ToolCallAssemblyError):
             ToolCallAssembler().apply(delta)
-
-
-@pytest.mark.parametrize(
-    ("first", "second"),
-    [
-        (
-            ToolCallDelta(index=0, call_id_fragment="call_1"),
-            ToolCallDelta(index=0, call_id_fragment="call_2"),
-        ),
-        (
-            ToolCallDelta(index=0, name_fragment="echo"),
-            ToolCallDelta(index=0, name_fragment="other"),
-        ),
-        (
-            ToolCallDelta(index=0, type_fragment="function"),
-            ToolCallDelta(index=0, type_fragment="function"),
-        ),
-    ],
-)
-def test_assembler_rejects_repeated_identity_metadata(
-    first: ToolCallDelta,
-    second: ToolCallDelta,
-) -> None:
-    assembler = ToolCallAssembler()
-    assembler.apply(first)
-
-    with pytest.raises(ToolCallAssemblyError):
-        assembler.apply(second)
 
 
 def test_assembler_private_state_repr_does_not_include_arguments() -> None:

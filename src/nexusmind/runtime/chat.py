@@ -61,6 +61,11 @@ class ChatRuntime:
                 yield RuntimeEvent(RuntimeEventType.MODEL_FAILED, error=error)
                 yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=error)
                 return
+            if model_turn_finish_reason == "tool_calls" and not has_completed_tool_calls:
+                error = "Model turn requested tools without completed tool calls"
+                yield RuntimeEvent(RuntimeEventType.MODEL_FAILED, error=error)
+                yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=error)
+                return
             if model_turn_finish_reason != "tool_calls" and not has_completed_tool_calls:
                 yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
         except Exception as exc:
@@ -69,6 +74,16 @@ class ChatRuntime:
 
 
 def _validate_model_event(event: RuntimeEvent, model_started: bool, model_turn_completed: bool) -> str | None:
+    allowed_types = {
+        RuntimeEventType.MODEL_STARTED,
+        RuntimeEventType.TEXT_DELTA,
+        RuntimeEventType.TOOL_CALL_DELTA,
+        RuntimeEventType.TOOL_CALL_COMPLETED,
+        RuntimeEventType.MODEL_TURN_COMPLETED,
+        RuntimeEventType.MODEL_FAILED,
+    }
+    if event.type not in allowed_types:
+        return "Model emitted an unsupported event"
     if model_turn_completed:
         return "Model emitted events after model turn completion"
     if event.type == RuntimeEventType.MODEL_STARTED:
@@ -77,7 +92,18 @@ def _validate_model_event(event: RuntimeEvent, model_started: bool, model_turn_c
         return None
     if not model_started:
         return "Model emitted events before model start"
-    if event.type == RuntimeEventType.RUN_COMPLETED or event.type == RuntimeEventType.RUN_FAILED:
-        return "Model emitted run-level event"
+    if event.type == RuntimeEventType.TEXT_DELTA and not isinstance(event.text, str):
+        return "Model emitted a text delta without text"
+    if event.type == RuntimeEventType.TOOL_CALL_DELTA and event.tool_call_delta is None:
+        return "Model emitted a tool call delta without a delta"
+    if event.type == RuntimeEventType.TOOL_CALL_COMPLETED and event.tool_call is None:
+        return "Model emitted a completed tool call without a tool call"
+    if (
+        event.type == RuntimeEventType.MODEL_TURN_COMPLETED
+        and not isinstance(event.finish_reason, str)
+    ):
+        return "Model completed a turn without a finish reason"
+    if event.type == RuntimeEventType.MODEL_FAILED and not isinstance(event.error, str):
+        return "Model failed without an error"
     return None
 

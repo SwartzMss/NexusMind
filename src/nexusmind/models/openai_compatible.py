@@ -54,10 +54,17 @@ class OpenAICompatibleChatModel(ChatModel):
                     assembler = ToolCallAssembler()
                     finish_reason: str | None = None
                     async for line in _aiter_sse_lines(response):
-                        if completed and _is_data_payload(line) and not _is_done_line(line):
-                            raise ChatModelError("Model stream returned data after completion")
                         chunk = _parse_sse_chunk(line, self._config.api_key)
-                        if completed and chunk.completed:
+                        if completed:
+                            if chunk.text or chunk.tool_call_deltas:
+                                raise ChatModelError("Model stream returned data after completion")
+                            if (
+                                chunk.finish_reason is not None
+                                and chunk.finish_reason != finish_reason
+                            ):
+                                raise ChatModelError(
+                                    "Model stream returned conflicting finish reasons"
+                                )
                             continue
                         completed = completed or chunk.completed
                         if chunk.finish_reason is not None:
@@ -251,14 +258,6 @@ def _decode_sse_line(raw_line: bytes) -> str:
         return raw_line.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ChatModelError("Model stream returned invalid UTF-8") from exc
-
-
-def _is_data_payload(line: str) -> bool:
-    return line.startswith("data:") and bool(line.removeprefix("data:").strip())
-
-
-def _is_done_line(line: str) -> bool:
-    return line.removeprefix("data:").strip() == "[DONE]" if line.startswith("data:") else False
 
 
 def _safe_http_error(status_code: int, headers: httpx.Headers) -> str:

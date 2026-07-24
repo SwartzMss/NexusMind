@@ -250,6 +250,54 @@ def test_adapter_allows_done_after_finish_reason() -> None:
     assert events[-1].finish_reason == "stop"
 
 
+def test_adapter_allows_usage_chunk_after_finish_reason() -> None:
+    content = "".join(
+        [
+            _sse({"choices": [{"delta": {"content": "done"}, "finish_reason": "stop"}]}),
+            _sse(
+                {
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "total_tokens": 2,
+                    },
+                }
+            ),
+            "data: [DONE]\n\n",
+        ]
+    )
+    model = OpenAICompatibleChatModel(
+        _config(),
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=content)),
+    )
+
+    events = _collect(model)
+
+    assert "".join(event.text or "" for event in events) == "done"
+    assert events[-1].finish_reason == "stop"
+
+
+def test_adapter_rejects_conflicting_finish_reason_after_completion() -> None:
+    content = "".join(
+        [
+            _sse({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+            _sse({"choices": [{"delta": {}, "finish_reason": "length"}]}),
+        ]
+    )
+    model = OpenAICompatibleChatModel(
+        _config(),
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=content)),
+    )
+
+    try:
+        _collect(model)
+    except ChatModelError as exc:
+        assert str(exc) == "Model stream returned conflicting finish reasons"
+    else:
+        raise AssertionError("expected ChatModelError")
+
+
 def test_adapter_rejects_invalid_error_field_and_choice_index() -> None:
     payloads = [
         {"error": True},
