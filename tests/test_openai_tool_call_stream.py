@@ -171,6 +171,7 @@ def test_stream_rejects_partial_tool_call_before_eof() -> None:
 def test_stream_rejects_invalid_tool_call_fields_and_legacy_function_call() -> None:
     bad_payloads = [
         {"choices": [{"delta": {"tool_calls": {}}, "finish_reason": None}]},
+        {"choices": [{"delta": {"tool_calls": None}, "finish_reason": None}]},
         {"choices": [{"delta": {"tool_calls": [{"index": "0"}]}, "finish_reason": None}]},
         {"choices": [{"delta": {"tool_calls": [{"index": True}]}, "finish_reason": None}]},
         {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": {}}}]}, "finish_reason": None}]},

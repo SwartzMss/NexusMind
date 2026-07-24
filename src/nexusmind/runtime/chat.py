@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import cast
 
 from nexusmind.models.base import ChatModel
 from nexusmind.models.tool_calls import ToolCallDelta
@@ -40,6 +41,7 @@ class ChatRuntime:
             model_started = False
             model_turn_completed = False
             model_turn_finish_reason: str | None = None
+            model_turn_completed_event: RuntimeEvent | None = None
             has_completed_tool_calls = False
             async for event in self._model.stream(messages, tools=tools):
                 validation_error = _validate_model_event(event, model_started, model_turn_completed)
@@ -64,6 +66,8 @@ class ChatRuntime:
                 if event.type == RuntimeEventType.MODEL_TURN_COMPLETED:
                     model_turn_completed = True
                     model_turn_finish_reason = event.finish_reason
+                    model_turn_completed_event = event
+                    continue
                 yield event
             if not model_started:
                 error = "Model stream ended before model start"
@@ -85,6 +89,12 @@ class ChatRuntime:
                 yield RuntimeEvent(RuntimeEventType.MODEL_FAILED, error=error)
                 yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=error)
                 return
+            if model_turn_completed_event is None:
+                error = "Model stream ended without a completion event"
+                yield RuntimeEvent(RuntimeEventType.MODEL_FAILED, error=error)
+                yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=error)
+                return
+            yield model_turn_completed_event
             if model_turn_finish_reason != "tool_calls" and not has_completed_tool_calls:
                 yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
         except Exception:
@@ -118,11 +128,35 @@ def _validate_model_event(event: RuntimeEvent, model_started: bool, model_turn_c
         ToolCallDelta,
     ):
         return "Model emitted a tool call delta without a delta"
+    if event.type == RuntimeEventType.TOOL_CALL_DELTA:
+        delta = cast(ToolCallDelta, event.tool_call_delta)
+        if (
+            not isinstance(delta.index, int)
+            or isinstance(delta.index, bool)
+            or delta.index < 0
+        ):
+            return "Model emitted a tool call delta with an invalid index"
+        fragments = (
+            delta.call_id_fragment,
+            delta.name_fragment,
+            delta.arguments_fragment,
+            delta.type_fragment,
+        )
+        if any(not isinstance(fragment, str) for fragment in fragments):
+            return "Model emitted a tool call delta with an invalid fragment"
     if event.type == RuntimeEventType.TOOL_CALL_COMPLETED and not isinstance(
         event.tool_call,
         ToolCall,
     ):
         return "Model emitted a completed tool call without a tool call"
+    if event.type == RuntimeEventType.TOOL_CALL_COMPLETED:
+        tool_call = cast(ToolCall, event.tool_call)
+        if not isinstance(tool_call.id, str) or not tool_call.id:
+            return "Model emitted a completed tool call with an invalid id"
+        if not isinstance(tool_call.name, str) or not tool_call.name:
+            return "Model emitted a completed tool call with an invalid name"
+        if not isinstance(tool_call.arguments, dict):
+            return "Model emitted a completed tool call with invalid arguments"
     if (
         event.type == RuntimeEventType.MODEL_TURN_COMPLETED
         and event.finish_reason not in _FINISH_REASONS

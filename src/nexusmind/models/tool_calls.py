@@ -59,14 +59,10 @@ class ToolCallAssembler:
             raise ToolCallAssemblyError("Model stream returned an invalid tool call fragment")
         partial = self._partials.setdefault(delta.index, _PartialToolCall())
         if delta.call_id_fragment:
-            if delta.call_id_fragment == partial.call_id:
-                raise ToolCallAssemblyError("Model stream returned a duplicate tool call id")
             partial.call_id += delta.call_id_fragment
             if len(partial.call_id) > MAX_CALL_ID_LENGTH:
                 raise ToolCallAssemblyError("Model stream returned an overlong tool call id")
         if delta.name_fragment:
-            if delta.name_fragment == partial.name:
-                raise ToolCallAssemblyError("Model stream returned a duplicate tool call name")
             partial.name += delta.name_fragment
             if len(partial.name) > MAX_TOOL_NAME_LENGTH:
                 raise ToolCallAssemblyError("Model stream returned an overlong tool call name")

@@ -181,9 +181,9 @@ def _parse_sse_chunk(line: str, api_key: str) -> _SSEChunk:
 
 
 def _parse_tool_call_deltas(delta: dict[str, Any]) -> list[ToolCallDelta]:
-    raw_tool_calls = delta.get("tool_calls")
-    if raw_tool_calls is None:
+    if "tool_calls" not in delta:
         return []
+    raw_tool_calls = delta["tool_calls"]
     if not isinstance(raw_tool_calls, list):
         raise ChatModelError("Model stream returned invalid tool_calls")
     parsed: list[ToolCallDelta] = []

@@ -75,27 +75,30 @@ def test_assembler_private_state_repr_does_not_include_arguments() -> None:
     assert "sk-live-secret" not in repr(assembler._partials)
 
 
-@pytest.mark.parametrize(
-    "fragments",
-    [
-        (
-            ToolCallDelta(index=0, call_id_fragment="call_1"),
-            ToolCallDelta(index=0, call_id_fragment="call_1"),
-        ),
-        (
-            ToolCallDelta(index=0, name_fragment="echo"),
-            ToolCallDelta(index=0, name_fragment="echo"),
-        ),
-    ],
-)
-def test_assembler_rejects_duplicate_identity_fragments(
-    fragments: tuple[ToolCallDelta, ToolCallDelta],
-) -> None:
+def test_assembler_allows_identical_bounded_identity_fragments() -> None:
     assembler = ToolCallAssembler()
-    assembler.apply(fragments[0])
+    assembler.apply(
+        ToolCallDelta(
+            index=0,
+            call_id_fragment="aa",
+            name_fragment="echo",
+            type_fragment="func",
+        )
+    )
+    assembler.apply(
+        ToolCallDelta(
+            index=0,
+            call_id_fragment="aa",
+            name_fragment="echo",
+            type_fragment="tion",
+            arguments_fragment="{}",
+        )
+    )
 
-    with pytest.raises(ToolCallAssemblyError):
-        assembler.apply(fragments[1])
+    call = assembler.finalize()[0]
+
+    assert call.id == "aaaa"
+    assert call.name == "echoecho"
 
 
 @pytest.mark.parametrize(

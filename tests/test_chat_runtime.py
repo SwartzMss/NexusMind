@@ -108,6 +108,9 @@ def test_runtime_does_not_complete_run_when_stop_turn_contains_tool_call() -> No
         RuntimeEventType.MODEL_FAILED,
         RuntimeEventType.RUN_FAILED,
     ]
+    assert RuntimeEventType.MODEL_TURN_COMPLETED not in [
+        event.type for event in events
+    ]
 
 
 def test_runtime_treats_model_failed_as_terminal() -> None:
@@ -151,7 +154,6 @@ def test_runtime_fails_when_tool_finish_has_no_completed_tool_call() -> None:
     assert [event.type for event in events] == [
         RuntimeEventType.RUN_STARTED,
         RuntimeEventType.MODEL_STARTED,
-        RuntimeEventType.MODEL_TURN_COMPLETED,
         RuntimeEventType.MODEL_FAILED,
         RuntimeEventType.RUN_FAILED,
     ]
@@ -245,6 +247,60 @@ def test_runtime_rejects_wrong_tool_dto_types_and_finish_reasons() -> None:
         assert events[-1].type == RuntimeEventType.RUN_FAILED
 
 
+def test_runtime_rejects_invalid_fields_inside_tool_dtos() -> None:
+    invalid_events = [
+        RuntimeEvent(
+            RuntimeEventType.TOOL_CALL_DELTA,
+            tool_call_delta=ToolCallDelta(index=True),
+        ),
+        RuntimeEvent(
+            RuntimeEventType.TOOL_CALL_DELTA,
+            tool_call_delta=ToolCallDelta(index=-1),
+        ),
+        RuntimeEvent(
+            RuntimeEventType.TOOL_CALL_DELTA,
+            tool_call_delta=ToolCallDelta(
+                index=0,
+                arguments_fragment=None,  # type: ignore[arg-type]
+            ),
+        ),
+        RuntimeEvent(
+            RuntimeEventType.TOOL_CALL_COMPLETED,
+            tool_call=ToolCall(id="", name="echo", arguments={}),
+        ),
+        RuntimeEvent(
+            RuntimeEventType.TOOL_CALL_COMPLETED,
+            tool_call=ToolCall(id="call_1", name="", arguments={}),
+        ),
+        RuntimeEvent(
+            RuntimeEventType.TOOL_CALL_COMPLETED,
+            tool_call=ToolCall(
+                id="call_1",
+                name="echo",
+                arguments=[],  # type: ignore[arg-type]
+            ),
+        ),
+    ]
+
+    for invalid_event in invalid_events:
+        class InvalidDtoModel:
+            async def stream(self, messages, tools=None):
+                yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+                yield invalid_event
+
+        async def collect():
+            return [
+                event
+                async for event in ChatRuntime(InvalidDtoModel()).stream_user_message(
+                    "hello"
+                )
+            ]
+
+        events = asyncio.run(collect())
+        assert events[-2].type == RuntimeEventType.MODEL_FAILED
+        assert events[-1].type == RuntimeEventType.RUN_FAILED
+
+
 def test_runtime_does_not_expose_arbitrary_exception_text() -> None:
     class UnsafeFailureModel:
         async def stream(self, messages, tools=None):
@@ -302,7 +358,6 @@ def test_runtime_fails_on_duplicate_turn_completion_or_events_after_completion()
     assert [event.type for event in events] == [
         RuntimeEventType.RUN_STARTED,
         RuntimeEventType.MODEL_STARTED,
-        RuntimeEventType.MODEL_TURN_COMPLETED,
         RuntimeEventType.MODEL_FAILED,
         RuntimeEventType.RUN_FAILED,
     ]
