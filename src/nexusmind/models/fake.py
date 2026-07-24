@@ -23,4 +23,5 @@ class FakeChatModel(ChatModel):
             raise ChatModelError(str(self._error)) from self._error
         for delta in self._deltas:
             yield RuntimeEvent(RuntimeEventType.TEXT_DELTA, text=delta)
+        yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="stop")
 

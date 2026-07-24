@@ -90,6 +90,10 @@ Call a discovered MCP tool through the NexusMind registry and executor:
 nexusmind mcp call --config mcp.json --server demo --tool demo__echo_290c9db7d5 --arguments '{"text":"hello"}'
 ```
 
+## Model Tool Calls
+
+NexusMind can pass registered `ToolDefinition` values to an OpenAI-compatible chat model and parse streamed `tool_calls` into provider-neutral events. This stage only identifies requested tools; it does not execute them or run an agent loop.
+
 ## Test
 
 ```powershell

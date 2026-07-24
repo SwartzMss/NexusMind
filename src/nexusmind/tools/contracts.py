@@ -20,7 +20,7 @@ class ToolDefinition:
 class ToolCall:
     id: str
     name: str
-    arguments: dict[str, Any]
+    arguments: dict[str, Any] = field(repr=False)
 
 
 class ToolErrorCode(str, Enum):
