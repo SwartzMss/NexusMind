@@ -174,6 +174,8 @@ def test_stream_rejects_invalid_tool_call_fields_and_legacy_function_call() -> N
         {"choices": [{"delta": {"tool_calls": [{"index": "0"}]}, "finish_reason": None}]},
         {"choices": [{"delta": {"tool_calls": [{"index": True}]}, "finish_reason": None}]},
         {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": {}}}]}, "finish_reason": None}]},
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": None}]}, "finish_reason": None}]},
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": None}}]}, "finish_reason": None}]},
         {"choices": [{"delta": {"function_call": {"name": "echo"}}, "finish_reason": "stop"}]},
         {"choices": [{"delta": {}, "finish_reason": None}, {"delta": {}, "finish_reason": None}]},
         {"choices": {}},

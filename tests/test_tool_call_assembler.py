@@ -76,6 +76,29 @@ def test_assembler_private_state_repr_does_not_include_arguments() -> None:
 
 
 @pytest.mark.parametrize(
+    "fragments",
+    [
+        (
+            ToolCallDelta(index=0, call_id_fragment="call_1"),
+            ToolCallDelta(index=0, call_id_fragment="call_1"),
+        ),
+        (
+            ToolCallDelta(index=0, name_fragment="echo"),
+            ToolCallDelta(index=0, name_fragment="echo"),
+        ),
+    ],
+)
+def test_assembler_rejects_duplicate_identity_fragments(
+    fragments: tuple[ToolCallDelta, ToolCallDelta],
+) -> None:
+    assembler = ToolCallAssembler()
+    assembler.apply(fragments[0])
+
+    with pytest.raises(ToolCallAssemblyError):
+        assembler.apply(fragments[1])
+
+
+@pytest.mark.parametrize(
     "arguments",
     ['{"text"', "[]", '{"value": NaN}', '{"value": Infinity}', '{"value": -Infinity}'],
 )

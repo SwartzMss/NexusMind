@@ -250,6 +250,25 @@ def test_adapter_allows_done_after_finish_reason() -> None:
     assert events[-1].finish_reason == "stop"
 
 
+def test_adapter_stops_reading_immediately_after_done() -> None:
+    class DoneThenFailureStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"data: [DONE]\n\n"
+            raise AssertionError("stream was read after DONE")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=DoneThenFailureStream())
+
+    model = OpenAICompatibleChatModel(
+        _config(),
+        transport=httpx.MockTransport(handler),
+    )
+
+    events = _collect(model)
+
+    assert events[-1].type == RuntimeEventType.MODEL_TURN_COMPLETED
+
+
 def test_adapter_allows_usage_chunk_after_finish_reason() -> None:
     content = "".join(
         [

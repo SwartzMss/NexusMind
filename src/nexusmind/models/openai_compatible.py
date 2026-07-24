@@ -55,6 +55,9 @@ class OpenAICompatibleChatModel(ChatModel):
                     finish_reason: str | None = None
                     async for line in _aiter_sse_lines(response):
                         chunk = _parse_sse_chunk(line, self._config.api_key)
+                        if chunk.done:
+                            completed = True
+                            break
                         if completed:
                             if chunk.text or chunk.tool_call_deltas:
                                 raise ChatModelError("Model stream returned data after completion")
@@ -120,6 +123,7 @@ def _to_openai_tool(tool: ToolDefinition) -> dict[str, Any]:
 class _SSEChunk:
     text: str | None = None
     completed: bool = False
+    done: bool = False
     finish_reason: str | None = None
     tool_call_deltas: tuple[ToolCallDelta, ...] = ()
 
@@ -131,7 +135,7 @@ def _parse_sse_chunk(line: str, api_key: str) -> _SSEChunk:
     if not data:
         return _SSEChunk()
     if data == "[DONE]":
-        return _SSEChunk(completed=True)
+        return _SSEChunk(completed=True, done=True)
     try:
         payload = json.loads(data, parse_constant=_reject_json_constant)
     except (ValueError, RecursionError) as exc:
@@ -190,28 +194,18 @@ def _parse_tool_call_deltas(delta: dict[str, Any]) -> list[ToolCallDelta]:
         if not isinstance(index, int) or isinstance(index, bool):
             raise ChatModelError("Model stream returned a tool call without a valid index")
         call_id = item.get("id", "")
-        if call_id is None:
-            call_id = ""
         if not isinstance(call_id, str):
             raise ChatModelError("Model stream returned an invalid tool call id")
         type_name = item.get("type", "")
-        if type_name is None:
-            type_name = ""
         if not isinstance(type_name, str):
             raise ChatModelError("Model stream returned an invalid tool call type")
         function = item.get("function", {})
-        if function is None:
-            function = {}
         if not isinstance(function, dict):
             raise ChatModelError("Model stream returned an invalid tool call function")
         name = function.get("name", "")
-        if name is None:
-            name = ""
         if not isinstance(name, str):
             raise ChatModelError("Model stream returned an invalid tool call name")
         arguments = function.get("arguments", "")
-        if arguments is None:
-            arguments = ""
         if not isinstance(arguments, str):
             raise ChatModelError("Model stream returned invalid tool call arguments")
         parsed.append(
