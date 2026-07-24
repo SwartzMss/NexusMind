@@ -54,9 +54,14 @@ class OpenAICompatibleChatModel(ChatModel):
                     assembler = ToolCallAssembler()
                     finish_reason: str | None = None
                     async for line in _aiter_sse_lines(response):
+                        if completed and _is_data_payload(line) and not _is_done_line(line):
+                            raise ChatModelError("Model stream returned data after completion")
                         chunk = _parse_sse_chunk(line, self._config.api_key)
+                        if completed and chunk.completed:
+                            continue
                         completed = completed or chunk.completed
-                        finish_reason = chunk.finish_reason or finish_reason
+                        if chunk.finish_reason is not None:
+                            finish_reason = chunk.finish_reason
                         if chunk.text:
                             yield RuntimeEvent(RuntimeEventType.TEXT_DELTA, text=chunk.text)
                         for delta in chunk.tool_call_deltas:
@@ -126,10 +131,7 @@ def _parse_sse_chunk(line: str, api_key: str) -> _SSEChunk:
         raise ChatModelError("Model stream returned malformed JSON") from exc
     if not isinstance(payload, dict):
         raise ChatModelError("Model stream returned a non-object payload")
-    error = payload.get("error")
-    if isinstance(error, dict):
-        raise ChatModelError("Model stream returned a provider error")
-    if isinstance(error, str):
+    if "error" in payload and payload["error"] is not None:
         raise ChatModelError("Model stream returned a provider error")
     if "choices" not in payload:
         return _SSEChunk()
@@ -143,6 +145,9 @@ def _parse_sse_chunk(line: str, api_key: str) -> _SSEChunk:
     choice = choices[0]
     if not isinstance(choice, dict):
         raise ChatModelError("Model stream returned an invalid choice")
+    choice_index = choice.get("index")
+    if not isinstance(choice_index, int) or isinstance(choice_index, bool) or choice_index != 0:
+        raise ChatModelError("Model stream returned an invalid choice index")
     raw_finish_reason = choice.get("finish_reason")
     if raw_finish_reason is not None and not isinstance(raw_finish_reason, str):
         raise ChatModelError("Model stream returned invalid finish_reason")
@@ -224,19 +229,36 @@ async def _aiter_sse_lines(response: httpx.Response) -> AsyncIterator[str]:
     buffer = bytearray()
     async for chunk in response.aiter_bytes():
         buffer.extend(chunk)
-        if len(buffer) > _MAX_SSE_EVENT_BYTES:
-            raise ChatModelError("Model stream returned an oversized SSE event")
         while True:
             newline = buffer.find(b"\n")
             if newline < 0:
                 break
             raw_line = bytes(buffer[:newline]).rstrip(b"\r")
             del buffer[: newline + 1]
-            yield raw_line.decode("utf-8", errors="replace")
+            if len(raw_line) > _MAX_SSE_EVENT_BYTES:
+                raise ChatModelError("Model stream returned an oversized SSE event")
+            yield _decode_sse_line(raw_line)
+        if len(buffer) > _MAX_SSE_EVENT_BYTES:
+            raise ChatModelError("Model stream returned an oversized SSE event")
     if buffer:
         if len(buffer) > _MAX_SSE_EVENT_BYTES:
             raise ChatModelError("Model stream returned an oversized SSE event")
-        yield bytes(buffer).rstrip(b"\r").decode("utf-8", errors="replace")
+        yield _decode_sse_line(bytes(buffer).rstrip(b"\r"))
+
+
+def _decode_sse_line(raw_line: bytes) -> str:
+    try:
+        return raw_line.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ChatModelError("Model stream returned invalid UTF-8") from exc
+
+
+def _is_data_payload(line: str) -> bool:
+    return line.startswith("data:") and bool(line.removeprefix("data:").strip())
+
+
+def _is_done_line(line: str) -> bool:
+    return line.removeprefix("data:").strip() == "[DONE]" if line.startswith("data:") else False
 
 
 def _safe_http_error(status_code: int, headers: httpx.Headers) -> str:

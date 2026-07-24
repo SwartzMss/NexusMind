@@ -21,6 +21,10 @@ def _config(timeout: float = 60) -> ModelConfig:
 
 
 def _sse(payload: object) -> str:
+    if isinstance(payload, dict) and isinstance(payload.get("choices"), list):
+        for choice in payload["choices"]:
+            if isinstance(choice, dict):
+                choice.setdefault("index", 0)
     return f"data: {json.dumps(payload)}\n\n"
 
 
@@ -184,6 +188,94 @@ def test_adapter_raises_before_parsing_oversized_sse_event() -> None:
         assert str(exc) == "Model stream returned an oversized SSE event"
     else:
         raise AssertionError("expected ChatModelError")
+
+
+def test_adapter_allows_large_network_chunk_of_small_sse_lines() -> None:
+    content = (_sse({"usage": {"padding": "x" * 64}}) * 15000) + "data: [DONE]\n\n"
+    assert len(content.encode()) > 1024 * 1024
+    model = OpenAICompatibleChatModel(
+        _config(),
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=content)),
+    )
+
+    events = _collect(model)
+
+    assert events[-1].type == RuntimeEventType.MODEL_TURN_COMPLETED
+
+
+def test_adapter_rejects_invalid_utf8() -> None:
+    content = b'data: {"choices":[{"index":0,"delta":{"content":"\xff"}}]}\n\n'
+    model = OpenAICompatibleChatModel(
+        _config(),
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=content)),
+    )
+
+    try:
+        _collect(model)
+    except ChatModelError as exc:
+        assert str(exc) == "Model stream returned invalid UTF-8"
+    else:
+        raise AssertionError("expected ChatModelError")
+
+
+def test_adapter_rejects_data_after_completion_signal() -> None:
+    content = "".join(
+        [
+            _sse({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+            _sse({"choices": [{"delta": {"content": "late"}}]}),
+        ]
+    )
+    model = OpenAICompatibleChatModel(
+        _config(),
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=content)),
+    )
+
+    try:
+        _collect(model)
+    except ChatModelError as exc:
+        assert str(exc) == "Model stream returned data after completion"
+    else:
+        raise AssertionError("expected ChatModelError")
+
+
+def test_adapter_allows_done_after_finish_reason() -> None:
+    content = _sse({"choices": [{"delta": {}, "finish_reason": "stop"}]}) + "data: [DONE]\n\n"
+    model = OpenAICompatibleChatModel(
+        _config(),
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=content)),
+    )
+
+    events = _collect(model)
+
+    assert events[-1].finish_reason == "stop"
+
+
+def test_adapter_rejects_invalid_error_field_and_choice_index() -> None:
+    payloads = [
+        {"error": True},
+        {"error": []},
+        {"choices": [{"index": 1, "delta": {}}]},
+        {"choices": [{"delta": {}}]},
+        {"choices": [{"index": "0", "delta": {}}]},
+        {"choices": [{"index": False, "delta": {}}]},
+    ]
+
+    for payload in payloads:
+        model = OpenAICompatibleChatModel(
+            _config(),
+            transport=httpx.MockTransport(
+                lambda request, payload=payload: httpx.Response(
+                    200,
+                    content=f"data: {json.dumps(payload)}\n\n",
+                )
+            ),
+        )
+        try:
+            _collect(model)
+        except ChatModelError:
+            pass
+        else:
+            raise AssertionError(f"expected ChatModelError for {payload!r}")
 
 
 def test_adapter_ignores_empty_choices_and_usage_chunks() -> None:

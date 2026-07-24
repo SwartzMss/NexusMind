@@ -29,6 +29,7 @@ class ChatRuntime:
             model_started = False
             model_turn_completed = False
             model_turn_finish_reason: str | None = None
+            has_completed_tool_calls = False
             async for event in self._model.stream(messages, tools=tools):
                 validation_error = _validate_model_event(event, model_started, model_turn_completed)
                 if validation_error:
@@ -37,6 +38,15 @@ class ChatRuntime:
                     return
                 if event.type == RuntimeEventType.MODEL_STARTED:
                     model_started = True
+                if event.type == RuntimeEventType.MODEL_FAILED:
+                    yield event
+                    yield RuntimeEvent(
+                        RuntimeEventType.RUN_FAILED,
+                        error=event.error or "Model failed",
+                    )
+                    return
+                if event.type == RuntimeEventType.TOOL_CALL_COMPLETED:
+                    has_completed_tool_calls = True
                 if event.type == RuntimeEventType.MODEL_TURN_COMPLETED:
                     model_turn_completed = True
                     model_turn_finish_reason = event.finish_reason
@@ -51,7 +61,7 @@ class ChatRuntime:
                 yield RuntimeEvent(RuntimeEventType.MODEL_FAILED, error=error)
                 yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=error)
                 return
-            if model_turn_finish_reason != "tool_calls":
+            if model_turn_finish_reason != "tool_calls" and not has_completed_tool_calls:
                 yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
         except Exception as exc:
             yield RuntimeEvent(RuntimeEventType.MODEL_FAILED, error=str(exc))

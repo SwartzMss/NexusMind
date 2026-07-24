@@ -29,7 +29,7 @@ class ToolCallDelta:
 class _PartialToolCall:
     call_id: str = ""
     name: str = ""
-    arguments: str = ""
+    arguments: str = field(default="", repr=False)
     type_name: str = ""
 
 
@@ -43,22 +43,38 @@ class ToolCallAssembler:
         return bool(self._partials)
 
     def apply(self, delta: ToolCallDelta) -> None:
-        if delta.index < 0:
+        if not isinstance(delta, ToolCallDelta):
+            raise ToolCallAssemblyError("Model stream returned an invalid tool call delta")
+        if not isinstance(delta.index, int) or isinstance(delta.index, bool) or delta.index < 0:
             raise ToolCallAssemblyError("Model stream returned an invalid tool call index")
         if delta.index >= MAX_TOOL_CALLS_PER_TURN:
             raise ToolCallAssemblyError("Model stream exceeded the maximum tool call count")
+        fragments = (
+            delta.call_id_fragment,
+            delta.name_fragment,
+            delta.arguments_fragment,
+            delta.type_fragment,
+        )
+        if any(not isinstance(fragment, str) for fragment in fragments):
+            raise ToolCallAssemblyError("Model stream returned an invalid tool call fragment")
         partial = self._partials.setdefault(delta.index, _PartialToolCall())
         if delta.call_id_fragment:
-            partial.call_id += delta.call_id_fragment
-            if len(partial.call_id) > MAX_CALL_ID_LENGTH:
+            if partial.call_id:
+                raise ToolCallAssemblyError("Model stream returned conflicting tool call ids")
+            partial.call_id = delta.call_id_fragment
+            if len(delta.call_id_fragment) > MAX_CALL_ID_LENGTH:
                 raise ToolCallAssemblyError("Model stream returned an overlong tool call id")
         if delta.name_fragment:
-            partial.name += delta.name_fragment
-            if len(partial.name) > MAX_TOOL_NAME_LENGTH:
+            if partial.name:
+                raise ToolCallAssemblyError("Model stream returned conflicting tool call names")
+            partial.name = delta.name_fragment
+            if len(delta.name_fragment) > MAX_TOOL_NAME_LENGTH:
                 raise ToolCallAssemblyError("Model stream returned an overlong tool call name")
         if delta.type_fragment:
-            partial.type_name += delta.type_fragment
-            if partial.type_name != "function"[: len(partial.type_name)] and partial.type_name != "function":
+            if partial.type_name:
+                raise ToolCallAssemblyError("Model stream returned conflicting tool call types")
+            partial.type_name = delta.type_fragment
+            if partial.type_name != "function":
                 raise ToolCallAssemblyError("Model stream returned an unsupported tool call type")
         if delta.arguments_fragment:
             partial.arguments += delta.arguments_fragment

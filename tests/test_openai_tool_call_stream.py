@@ -16,6 +16,10 @@ def _config() -> ModelConfig:
 
 
 def _sse(payload: object) -> str:
+    if isinstance(payload, dict) and isinstance(payload.get("choices"), list):
+        for choice in payload["choices"]:
+            if isinstance(choice, dict):
+                choice.setdefault("index", 0)
     return f"data: {json.dumps(payload)}\n\n"
 
 
@@ -38,9 +42,9 @@ def test_stream_parses_fragmented_tool_call_and_turn_completion() -> None:
                                 "tool_calls": [
                                     {
                                         "index": 0,
-                                        "id": "call_",
-                                        "type": "func",
-                                        "function": {"name": "ec", "arguments": '{"te'},
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {"name": "echo", "arguments": '{"te'},
                                     }
                                 ]
                             },
@@ -57,9 +61,7 @@ def test_stream_parses_fragmented_tool_call_and_turn_completion() -> None:
                                 "tool_calls": [
                                     {
                                         "index": 0,
-                                        "id": "1",
-                                        "type": "tion",
-                                        "function": {"name": "ho", "arguments": 'xt":"hello"}'},
+                                        "function": {"arguments": 'xt":"hello"}'},
                                     }
                                 ]
                             },
