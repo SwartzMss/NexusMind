@@ -41,6 +41,6 @@ class ToolError:
 class ToolResult:
     call_id: str
     name: str
-    output: Any | None = None
+    output: Any | None = field(default=None, repr=False)
     error: ToolError | None = None
     metadata: dict[str, Any] = field(default_factory=dict)

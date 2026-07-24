@@ -8,7 +8,7 @@ from nexusmind.models.base import ChatModelError
 from nexusmind.models.openai_compatible import OpenAICompatibleChatModel
 from nexusmind.runtime.events import RuntimeEventType
 from nexusmind.runtime.messages import Message, MessageRole
-from nexusmind.tools import ToolDefinition
+from nexusmind.tools import ToolCall, ToolDefinition
 
 
 def _config(timeout: float = 60) -> ModelConfig:
@@ -467,3 +467,75 @@ def test_adapter_sends_multiple_tools_in_given_order() -> None:
         return [event async for event in model.stream(messages, tools=tools)]
 
     asyncio.run(collect())
+
+
+def test_adapter_serializes_assistant_tool_calls_and_tool_results() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["messages"] == [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "echo",
+                            "arguments": '{"text":"hello"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "content": '{"ok":true,"output":{"text":"hello"}}',
+                "name": "echo",
+                "tool_call_id": "call_1",
+            },
+        ]
+        return httpx.Response(200, content="data: [DONE]\n\n")
+
+    model = OpenAICompatibleChatModel(_config(), transport=httpx.MockTransport(handler))
+
+    async def collect():
+        messages = [
+            Message(
+                role=MessageRole.ASSISTANT,
+                content=None,
+                tool_calls=(ToolCall(id="call_1", name="echo", arguments={"text": "hello"}),),
+            ),
+            Message(
+                role=MessageRole.TOOL,
+                name="echo",
+                tool_call_id="call_1",
+                content='{"ok":true,"output":{"text":"hello"}}',
+            ),
+        ]
+        return [event async for event in model.stream(messages)]
+
+    asyncio.run(collect())
+
+
+def test_adapter_rejects_non_strict_tool_call_argument_json_without_echoing_value() -> None:
+    model = OpenAICompatibleChatModel(_config())
+
+    async def collect():
+        messages = [
+            Message(
+                role=MessageRole.ASSISTANT,
+                content=None,
+                tool_calls=(ToolCall(id="call_1", name="echo", arguments={"value": float("nan")}),),
+            )
+        ]
+        return [event async for event in model.stream(messages)]
+
+    try:
+        asyncio.run(collect())
+    except ChatModelError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("expected ChatModelError")
+
+    assert message == "Tool call arguments are not JSON serializable"
+    assert "nan" not in message.lower()
