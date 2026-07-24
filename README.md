@@ -20,7 +20,7 @@ python -m pip install -e ".[dev]"
 If you prefer requirements files for local tooling, install the same dependency set with:
 
 ```powershell
-python -m pip install -r requirements-dev.txt
+python -m pip install -r requirements.txt
 python -m pip install -e .
 ```
 
