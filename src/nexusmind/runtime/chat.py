@@ -102,7 +102,27 @@ class ChatRuntime:
                         elif event.type == RuntimeEventType.TEXT_DELTA:
                             turn.text_parts.append(cast(str, event.text))
                         elif event.type == RuntimeEventType.TOOL_CALL_COMPLETED:
-                            turn.tool_calls.append(cast(ToolCall, event.tool_call))
+                            if tool_calls_total + len(turn.tool_calls) + 1 > self._limits.max_tool_calls_total:
+                                yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
+                                return
+                            try:
+                                safe_tool_call, arguments_size = _snapshot_tool_call(
+                                    cast(ToolCall, event.tool_call),
+                                    max_bytes_per_call=self._limits.max_tool_arguments_bytes_per_call,
+                                    remaining_total_bytes=(
+                                        self._limits.max_tool_arguments_bytes_total
+                                        - tool_arguments_bytes_total
+                                        - turn.tool_arguments_size
+                                    ),
+                                )
+                            except _JsonLimitExceeded:
+                                yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
+                                return
+                            except RuntimeError:
+                                yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                                return
+                            turn.tool_calls.append(safe_tool_call)
+                            turn.tool_arguments_size += arguments_size
                         elif event.type == RuntimeEventType.MODEL_TURN_COMPLETED:
                             turn.completed = True
                             turn.finish_reason = event.finish_reason
@@ -125,6 +145,9 @@ class ChatRuntime:
                 if turn.finish_reason != "tool_calls":
                     yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
                     return
+                if model_turns >= self._limits.max_model_turns:
+                    yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
+                    return
                 if self._tool_executor is None:
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error="Tool executor is not configured")
                     return
@@ -137,33 +160,18 @@ class ChatRuntime:
                 if any(call.name not in allowed_tool_names for call in turn.tool_calls):
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                     return
-                try:
-                    safe_tool_calls, arguments_size = _snapshot_tool_calls(
-                        turn.tool_calls,
-                        max_bytes_per_call=self._limits.max_tool_arguments_bytes_per_call,
-                        remaining_total_bytes=self._limits.max_tool_arguments_bytes_total - tool_arguments_bytes_total,
-                    )
-                except _JsonLimitExceeded:
-                    yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
-                    return
-                except RuntimeError:
-                    yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
-                    return
-                if safe_tool_calls is None:
-                    yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
-                    return
-                if tool_calls_total + len(turn.tool_calls) > self._limits.max_tool_calls_total:
-                    yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
-                    return
-                tool_arguments_bytes_total += arguments_size
+                tool_arguments_bytes_total += turn.tool_arguments_size
                 messages.append(
                     Message(
                         role=MessageRole.ASSISTANT,
                         content="".join(turn.text_parts) or None,
-                        tool_calls=tuple(safe_tool_calls),
+                        tool_calls=tuple(turn.tool_calls),
                     )
                 )
-                for call in safe_tool_calls:
+                for call in turn.tool_calls:
+                    if tool_result_bytes_total >= self._limits.max_tool_result_bytes_total:
+                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
+                        return
                     try:
                         result = await self._tool_executor.execute(call)
                     except asyncio.CancelledError:
@@ -215,6 +223,7 @@ class _ModelTurn:
         self.finish_reason: str | None = None
         self.completed_event: RuntimeEvent | None = None
         self.tool_calls: list[ToolCall] = []
+        self.tool_arguments_size = 0
         self.text_parts: list[str] = []
 
 
@@ -241,28 +250,23 @@ def _has_duplicate_call_ids(tool_calls: list[ToolCall]) -> bool:
     return False
 
 
-def _snapshot_tool_calls(
-    tool_calls: list[ToolCall],
+def _snapshot_tool_call(
+    call: ToolCall,
     *,
     max_bytes_per_call: int,
     remaining_total_bytes: int,
-) -> tuple[list[ToolCall], int]:
-    snapshotted: list[ToolCall] = []
-    total_size = 0
-    for call in tool_calls:
-        try:
-            arguments_json, size = _bounded_json(
-                call.arguments,
-                max_bytes=min(max_bytes_per_call, remaining_total_bytes - total_size),
-            )
-            arguments = json.loads(arguments_json)
-        except (TypeError, ValueError, RecursionError):
-            raise RuntimeError("Tool call arguments are not strict JSON") from None
-        if not isinstance(arguments, dict):
-            raise RuntimeError("Tool call arguments are not a JSON object")
-        snapshotted.append(ToolCall(id=call.id, name=call.name, arguments=arguments))
-        total_size += size
-    return snapshotted, total_size
+) -> tuple[ToolCall, int]:
+    try:
+        arguments_json, size = _bounded_json(
+            call.arguments,
+            max_bytes=min(max_bytes_per_call, remaining_total_bytes),
+        )
+        arguments = json.loads(arguments_json)
+    except (TypeError, ValueError, RecursionError):
+        raise RuntimeError("Tool call arguments are not strict JSON") from None
+    if not isinstance(arguments, dict):
+        raise RuntimeError("Tool call arguments are not a JSON object")
+    return ToolCall(id=call.id, name=call.name, arguments=arguments), size
 
 
 def _valid_tool_result(result: ToolResult) -> bool:
@@ -318,8 +322,9 @@ def _bounded_json(payload: object, *, max_bytes: int) -> tuple[str, int]:
 
 
 def _validate_json_safe_with_budget(value: object, *, remaining: int) -> int:
-    remaining = _consume_json_overhead(remaining, 1)
-    if value is None or isinstance(value, bool):
+    if value is None:
+        return _consume_json_overhead(remaining, 4)
+    if isinstance(value, bool):
         return _consume_json_overhead(remaining, 4)
     if isinstance(value, int) and not isinstance(value, bool):
         return _consume_json_overhead(remaining, len(str(value)))
@@ -352,10 +357,13 @@ def _consume_json_overhead(remaining: int, size: int) -> int:
 
 
 def _json_string_size(value: str) -> int:
+    short_escapes = {"\b", "\f", "\n", "\r", "\t"}
     size = 2
     for char in value:
         codepoint = ord(char)
         if char in {'"', "\\"}:
+            size += 2
+        elif char in short_escapes:
             size += 2
         elif codepoint <= 0x1F:
             size += 6

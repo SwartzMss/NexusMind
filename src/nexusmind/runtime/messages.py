@@ -25,6 +25,12 @@ class Message:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if self.content is None and not (
+            self.role == MessageRole.ASSISTANT and self.tool_calls
+        ):
+            raise ValueError("Only assistant tool call messages may omit content")
+        if self.content is not None and not isinstance(self.content, str):
+            raise ValueError("Message content must be a string or None")
         if self.tool_calls and self.role != MessageRole.ASSISTANT:
             raise ValueError("Only assistant messages may carry tool calls")
         if self.role == MessageRole.TOOL and not self.tool_call_id:

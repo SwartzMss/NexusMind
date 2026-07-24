@@ -4,6 +4,7 @@ from nexusmind.models.fake import FakeChatModel
 from nexusmind.models.tool_calls import ToolCallDelta
 from nexusmind.runtime.chat import AgentLoopLimits, ChatRuntime
 from nexusmind.runtime.events import RuntimeEvent, RuntimeEventType
+from nexusmind.runtime.messages import Message, MessageRole
 from nexusmind.tools.builtin import EchoTool
 from nexusmind.tools.contracts import ToolCall, ToolDefinition, ToolError, ToolErrorCode, ToolResult
 from nexusmind.tools.executor import ToolExecutor
@@ -839,4 +840,188 @@ def test_tool_result_repr_redacts_error_message_and_metadata() -> None:
 
     assert "sk-live-secret" not in repr(result)
     assert "secret" not in repr(result)
+
+
+def test_runtime_executes_original_tool_arguments_when_consumer_mutates_event() -> None:
+    class RecordingExecutor:
+        def __init__(self) -> None:
+            self.arguments = None
+
+        async def execute(self, call):
+            self.arguments = dict(call.arguments)
+            return ToolResult(call_id=call.id, name=call.name, output={"ok": True})
+
+    class ToolModel:
+        def __init__(self) -> None:
+            self.turns = 0
+
+        async def stream(self, messages, tools=None):
+            self.turns += 1
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            if self.turns == 1:
+                yield RuntimeEvent(
+                    RuntimeEventType.TOOL_CALL_COMPLETED,
+                    tool_call=ToolCall(id="call_1", name="echo", arguments={"path": "original"}),
+                )
+                yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+            else:
+                yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="stop")
+
+    async def run(executor):
+        stream = ChatRuntime(ToolModel(), tool_executor=executor).stream_user_message(
+            "hello",
+            tools=[ToolDefinition(name="echo")],
+        )
+        events = []
+        async for event in stream:
+            if event.tool_call is not None:
+                event.tool_call.arguments["path"] = "mutated"
+            events.append(event)
+        return events
+
+    executor = RecordingExecutor()
+    events = asyncio.run(run(executor))
+
+    assert events[-1].type == RuntimeEventType.RUN_COMPLETED
+    assert executor.arguments == {"path": "original"}
+
+
+def test_runtime_does_not_execute_tools_when_no_model_turn_budget_remains() -> None:
+    class CountingExecutor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute(self, call):
+            self.calls += 1
+            return ToolResult(call_id=call.id, name=call.name, output={})
+
+    class ToolModel:
+        async def stream(self, messages, tools=None):
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=ToolCall(id="call_1", name="echo", arguments={}))
+            yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+
+    async def collect(executor):
+        runtime = ChatRuntime(
+            ToolModel(),
+            tool_executor=executor,
+            limits=AgentLoopLimits(max_model_turns=1),
+        )
+        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo")])]
+
+    executor = CountingExecutor()
+    events = asyncio.run(collect(executor))
+
+    assert executor.calls == 0
+    assert events[-1].type == RuntimeEventType.RUN_FAILED
+
+
+def test_runtime_enforces_tool_call_count_limit_as_calls_arrive() -> None:
+    class TooManyToolCallsModel:
+        async def stream(self, messages, tools=None):
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=ToolCall(id="one", name="echo", arguments={}))
+            yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=ToolCall(id="two", name="echo", arguments={}))
+            raise AssertionError("runtime should stop before consuming more tool calls")
+
+    async def collect():
+        runtime = ChatRuntime(
+            TooManyToolCallsModel(),
+            tool_executor=_executor_with_echo(),
+            limits=AgentLoopLimits(max_tool_calls_total=1),
+        )
+        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo")])]
+
+    events = asyncio.run(collect())
+
+    assert events[-1].type == RuntimeEventType.RUN_FAILED
+    assert [event.type for event in events].count(RuntimeEventType.TOOL_CALL_COMPLETED) == 1
+
+
+def test_runtime_does_not_start_next_tool_when_result_budget_is_exhausted() -> None:
+    class BudgetExecutor:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def execute(self, call):
+            self.calls.append(call.id)
+            return ToolResult(call_id=call.id, name=call.name, output="")
+
+    class TwoToolModel:
+        async def stream(self, messages, tools=None):
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=ToolCall(id="one", name="echo", arguments={}))
+            yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=ToolCall(id="two", name="echo", arguments={}))
+            yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+
+    async def collect(executor):
+        runtime = ChatRuntime(
+            TwoToolModel(),
+            tool_executor=executor,
+            limits=AgentLoopLimits(max_tool_result_bytes_total=23),
+        )
+        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo")])]
+
+    executor = BudgetExecutor()
+    events = asyncio.run(collect(executor))
+
+    assert executor.calls == ["one"]
+    assert events[-1].type == RuntimeEventType.RUN_FAILED
+
+
+def test_runtime_json_budget_accepts_short_control_character_escape() -> None:
+    class NewlineExecutor:
+        async def execute(self, call):
+            return ToolResult(call_id=call.id, name=call.name, output={"x": "\n"})
+
+    class ToolModel:
+        def __init__(self) -> None:
+            self.messages_by_turn = []
+
+        async def stream(self, messages, tools=None):
+            self.messages_by_turn.append(list(messages))
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            if len(self.messages_by_turn) == 1:
+                yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=ToolCall(id="call_1", name="echo", arguments={}))
+                yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+            else:
+                yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="stop")
+
+    async def collect(model):
+        runtime = ChatRuntime(
+            model,
+            tool_executor=NewlineExecutor(),
+            limits=AgentLoopLimits(max_tool_result_bytes_per_call=31),
+        )
+        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo")])]
+
+    model = ToolModel()
+    events = asyncio.run(collect(model))
+
+    assert events[-1].type == RuntimeEventType.RUN_COMPLETED
+    assert model.messages_by_turn[1][-1].content == '{"ok":true,"output":{"x":"\\n"}}'
+
+
+def test_message_content_none_is_limited_to_assistant_tool_call_messages() -> None:
+    invalid_messages = [
+        lambda: Message(MessageRole.USER, None),
+        lambda: Message(MessageRole.SYSTEM, None),
+        lambda: Message(MessageRole.TOOL, None, tool_call_id="call_1"),
+        lambda: Message(MessageRole.ASSISTANT, None),
+    ]
+
+    for build in invalid_messages:
+        try:
+            build()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("expected ValueError")
+
+    message = Message(
+        MessageRole.ASSISTANT,
+        None,
+        tool_calls=(ToolCall(id="call_1", name="echo", arguments={}),),
+    )
+    assert message.content is None
 
