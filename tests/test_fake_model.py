@@ -22,6 +22,7 @@ def test_fake_model_streams_text_deltas() -> None:
         RuntimeEventType.MODEL_STARTED,
         RuntimeEventType.TEXT_DELTA,
         RuntimeEventType.TEXT_DELTA,
+        RuntimeEventType.MODEL_TURN_COMPLETED,
     ]
-    assert [event.text for event in events[1:]] == ["one", "two"]
+    assert [event.text for event in events if event.type == RuntimeEventType.TEXT_DELTA] == ["one", "two"]
 

@@ -65,6 +65,7 @@ def test_adapter_redacts_api_key_from_http_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             401,
+            headers={"x-request-id": "req_123"},
             json={"error": {"message": "bad key sk-test-secret"}},
         )
 
@@ -77,8 +78,25 @@ def test_adapter_redacts_api_key_from_http_error() -> None:
     else:
         raise AssertionError("expected ChatModelError")
 
+    assert message == "Model provider returned HTTP 401 (request_id=req_123)"
     assert "sk-test-secret" not in message
-    assert "[REDACTED]" in message
+
+
+def test_adapter_http_error_does_not_echo_provider_body() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"message": "bad argument sk-live-secret"}})
+
+    model = OpenAICompatibleChatModel(_config(), transport=httpx.MockTransport(handler))
+
+    try:
+        _collect(model)
+    except ChatModelError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("expected ChatModelError")
+
+    assert message == "Model provider returned HTTP 400"
+    assert "sk-live-secret" not in message
 
 
 def test_adapter_raises_on_stream_error_and_redacts_secret() -> None:
@@ -140,6 +158,34 @@ def test_adapter_rejects_non_object_json_payload() -> None:
         raise AssertionError("expected ChatModelError")
 
 
+def test_adapter_raises_on_non_strict_sse_json() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content='data: {"choices":[{"delta":{"content":NaN},"finish_reason":"stop"}]}\n\n')
+
+    model = OpenAICompatibleChatModel(_config(), transport=httpx.MockTransport(handler))
+
+    try:
+        _collect(model)
+    except ChatModelError as exc:
+        assert str(exc) == "Model stream returned malformed JSON"
+    else:
+        raise AssertionError("expected ChatModelError")
+
+
+def test_adapter_raises_before_parsing_oversized_sse_event() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=("data: " + ("x" * (1024 * 1024 + 1)) + "\n").encode())
+
+    model = OpenAICompatibleChatModel(_config(), transport=httpx.MockTransport(handler))
+
+    try:
+        _collect(model)
+    except ChatModelError as exc:
+        assert str(exc) == "Model stream returned an oversized SSE event"
+    else:
+        raise AssertionError("expected ChatModelError")
+
+
 def test_adapter_ignores_empty_choices_and_usage_chunks() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -173,6 +219,20 @@ def test_adapter_accepts_finish_reason_as_completion_signal() -> None:
     events = _collect(model)
 
     assert "".join(event.text or "" for event in events) == "done"
+
+
+def test_adapter_rejects_invalid_finish_reason_type() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=_sse({"choices": [{"delta": {}, "finish_reason": False}]}))
+
+    model = OpenAICompatibleChatModel(_config(), transport=httpx.MockTransport(handler))
+
+    try:
+        _collect(model)
+    except ChatModelError as exc:
+        assert str(exc) == "Model stream returned invalid finish_reason"
+    else:
+        raise AssertionError("expected ChatModelError")
 
 
 def test_adapter_raises_when_stream_ends_after_partial_text_without_completion() -> None:

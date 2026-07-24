@@ -20,6 +20,7 @@ def test_runtime_streams_model_events_in_order() -> None:
         RuntimeEventType.TEXT_DELTA,
         RuntimeEventType.TEXT_DELTA,
         RuntimeEventType.TEXT_DELTA,
+        RuntimeEventType.MODEL_TURN_COMPLETED,
         RuntimeEventType.RUN_COMPLETED,
     ]
     assert "".join(event.text or "" for event in events) == "abc"
@@ -39,6 +40,7 @@ def test_runtime_converts_model_exception_to_run_failed() -> None:
 def test_runtime_passes_through_tool_call_events() -> None:
     class ToolCallModel:
         async def stream(self, messages, tools=None):
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
             yield RuntimeEvent(
                 RuntimeEventType.TOOL_CALL_DELTA,
                 tool_call_delta=ToolCallDelta(index=0, call_id_fragment="call_1"),
@@ -57,6 +59,7 @@ def test_runtime_passes_through_tool_call_events() -> None:
 
     assert [event.type for event in events] == [
         RuntimeEventType.RUN_STARTED,
+        RuntimeEventType.MODEL_STARTED,
         RuntimeEventType.TOOL_CALL_DELTA,
         RuntimeEventType.TOOL_CALL_COMPLETED,
         RuntimeEventType.MODEL_TURN_COMPLETED,
@@ -66,6 +69,7 @@ def test_runtime_passes_through_tool_call_events() -> None:
 def test_runtime_completes_run_for_stop_model_turn() -> None:
     class StopModel:
         async def stream(self, messages, tools=None):
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
             yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="stop")
 
     async def collect():
@@ -76,7 +80,69 @@ def test_runtime_completes_run_for_stop_model_turn() -> None:
 
     assert [event.type for event in events] == [
         RuntimeEventType.RUN_STARTED,
+        RuntimeEventType.MODEL_STARTED,
         RuntimeEventType.MODEL_TURN_COMPLETED,
         RuntimeEventType.RUN_COMPLETED,
+    ]
+
+
+def test_runtime_fails_when_model_turn_completion_is_missing() -> None:
+    class MissingCompletionModel:
+        async def stream(self, messages, tools=None):
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            yield RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="hello")
+
+    async def collect():
+        runtime = ChatRuntime(MissingCompletionModel())
+        return [event async for event in runtime.stream_user_message("hello")]
+
+    events = asyncio.run(collect())
+
+    assert [event.type for event in events] == [
+        RuntimeEventType.RUN_STARTED,
+        RuntimeEventType.MODEL_STARTED,
+        RuntimeEventType.TEXT_DELTA,
+        RuntimeEventType.MODEL_FAILED,
+        RuntimeEventType.RUN_FAILED,
+    ]
+
+
+def test_runtime_fails_on_duplicate_turn_completion_or_events_after_completion() -> None:
+    class DuplicateCompletionModel:
+        async def stream(self, messages, tools=None):
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="stop")
+            yield RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="late")
+
+    async def collect():
+        runtime = ChatRuntime(DuplicateCompletionModel())
+        return [event async for event in runtime.stream_user_message("hello")]
+
+    events = asyncio.run(collect())
+
+    assert [event.type for event in events] == [
+        RuntimeEventType.RUN_STARTED,
+        RuntimeEventType.MODEL_STARTED,
+        RuntimeEventType.MODEL_TURN_COMPLETED,
+        RuntimeEventType.MODEL_FAILED,
+        RuntimeEventType.RUN_FAILED,
+    ]
+
+
+def test_runtime_fails_when_model_emits_before_model_started() -> None:
+    class BadOrderModel:
+        async def stream(self, messages, tools=None):
+            yield RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="early")
+
+    async def collect():
+        runtime = ChatRuntime(BadOrderModel())
+        return [event async for event in runtime.stream_user_message("hello")]
+
+    events = asyncio.run(collect())
+
+    assert [event.type for event in events] == [
+        RuntimeEventType.RUN_STARTED,
+        RuntimeEventType.MODEL_FAILED,
+        RuntimeEventType.RUN_FAILED,
     ]
 

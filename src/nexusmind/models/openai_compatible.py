@@ -15,6 +15,8 @@ from nexusmind.runtime.events import RuntimeEvent, RuntimeEventType
 from nexusmind.runtime.messages import Message, MessageRole
 from nexusmind.tools.contracts import ToolDefinition
 
+_MAX_SSE_EVENT_BYTES = 1024 * 1024
+
 
 class OpenAICompatibleChatModel(ChatModel):
     def __init__(self, config: ModelConfig, transport: httpx.AsyncBaseTransport | None = None) -> None:
@@ -46,12 +48,12 @@ class OpenAICompatibleChatModel(ChatModel):
             async with httpx.AsyncClient(timeout=self._config.timeout, transport=self._transport) as client:
                 async with client.stream("POST", url, json=request, headers=headers) as response:
                     if response.status_code >= 400:
-                        body = await response.aread()
-                        raise ChatModelError(_safe_http_error(response.status_code, body, self._config.api_key))
+                        await response.aclose()
+                        raise ChatModelError(_safe_http_error(response.status_code, response.headers))
                     completed = False
                     assembler = ToolCallAssembler()
                     finish_reason: str | None = None
-                    async for line in response.aiter_lines():
+                    async for line in _aiter_sse_lines(response):
                         chunk = _parse_sse_chunk(line, self._config.api_key)
                         completed = completed or chunk.completed
                         finish_reason = chunk.finish_reason or finish_reason
@@ -119,8 +121,8 @@ def _parse_sse_chunk(line: str, api_key: str) -> _SSEChunk:
     if data == "[DONE]":
         return _SSEChunk(completed=True)
     try:
-        payload = json.loads(data)
-    except json.JSONDecodeError as exc:
+        payload = json.loads(data, parse_constant=_reject_json_constant)
+    except (ValueError, RecursionError) as exc:
         raise ChatModelError("Model stream returned malformed JSON") from exc
     if not isinstance(payload, dict):
         raise ChatModelError("Model stream returned a non-object payload")
@@ -142,7 +144,9 @@ def _parse_sse_chunk(line: str, api_key: str) -> _SSEChunk:
     if not isinstance(choice, dict):
         raise ChatModelError("Model stream returned an invalid choice")
     raw_finish_reason = choice.get("finish_reason")
-    finish_reason = raw_finish_reason if isinstance(raw_finish_reason, str) else None
+    if raw_finish_reason is not None and not isinstance(raw_finish_reason, str):
+        raise ChatModelError("Model stream returned invalid finish_reason")
+    finish_reason = raw_finish_reason
     completed = bool(finish_reason)
     delta = choice.get("delta", {})
     if not isinstance(delta, dict):
@@ -216,25 +220,32 @@ def _normalize_finish_reason(finish_reason: str | None) -> str:
     return "unknown" if finish_reason else "null"
 
 
-def _safe_http_error(status_code: int, body: bytes, api_key: str) -> str:
-    text = body.decode("utf-8", errors="replace")
-    try:
-        payload = json.loads(text)
-        message = None
-        if isinstance(payload, dict):
-            error = payload.get("error")
-            if isinstance(error, dict):
-                message = error.get("message")
-            message = message or payload.get("message")
-        if isinstance(message, str) and message:
-            return _redact_secret(f"Model provider returned HTTP {status_code}: {message}", api_key)
-    except json.JSONDecodeError:
-        pass
+async def _aiter_sse_lines(response: httpx.Response) -> AsyncIterator[str]:
+    buffer = bytearray()
+    async for chunk in response.aiter_bytes():
+        buffer.extend(chunk)
+        if len(buffer) > _MAX_SSE_EVENT_BYTES:
+            raise ChatModelError("Model stream returned an oversized SSE event")
+        while True:
+            newline = buffer.find(b"\n")
+            if newline < 0:
+                break
+            raw_line = bytes(buffer[:newline]).rstrip(b"\r")
+            del buffer[: newline + 1]
+            yield raw_line.decode("utf-8", errors="replace")
+    if buffer:
+        if len(buffer) > _MAX_SSE_EVENT_BYTES:
+            raise ChatModelError("Model stream returned an oversized SSE event")
+        yield bytes(buffer).rstrip(b"\r").decode("utf-8", errors="replace")
+
+
+def _safe_http_error(status_code: int, headers: httpx.Headers) -> str:
+    request_id = headers.get("x-request-id") or headers.get("request-id")
+    if request_id:
+        return f"Model provider returned HTTP {status_code} (request_id={request_id})"
     return f"Model provider returned HTTP {status_code}"
 
 
-def _redact_secret(text: str, secret: str) -> str:
-    if not secret:
-        return text
-    return text.replace(secret, "[REDACTED]")
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"Invalid JSON constant: {value}")
 
