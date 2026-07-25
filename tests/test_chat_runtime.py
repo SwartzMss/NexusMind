@@ -1215,3 +1215,140 @@ def test_runtime_json_budget_rejects_circular_arguments() -> None:
         RuntimeEventType.RUN_FAILED,
     ]
 
+
+def test_runtime_rejects_tool_result_string_subclass_identity_fields() -> None:
+    class SneakyStr(str):
+        def __eq__(self, other):
+            return True
+
+        def __ne__(self, other):
+            return False
+
+    class BadExecutor:
+        async def execute(self, call):
+            return ToolResult(call_id=SneakyStr("other"), name=SneakyStr("other"), output={})
+
+    class ToolModel:
+        async def stream(self, messages, tools=None):
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=ToolCall(id="call_1", name="echo", arguments={}))
+            yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+
+    async def collect():
+        runtime = ChatRuntime(ToolModel(), tool_executor=BadExecutor())
+        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo")])]
+
+    events = asyncio.run(collect())
+
+    assert events[-1].type == RuntimeEventType.RUN_FAILED
+    assert RuntimeEventType.TOOL_RESULT not in [event.type for event in events]
+
+
+def test_runtime_rejects_tool_result_metadata_that_is_not_dict() -> None:
+    class BadExecutor:
+        async def execute(self, call):
+            return ToolResult(
+                call_id=call.id,
+                name=call.name,
+                output={},
+                metadata="not-a-dict",  # type: ignore[arg-type]
+            )
+
+    class ToolModel:
+        async def stream(self, messages, tools=None):
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=ToolCall(id="call_1", name="echo", arguments={}))
+            yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+
+    async def collect():
+        runtime = ChatRuntime(ToolModel(), tool_executor=BadExecutor())
+        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo")])]
+
+    events = asyncio.run(collect())
+
+    assert events[-1].type == RuntimeEventType.RUN_FAILED
+    assert RuntimeEventType.TOOL_RESULT not in [event.type for event in events]
+
+
+def test_agent_loop_limits_reject_result_node_budget_that_cannot_fit_minimum_envelope() -> None:
+    try:
+        AgentLoopLimits(max_json_nodes_per_payload=1)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_runtime_propagates_cancel_during_model_call() -> None:
+    class CancelModel:
+        async def stream(self, messages, tools=None):
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            raise asyncio.CancelledError()
+
+    async def collect():
+        return [event async for event in ChatRuntime(CancelModel()).stream_user_message("hello")]
+
+    try:
+        asyncio.run(collect())
+    except asyncio.CancelledError:
+        pass
+    else:
+        raise AssertionError("expected CancelledError")
+
+
+def test_runtime_propagates_cancel_during_tool_call() -> None:
+    class CancelExecutor:
+        async def execute(self, call):
+            raise asyncio.CancelledError()
+
+    class ToolModel:
+        async def stream(self, messages, tools=None):
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=ToolCall(id="call_1", name="echo", arguments={}))
+            yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+
+    async def collect():
+        runtime = ChatRuntime(ToolModel(), tool_executor=CancelExecutor())
+        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo")])]
+
+    try:
+        asyncio.run(collect())
+    except asyncio.CancelledError:
+        pass
+    else:
+        raise AssertionError("expected CancelledError")
+
+
+def test_runtime_does_not_start_later_tools_after_mid_batch_cancel() -> None:
+    class CancelSecondExecutor:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def execute(self, call):
+            self.calls.append(call.id)
+            if call.id == "two":
+                raise asyncio.CancelledError()
+            return ToolResult(call_id=call.id, name=call.name, output={})
+
+    class MultiToolModel:
+        async def stream(self, messages, tools=None):
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=ToolCall(id="one", name="echo", arguments={}))
+            yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=ToolCall(id="two", name="echo", arguments={}))
+            yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=ToolCall(id="three", name="echo", arguments={}))
+            yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+
+    async def collect(executor):
+        runtime = ChatRuntime(MultiToolModel(), tool_executor=executor)
+        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo")])]
+
+    executor = CancelSecondExecutor()
+    try:
+        asyncio.run(collect(executor))
+    except asyncio.CancelledError:
+        pass
+    else:
+        raise AssertionError("expected CancelledError")
+
+    assert executor.calls == ["one", "two"]
+

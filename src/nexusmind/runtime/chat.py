@@ -25,6 +25,7 @@ _FINISH_REASONS = {
 _RUNTIME_ERROR = "Runtime state machine failed"
 _LIMIT_ERROR = "Agent loop limit exceeded"
 _MIN_TOOL_RESULT_ENVELOPE_BYTES = len('{"ok":true,"output":0}'.encode("utf-8"))
+_MIN_TOOL_RESULT_ENVELOPE_NODES = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +53,8 @@ class AgentLoopLimits:
             value = getattr(self, field_name)
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise ValueError("Agent loop limits must be positive integers")
+        if self.max_json_nodes_per_payload < _MIN_TOOL_RESULT_ENVELOPE_NODES:
+            raise ValueError("Agent loop limits must allow a minimal tool result envelope")
 
 
 class ChatRuntime:
@@ -193,14 +196,17 @@ class ChatRuntime:
                         return
                     if (
                         not isinstance(result, ToolResult)
-                        or not isinstance(result.call_id, str)
+                        or type(result.call_id) is not str
                         or not result.call_id
-                        or not isinstance(result.name, str)
+                        or type(result.name) is not str
                         or not result.name
                     ):
                         yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                         return
-                    if result.call_id != call.id or result.name != call.name:
+                    if type(call.id) is not str or type(call.name) is not str:
+                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                        return
+                    if str.__ne__(result.call_id, call.id) or str.__ne__(result.name, call.name):
                         yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                         return
                     if not _valid_tool_result(result):
@@ -297,6 +303,8 @@ def _snapshot_tool_call(
 
 
 def _valid_tool_result(result: ToolResult) -> bool:
+    if type(result.metadata) is not dict:
+        return False
     if result.error is None:
         return True
     return (
