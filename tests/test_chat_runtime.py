@@ -215,6 +215,23 @@ def test_runtime_rejects_raw_string_event_type_before_dispatch() -> None:
     assert RuntimeEventType.TOOL_RESULT not in [event.type for event in events]
 
 
+def test_runtime_rejects_model_event_with_non_dict_metadata() -> None:
+    class BadMetadataModel:
+        async def stream(self, messages, tools=None):
+            yield RuntimeEvent(
+                RuntimeEventType.MODEL_STARTED,
+                metadata="not-a-dict",  # type: ignore[arg-type]
+            )
+
+    async def collect():
+        return [event async for event in ChatRuntime(BadMetadataModel()).stream_user_message("hello")]
+
+    events = asyncio.run(collect())
+
+    assert events[-2].type == RuntimeEventType.MODEL_FAILED
+    assert events[-1].type == RuntimeEventType.RUN_FAILED
+
+
 def test_runtime_rejects_non_runtime_event_dto_and_does_not_execute_tool() -> None:
     class FakeEvent:
         type = RuntimeEventType.TOOL_CALL_COMPLETED
@@ -581,6 +598,59 @@ def test_runtime_completes_after_multiple_tool_turns_with_history_preserved() ->
     assert third_turn_messages[3].tool_calls[0].id == "call_2"
     assert third_turn_messages[4].tool_call_id == "call_2"
     assert third_turn_messages[4].content == '{"ok":true,"output":{"text":"two"}}'
+
+
+def test_runtime_model_cannot_mutate_internal_message_history() -> None:
+    class RecordingExecutor:
+        async def execute(self, call):
+            return ToolResult(call_id=call.id, name=call.name, output={"path": call.arguments["path"]})
+
+    class MutatingModel:
+        def __init__(self) -> None:
+            self.messages_by_turn = []
+
+        async def stream(self, messages, tools=None):
+            self.messages_by_turn.append(list(messages))
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            if len(self.messages_by_turn) == 1:
+                yield RuntimeEvent(
+                    RuntimeEventType.TOOL_CALL_COMPLETED,
+                    tool_call=ToolCall(id="call_1", name="echo", arguments={"path": "original"}),
+                )
+                yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+                messages.clear()
+            elif len(self.messages_by_turn) == 2:
+                messages.clear()
+                self.messages_by_turn[-1][-2].metadata["mutated"] = True
+                self.messages_by_turn[-1][-2].tool_calls[0].arguments["path"] = "changed"
+                yield RuntimeEvent(
+                    RuntimeEventType.TOOL_CALL_COMPLETED,
+                    tool_call=ToolCall(id="call_2", name="echo", arguments={"path": "second"}),
+                )
+                yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+            else:
+                yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="stop")
+
+    async def collect(model):
+        runtime = ChatRuntime(model, tool_executor=RecordingExecutor())
+        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo")])]
+
+    model = MutatingModel()
+    events = asyncio.run(collect(model))
+
+    assert events[-1].type == RuntimeEventType.RUN_COMPLETED
+    third_turn_messages = model.messages_by_turn[2]
+    assert [message.role for message in third_turn_messages] == [
+        MessageRole.USER,
+        MessageRole.ASSISTANT,
+        MessageRole.TOOL,
+        MessageRole.ASSISTANT,
+        MessageRole.TOOL,
+    ]
+    assert third_turn_messages[1].metadata == {}
+    assert third_turn_messages[1].tool_calls[0].arguments == {"path": "original"}
+    assert third_turn_messages[2].content == '{"ok":true,"output":{"path":"original"}}'
+    assert third_turn_messages[3].tool_calls[0].arguments == {"path": "second"}
 
 
 def test_runtime_executes_multiple_tool_calls_in_order_even_when_one_fails() -> None:

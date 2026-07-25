@@ -45,3 +45,4 @@ class Message:
                 for call in self.tool_calls
             ),
         )
+        object.__setattr__(self, "metadata", deepcopy(self.metadata))

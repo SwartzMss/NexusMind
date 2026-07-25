@@ -95,7 +95,7 @@ class ChatRuntime:
                 model_turns += 1
                 turn = _ModelTurn()
                 try:
-                    async for event in self._model.stream(messages, tools=tools):
+                    async for event in self._model.stream(_snapshot_messages(messages), tools=tools):
                         validation_error = _validate_model_event(event, turn.model_started, turn.completed)
                         if validation_error:
                             yield RuntimeEvent(RuntimeEventType.MODEL_FAILED, error=validation_error)
@@ -470,12 +470,28 @@ def _json_string_size(value: str) -> int:
     return size
 
 
+def _snapshot_messages(messages: list[Message]) -> list[Message]:
+    return [
+        Message(
+            role=message.role,
+            content=message.content,
+            name=message.name,
+            tool_call_id=message.tool_call_id,
+            tool_calls=message.tool_calls,
+            metadata=message.metadata,
+        )
+        for message in messages
+    ]
+
+
 def _validate_model_event(event: object, model_started: bool, model_turn_completed: bool) -> str | None:
     if type(event) is not RuntimeEvent:
         return "Model emitted an invalid event DTO"
     event = cast(RuntimeEvent, event)
     if type(event.type) is not RuntimeEventType:
         return "Model emitted an event with an invalid type"
+    if type(event.metadata) is not dict:
+        return "Model emitted an event with invalid metadata"
     allowed_types = {
         RuntimeEventType.MODEL_STARTED,
         RuntimeEventType.TEXT_DELTA,
