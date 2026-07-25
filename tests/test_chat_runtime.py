@@ -198,6 +198,59 @@ def test_runtime_rejects_model_events_outside_the_model_whitelist() -> None:
         assert events[-1].type == RuntimeEventType.RUN_FAILED
 
 
+def test_runtime_rejects_raw_string_event_type_before_dispatch() -> None:
+    class RawStringTypeModel:
+        async def stream(self, messages, tools=None):
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            yield RuntimeEvent("tool_call_completed", tool_call=ToolCall(id="call_1", name="echo", arguments={}))  # type: ignore[arg-type]
+
+    async def collect():
+        runtime = ChatRuntime(RawStringTypeModel(), tool_executor=_executor_with_echo())
+        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo")])]
+
+    events = asyncio.run(collect())
+
+    assert events[-2].type == RuntimeEventType.MODEL_FAILED
+    assert events[-1].type == RuntimeEventType.RUN_FAILED
+    assert RuntimeEventType.TOOL_RESULT not in [event.type for event in events]
+
+
+def test_runtime_rejects_non_runtime_event_dto_and_does_not_execute_tool() -> None:
+    class FakeEvent:
+        type = RuntimeEventType.TOOL_CALL_COMPLETED
+        text = None
+        error = None
+        tool_call_delta = None
+        tool_call = ToolCall(id="call_1", name="echo", arguments={})
+        tool_result = None
+        finish_reason = None
+        metadata = {}
+
+    class CountingExecutor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute(self, call):
+            self.calls += 1
+            return ToolResult(call_id=call.id, name=call.name, output={})
+
+    class FakeEventModel:
+        async def stream(self, messages, tools=None):
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            yield FakeEvent()
+
+    async def collect(executor):
+        runtime = ChatRuntime(FakeEventModel(), tool_executor=executor)
+        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo")])]
+
+    executor = CountingExecutor()
+    events = asyncio.run(collect(executor))
+
+    assert executor.calls == 0
+    assert events[-2].type == RuntimeEventType.MODEL_FAILED
+    assert events[-1].type == RuntimeEventType.RUN_FAILED
+
+
 def test_runtime_rejects_model_events_with_missing_payloads() -> None:
     invalid_events = [
         RuntimeEvent(RuntimeEventType.TEXT_DELTA),
@@ -220,6 +273,27 @@ def test_runtime_rejects_model_events_with_missing_payloads() -> None:
                     "hello"
                 )
             ]
+
+        events = asyncio.run(collect())
+        assert events[-2].type == RuntimeEventType.MODEL_FAILED
+        assert events[-1].type == RuntimeEventType.RUN_FAILED
+
+
+def test_runtime_rejects_model_events_with_conflicting_payload_fields() -> None:
+    invalid_events = [
+        RuntimeEvent(RuntimeEventType.MODEL_STARTED, tool_call=ToolCall(id="call_1", name="echo", arguments={})),
+        RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="hello", tool_result=ToolResult(call_id="call_1", name="echo", output={})),
+        RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="stop", error="unexpected"),
+    ]
+
+    for invalid_event in invalid_events:
+        class ConflictingPayloadModel:
+            async def stream(self, messages, tools=None):
+                yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+                yield invalid_event
+
+        async def collect():
+            return [event async for event in ChatRuntime(ConflictingPayloadModel()).stream_user_message("hello")]
 
         events = asyncio.run(collect())
         assert events[-2].type == RuntimeEventType.MODEL_FAILED

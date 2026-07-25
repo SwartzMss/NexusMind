@@ -101,6 +101,7 @@ class ChatRuntime:
                             yield RuntimeEvent(RuntimeEventType.MODEL_FAILED, error=validation_error)
                             yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=validation_error)
                             return
+                        event = cast(RuntimeEvent, event)
                         if event.type == RuntimeEventType.MODEL_STARTED:
                             turn.model_started = True
                         elif event.type == RuntimeEventType.MODEL_FAILED:
@@ -469,7 +470,12 @@ def _json_string_size(value: str) -> int:
     return size
 
 
-def _validate_model_event(event: RuntimeEvent, model_started: bool, model_turn_completed: bool) -> str | None:
+def _validate_model_event(event: object, model_started: bool, model_turn_completed: bool) -> str | None:
+    if type(event) is not RuntimeEvent:
+        return "Model emitted an invalid event DTO"
+    event = cast(RuntimeEvent, event)
+    if type(event.type) is not RuntimeEventType:
+        return "Model emitted an event with an invalid type"
     allowed_types = {
         RuntimeEventType.MODEL_STARTED,
         RuntimeEventType.TEXT_DELTA,
@@ -480,6 +486,9 @@ def _validate_model_event(event: RuntimeEvent, model_started: bool, model_turn_c
     }
     if event.type not in allowed_types:
         return "Model emitted an unsupported event"
+    payload_error = _validate_event_payload_shape(event)
+    if payload_error:
+        return payload_error
     if model_turn_completed:
         return "Model emitted events after model turn completion"
     if event.type == RuntimeEventType.MODEL_STARTED:
@@ -531,5 +540,29 @@ def _validate_model_event(event: RuntimeEvent, model_started: bool, model_turn_c
         return "Model completed a turn with an invalid finish reason"
     if event.type == RuntimeEventType.MODEL_FAILED and not isinstance(event.error, str):
         return "Model failed without an error"
+    return None
+
+
+def _validate_event_payload_shape(event: RuntimeEvent) -> str | None:
+    payload_fields = {
+        "text": event.text,
+        "error": event.error,
+        "tool_call_delta": event.tool_call_delta,
+        "tool_call": event.tool_call,
+        "tool_result": event.tool_result,
+        "finish_reason": event.finish_reason,
+    }
+    allowed_fields_by_type = {
+        RuntimeEventType.MODEL_STARTED: set(),
+        RuntimeEventType.TEXT_DELTA: {"text"},
+        RuntimeEventType.TOOL_CALL_DELTA: {"tool_call_delta"},
+        RuntimeEventType.TOOL_CALL_COMPLETED: {"tool_call"},
+        RuntimeEventType.MODEL_TURN_COMPLETED: {"finish_reason"},
+        RuntimeEventType.MODEL_FAILED: {"error"},
+    }
+    allowed_fields = allowed_fields_by_type.get(event.type, set())
+    for field_name, value in payload_fields.items():
+        if field_name not in allowed_fields and value is not None:
+            return "Model emitted an event with conflicting payload fields"
     return None
 
