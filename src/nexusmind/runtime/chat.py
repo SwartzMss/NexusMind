@@ -110,12 +110,17 @@ class ChatRuntime:
                         elif event.type == RuntimeEventType.TEXT_DELTA:
                             turn.text_parts.append(cast(str, event.text))
                         elif event.type == RuntimeEventType.TOOL_CALL_COMPLETED:
+                            tool_call = cast(ToolCall, event.tool_call)
+                            if type(tool_call.id) is not str or type(tool_call.name) is not str:
+                                yield RuntimeEvent(RuntimeEventType.MODEL_FAILED, error=_RUNTIME_ERROR)
+                                yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                                return
                             if tool_calls_total + len(turn.tool_calls) + 1 > self._limits.max_tool_calls_total:
                                 yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
                                 return
                             try:
                                 safe_tool_call, arguments_size = _snapshot_tool_call(
-                                    cast(ToolCall, event.tool_call),
+                                    tool_call,
                                     max_bytes_per_call=self._limits.max_tool_arguments_bytes_per_call,
                                     remaining_total_bytes=(
                                         self._limits.max_tool_arguments_bytes_total
@@ -201,9 +206,6 @@ class ChatRuntime:
                         or type(result.name) is not str
                         or not result.name
                     ):
-                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
-                        return
-                    if type(call.id) is not str or type(call.name) is not str:
                         yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                         return
                     if str.__ne__(result.call_id, call.id) or str.__ne__(result.name, call.name):

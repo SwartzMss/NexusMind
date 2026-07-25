@@ -1244,6 +1244,45 @@ def test_runtime_rejects_tool_result_string_subclass_identity_fields() -> None:
     assert RuntimeEventType.TOOL_RESULT not in [event.type for event in events]
 
 
+def test_runtime_rejects_tool_call_string_subclass_identity_before_execution() -> None:
+    class SneakyStr(str):
+        def __eq__(self, other):
+            return True
+
+        def __ne__(self, other):
+            return False
+
+    class CountingExecutor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute(self, call):
+            self.calls += 1
+            return ToolResult(call_id="call_1", name="echo", output={})
+
+    class ToolModel:
+        async def stream(self, messages, tools=None):
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            yield RuntimeEvent(
+                RuntimeEventType.TOOL_CALL_COMPLETED,
+                tool_call=ToolCall(id=SneakyStr("call_1"), name=SneakyStr("echo"), arguments={}),
+            )
+            yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+
+    async def collect(executor):
+        runtime = ChatRuntime(ToolModel(), tool_executor=executor)
+        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo")])]
+
+    executor = CountingExecutor()
+    events = asyncio.run(collect(executor))
+
+    assert executor.calls == 0
+    assert [event.type for event in events[-2:]] == [
+        RuntimeEventType.MODEL_FAILED,
+        RuntimeEventType.RUN_FAILED,
+    ]
+
+
 def test_runtime_rejects_tool_result_metadata_that_is_not_dict() -> None:
     class BadExecutor:
         async def execute(self, call):
@@ -1285,15 +1324,25 @@ def test_runtime_propagates_cancel_during_model_call() -> None:
             yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
             raise asyncio.CancelledError()
 
-    async def collect():
-        return [event async for event in ChatRuntime(CancelModel()).stream_user_message("hello")]
+    async def collect(events):
+        async for event in ChatRuntime(CancelModel()).stream_user_message("hello"):
+            events.append(event)
 
+    events = []
     try:
-        asyncio.run(collect())
+        asyncio.run(collect(events))
     except asyncio.CancelledError:
         pass
     else:
         raise AssertionError("expected CancelledError")
+
+    assert [event.type for event in events] == [
+        RuntimeEventType.RUN_STARTED,
+        RuntimeEventType.MODEL_STARTED,
+    ]
+    assert RuntimeEventType.MODEL_FAILED not in [event.type for event in events]
+    assert RuntimeEventType.RUN_FAILED not in [event.type for event in events]
+    assert RuntimeEventType.RUN_COMPLETED not in [event.type for event in events]
 
 
 def test_runtime_propagates_cancel_during_tool_call() -> None:
@@ -1307,16 +1356,29 @@ def test_runtime_propagates_cancel_during_tool_call() -> None:
             yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=ToolCall(id="call_1", name="echo", arguments={}))
             yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
 
-    async def collect():
+    async def collect(events):
         runtime = ChatRuntime(ToolModel(), tool_executor=CancelExecutor())
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo")])]
+        async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo")]):
+            events.append(event)
 
+    events = []
     try:
-        asyncio.run(collect())
+        asyncio.run(collect(events))
     except asyncio.CancelledError:
         pass
     else:
         raise AssertionError("expected CancelledError")
+
+    assert [event.type for event in events] == [
+        RuntimeEventType.RUN_STARTED,
+        RuntimeEventType.MODEL_STARTED,
+        RuntimeEventType.TOOL_CALL_COMPLETED,
+        RuntimeEventType.MODEL_TURN_COMPLETED,
+    ]
+    assert RuntimeEventType.MODEL_FAILED not in [event.type for event in events]
+    assert RuntimeEventType.RUN_FAILED not in [event.type for event in events]
+    assert RuntimeEventType.RUN_COMPLETED not in [event.type for event in events]
+    assert [event.type for event in events].count(RuntimeEventType.MODEL_STARTED) == 1
 
 
 def test_runtime_does_not_start_later_tools_after_mid_batch_cancel() -> None:
