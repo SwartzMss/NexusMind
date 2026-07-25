@@ -437,6 +437,78 @@ def test_runtime_executes_tool_call_and_feeds_result_to_next_turn() -> None:
     assert events[4].tool_result.output == {"text": "hello"}
 
 
+def test_runtime_completes_after_multiple_tool_turns_with_history_preserved() -> None:
+    class RecordingExecutor:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def execute(self, call):
+            self.calls.append((call.id, call.name, dict(call.arguments)))
+            return ToolResult(call_id=call.id, name=call.name, output={"text": call.arguments["text"]})
+
+    class MultiTurnToolModel:
+        def __init__(self) -> None:
+            self.messages_by_turn = []
+
+        async def stream(self, messages, tools=None):
+            self.messages_by_turn.append(list(messages))
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            if len(self.messages_by_turn) == 1:
+                yield RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="checking first")
+                yield RuntimeEvent(
+                    RuntimeEventType.TOOL_CALL_COMPLETED,
+                    tool_call=ToolCall(id="call_1", name="echo", arguments={"text": "one"}),
+                )
+                yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+            elif len(self.messages_by_turn) == 2:
+                yield RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="checking second")
+                yield RuntimeEvent(
+                    RuntimeEventType.TOOL_CALL_COMPLETED,
+                    tool_call=ToolCall(id="call_2", name="echo", arguments={"text": "two"}),
+                )
+                yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+            else:
+                yield RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="done")
+                yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="stop")
+
+    async def collect(model, executor):
+        runtime = ChatRuntime(model, tool_executor=executor)
+        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo")])]
+
+    model = MultiTurnToolModel()
+    executor = RecordingExecutor()
+    events = asyncio.run(collect(model, executor))
+
+    assert executor.calls == [
+        ("call_1", "echo", {"text": "one"}),
+        ("call_2", "echo", {"text": "two"}),
+    ]
+    assert [event.type for event in events].count(RuntimeEventType.RUN_STARTED) == 1
+    assert [event.type for event in events].count(RuntimeEventType.RUN_COMPLETED) == 1
+    assert events[-1].type == RuntimeEventType.RUN_COMPLETED
+    assert [event.tool_result.call_id for event in events if event.type == RuntimeEventType.TOOL_RESULT] == [
+        "call_1",
+        "call_2",
+    ]
+
+    third_turn_messages = model.messages_by_turn[2]
+    assert [message.role for message in third_turn_messages] == [
+        MessageRole.USER,
+        MessageRole.ASSISTANT,
+        MessageRole.TOOL,
+        MessageRole.ASSISTANT,
+        MessageRole.TOOL,
+    ]
+    assert third_turn_messages[1].content == "checking first"
+    assert third_turn_messages[1].tool_calls[0].id == "call_1"
+    assert third_turn_messages[2].tool_call_id == "call_1"
+    assert third_turn_messages[2].content == '{"ok":true,"output":{"text":"one"}}'
+    assert third_turn_messages[3].content == "checking second"
+    assert third_turn_messages[3].tool_calls[0].id == "call_2"
+    assert third_turn_messages[4].tool_call_id == "call_2"
+    assert third_turn_messages[4].content == '{"ok":true,"output":{"text":"two"}}'
+
+
 def test_runtime_executes_multiple_tool_calls_in_order_even_when_one_fails() -> None:
     class MultiToolModel:
         async def stream(self, messages, tools=None):
@@ -471,6 +543,78 @@ def test_runtime_executes_multiple_tool_calls_in_order_even_when_one_fails() -> 
     assert results[0].error is not None
     assert results[1].output == {"text": "ok"}
     assert events[-1].type == RuntimeEventType.RUN_COMPLETED
+
+
+def test_runtime_feeds_timeout_and_execution_failed_results_and_continues_same_turn() -> None:
+    class MixedFailureExecutor:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def execute(self, call):
+            self.calls.append(call.id)
+            if call.id == "timeout":
+                return ToolResult(
+                    call_id=call.id,
+                    name=call.name,
+                    error=ToolError(
+                        code=ToolErrorCode.EXECUTION_TIMEOUT,
+                        message="Tool timed out after 1 seconds",
+                    ),
+                )
+            if call.id == "failed":
+                return ToolResult(
+                    call_id=call.id,
+                    name=call.name,
+                    error=ToolError(
+                        code=ToolErrorCode.EXECUTION_FAILED,
+                        message="Tool execution failed",
+                    ),
+                )
+            return ToolResult(call_id=call.id, name=call.name, output={"text": "ok"})
+
+    class MixedFailureModel:
+        def __init__(self) -> None:
+            self.messages_by_turn = []
+
+        async def stream(self, messages, tools=None):
+            self.messages_by_turn.append(list(messages))
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            if len(self.messages_by_turn) == 1:
+                yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=ToolCall(id="timeout", name="slow", arguments={}))
+                yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=ToolCall(id="failed", name="fail", arguments={}))
+                yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=ToolCall(id="ok", name="echo", arguments={}))
+                yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+            else:
+                yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="stop")
+
+    async def collect(model, executor):
+        runtime = ChatRuntime(model, tool_executor=executor)
+        tools = [ToolDefinition(name="slow"), ToolDefinition(name="fail"), ToolDefinition(name="echo")]
+        return [event async for event in runtime.stream_user_message("hello", tools=tools)]
+
+    model = MixedFailureModel()
+    executor = MixedFailureExecutor()
+    events = asyncio.run(collect(model, executor))
+
+    assert executor.calls == ["timeout", "failed", "ok"]
+    assert RuntimeEventType.RUN_FAILED not in [event.type for event in events]
+    assert events[-1].type == RuntimeEventType.RUN_COMPLETED
+    tool_results = [event.tool_result for event in events if event.type == RuntimeEventType.TOOL_RESULT]
+    assert [result.error.code for result in tool_results[:2]] == [
+        ToolErrorCode.EXECUTION_TIMEOUT,
+        ToolErrorCode.EXECUTION_FAILED,
+    ]
+
+    second_turn_messages = model.messages_by_turn[1]
+    assert second_turn_messages[-3].content == (
+        '{"ok":false,"error":{"code":"EXECUTION_TIMEOUT",'
+        '"message":"Tool timed out after 1 seconds","retryable":false}}'
+    )
+    assert second_turn_messages[-2].content == (
+        '{"ok":false,"error":{"code":"EXECUTION_FAILED",'
+        '"message":"Tool execution failed","retryable":false}}'
+    )
+    assert second_turn_messages[-1].content == '{"ok":true,"output":{"text":"ok"}}'
 
 
 def test_runtime_fails_duplicate_tool_call_ids_before_executing() -> None:
