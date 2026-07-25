@@ -24,6 +24,7 @@ _FINISH_REASONS = {
 }
 _RUNTIME_ERROR = "Runtime state machine failed"
 _LIMIT_ERROR = "Agent loop limit exceeded"
+_MIN_TOOL_RESULT_ENVELOPE_BYTES = len('{"ok":true,"output":0}'.encode("utf-8"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +35,8 @@ class AgentLoopLimits:
     max_tool_arguments_bytes_total: int = 4 * 1024 * 1024
     max_tool_result_bytes_per_call: int = 1024 * 1024
     max_tool_result_bytes_total: int = 4 * 1024 * 1024
+    max_json_nodes_per_payload: int = 100_000
+    max_json_depth: int = 100
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -43,6 +46,8 @@ class AgentLoopLimits:
             "max_tool_arguments_bytes_total",
             "max_tool_result_bytes_per_call",
             "max_tool_result_bytes_total",
+            "max_json_nodes_per_payload",
+            "max_json_depth",
         ):
             value = getattr(self, field_name)
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
@@ -114,11 +119,14 @@ class ChatRuntime:
                                         - tool_arguments_bytes_total
                                         - turn.tool_arguments_size
                                     ),
+                                    max_nodes=self._limits.max_json_nodes_per_payload,
+                                    max_depth=self._limits.max_json_depth,
                                 )
                             except _JsonLimitExceeded:
                                 yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
                                 return
                             except RuntimeError:
+                                yield RuntimeEvent(RuntimeEventType.MODEL_FAILED, error=_RUNTIME_ERROR)
                                 yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                                 return
                             turn.tool_calls.append(safe_tool_call)
@@ -169,7 +177,11 @@ class ChatRuntime:
                     )
                 )
                 for call in turn.tool_calls:
-                    if tool_result_bytes_total >= self._limits.max_tool_result_bytes_total:
+                    remaining_result_bytes = self._limits.max_tool_result_bytes_total - tool_result_bytes_total
+                    if (
+                        remaining_result_bytes < _MIN_TOOL_RESULT_ENVELOPE_BYTES
+                        or self._limits.max_tool_result_bytes_per_call < _MIN_TOOL_RESULT_ENVELOPE_BYTES
+                    ):
                         yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
                         return
                     try:
@@ -177,6 +189,15 @@ class ChatRuntime:
                     except asyncio.CancelledError:
                         raise
                     except Exception:
+                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                        return
+                    if (
+                        not isinstance(result, ToolResult)
+                        or not isinstance(result.call_id, str)
+                        or not result.call_id
+                        or not isinstance(result.name, str)
+                        or not result.name
+                    ):
                         yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                         return
                     if result.call_id != call.id or result.name != call.name:
@@ -190,6 +211,8 @@ class ChatRuntime:
                             result,
                             max_bytes_per_call=self._limits.max_tool_result_bytes_per_call,
                             remaining_total_bytes=self._limits.max_tool_result_bytes_total - tool_result_bytes_total,
+                            max_nodes=self._limits.max_json_nodes_per_payload,
+                            max_depth=self._limits.max_json_depth,
                         )
                     except _JsonLimitExceeded:
                         yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
@@ -255,11 +278,15 @@ def _snapshot_tool_call(
     *,
     max_bytes_per_call: int,
     remaining_total_bytes: int,
+    max_nodes: int,
+    max_depth: int,
 ) -> tuple[ToolCall, int]:
     try:
         arguments_json, size = _bounded_json(
             call.arguments,
             max_bytes=min(max_bytes_per_call, remaining_total_bytes),
+            max_nodes=max_nodes,
+            max_depth=max_depth,
         )
         arguments = json.loads(arguments_json)
     except (TypeError, ValueError, RecursionError):
@@ -286,6 +313,8 @@ def _tool_result_message_content(
     *,
     max_bytes_per_call: int,
     remaining_total_bytes: int,
+    max_nodes: int,
+    max_depth: int,
 ) -> tuple[str, int]:
     if result.error is not None:
         payload = {
@@ -299,7 +328,12 @@ def _tool_result_message_content(
     else:
         payload = {"ok": True, "output": result.output}
     try:
-        return _bounded_json(payload, max_bytes=min(max_bytes_per_call, remaining_total_bytes))
+        return _bounded_json(
+            payload,
+            max_bytes=min(max_bytes_per_call, remaining_total_bytes),
+            max_nodes=max_nodes,
+            max_depth=max_depth,
+        )
     except (TypeError, ValueError, RecursionError) as exc:
         raise RuntimeError("Tool result is not JSON serializable") from exc
 
@@ -308,8 +342,14 @@ class _JsonLimitExceeded(RuntimeError):
     pass
 
 
-def _bounded_json(payload: object, *, max_bytes: int) -> tuple[str, int]:
-    _validate_json_safe_with_budget(payload, remaining=max_bytes)
+def _bounded_json(
+    payload: object,
+    *,
+    max_bytes: int,
+    max_nodes: int,
+    max_depth: int,
+) -> tuple[str, int]:
+    _JsonBudget(max_bytes=max_bytes, max_nodes=max_nodes, max_depth=max_depth).validate(payload)
     encoder = json.JSONEncoder(ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     parts: list[str] = []
     size = 0
@@ -321,39 +361,80 @@ def _bounded_json(payload: object, *, max_bytes: int) -> tuple[str, int]:
     return "".join(parts), size
 
 
-def _validate_json_safe_with_budget(value: object, *, remaining: int) -> int:
-    if value is None:
-        return _consume_json_overhead(remaining, 4)
-    if isinstance(value, bool):
-        return _consume_json_overhead(remaining, 4)
-    if isinstance(value, int) and not isinstance(value, bool):
-        return _consume_json_overhead(remaining, len(str(value)))
-    if isinstance(value, float):
-        if value != value or value in {float("inf"), float("-inf")}:
-            raise ValueError("Non-finite JSON number")
-        return _consume_json_overhead(remaining, len(str(value)))
-    if isinstance(value, str):
-        return _consume_json_overhead(remaining, _json_string_size(value))
-    if isinstance(value, list):
-        current = remaining
-        for item in value:
-            current = _validate_json_safe_with_budget(item, remaining=current)
-        return current
-    if isinstance(value, dict):
-        current = remaining
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise TypeError("JSON object keys must be strings")
-            current = _consume_json_overhead(current, _json_string_size(key))
-            current = _validate_json_safe_with_budget(item, remaining=current)
-        return current
-    raise TypeError("Value is not JSON serializable")
+class _JsonBudget:
+    def __init__(self, *, max_bytes: int, max_nodes: int, max_depth: int) -> None:
+        self.remaining_bytes = max_bytes
+        self.remaining_nodes = max_nodes
+        self.max_depth = max_depth
+        self.seen_containers: set[int] = set()
 
+    def validate(self, value: object, *, depth: int = 0) -> None:
+        self._consume_node()
+        if depth > self.max_depth:
+            raise _JsonLimitExceeded("JSON payload exceeds nesting depth")
+        if value is None:
+            self._consume_bytes(4)
+            return
+        if isinstance(value, bool):
+            self._consume_bytes(4 if value else 5)
+            return
+        if isinstance(value, int) and not isinstance(value, bool):
+            self._consume_bytes(len(str(value)))
+            return
+        if isinstance(value, float):
+            if value != value or value in {float("inf"), float("-inf")}:
+                raise ValueError("Non-finite JSON number")
+            self._consume_bytes(len(str(value)))
+            return
+        if isinstance(value, str):
+            self._consume_bytes(_json_string_size(value))
+            return
+        if isinstance(value, list):
+            self._enter_container(value)
+            try:
+                self._consume_bytes(2)
+                if value:
+                    self._consume_bytes(len(value) - 1)
+                for item in value:
+                    self.validate(item, depth=depth + 1)
+            finally:
+                self._leave_container(value)
+            return
+        if isinstance(value, dict):
+            self._enter_container(value)
+            try:
+                self._consume_bytes(2)
+                if value:
+                    self._consume_bytes(len(value) - 1)
+                for key, item in value.items():
+                    if not isinstance(key, str):
+                        raise TypeError("JSON object keys must be strings")
+                    self._consume_bytes(_json_string_size(key))
+                    self._consume_bytes(1)
+                    self.validate(item, depth=depth + 1)
+            finally:
+                self._leave_container(value)
+            return
+        raise TypeError("Value is not JSON serializable")
 
-def _consume_json_overhead(remaining: int, size: int) -> int:
-    if size > remaining:
-        raise _JsonLimitExceeded("JSON payload exceeds size limit")
-    return remaining - size
+    def _consume_node(self) -> None:
+        if self.remaining_nodes <= 0:
+            raise _JsonLimitExceeded("JSON payload exceeds node limit")
+        self.remaining_nodes -= 1
+
+    def _consume_bytes(self, size: int) -> None:
+        if size > self.remaining_bytes:
+            raise _JsonLimitExceeded("JSON payload exceeds size limit")
+        self.remaining_bytes -= size
+
+    def _enter_container(self, value: object) -> None:
+        container_id = id(value)
+        if container_id in self.seen_containers:
+            raise ValueError("Circular JSON value")
+        self.seen_containers.add(container_id)
+
+    def _leave_container(self, value: object) -> None:
+        self.seen_containers.remove(id(value))
 
 
 def _json_string_size(value: str) -> int:
