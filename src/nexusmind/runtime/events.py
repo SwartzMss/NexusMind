@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from nexusmind.models.tool_calls import ToolCallDelta
-    from nexusmind.tools.contracts import ToolCall
+    from nexusmind.tools.contracts import ToolCall, ToolResult
 
 
 class RuntimeEventType(str, Enum):
@@ -30,5 +30,6 @@ class RuntimeEvent:
     error: str | None = None
     tool_call_delta: ToolCallDelta | None = None
     tool_call: ToolCall | None = None
+    tool_result: ToolResult | None = None
     finish_reason: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)

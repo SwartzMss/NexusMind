@@ -105,7 +105,27 @@ def _to_openai_message(message: Message) -> dict[str, Any]:
         payload["name"] = message.name
     if message.role == MessageRole.TOOL and message.tool_call_id:
         payload["tool_call_id"] = message.tool_call_id
+    if message.tool_calls:
+        payload["content"] = message.content
+        payload["tool_calls"] = [
+            {
+                "id": call.id,
+                "type": "function",
+                "function": {
+                    "name": call.name,
+                    "arguments": _strict_json(call.arguments, "Tool call arguments are not JSON serializable"),
+                },
+            }
+            for call in message.tool_calls
+        ]
     return payload
+
+
+def _strict_json(value: object, error: str) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise ChatModelError(error) from exc
 
 
 def _to_openai_tool(tool: ToolDefinition) -> dict[str, Any]:
