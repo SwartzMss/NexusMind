@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from nexusmind.models.tool_calls import ToolCallDelta
+    from nexusmind.runtime.policy import ToolApproval
     from nexusmind.tools.contracts import ToolCall, ToolResult
 
 
@@ -19,6 +20,8 @@ class RuntimeEventType(str, Enum):
     TOOL_CALL_DELTA = "tool_call_delta"
     TOOL_CALL_COMPLETED = "tool_call_completed"
     TOOL_RESULT = "tool_result"
+    TOOL_APPROVAL_REQUIRED = "tool_approval_required"
+    TOOL_APPROVAL_RESOLVED = "tool_approval_resolved"
     MODEL_TURN_COMPLETED = "model_turn_completed"
     MODEL_FAILED = "model_failed"
 
@@ -31,5 +34,6 @@ class RuntimeEvent:
     tool_call_delta: ToolCallDelta | None = None
     tool_call: ToolCall | None = None
     tool_result: ToolResult | None = None
+    tool_approval: ToolApproval | None = None
     finish_reason: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)

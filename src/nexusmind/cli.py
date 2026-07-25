@@ -9,6 +9,7 @@ import sys
 from nexusmind.config import ConfigError, load_model_config_from_env
 from nexusmind.mcp import MCPError, MCPStdioClient, load_mcp_server_config, register_mcp_tools
 from nexusmind.models.openai_compatible import OpenAICompatibleChatModel
+from nexusmind.runtime.policy import ApprovalDecision, ApprovalRequest
 from nexusmind.runtime.chat import ChatRuntime
 from nexusmind.runtime.events import RuntimeEventType
 from nexusmind.tools import ToolCall, ToolErrorCode, ToolExecutor, ToolRegistry
@@ -60,7 +61,7 @@ async def _chat(message: str | None) -> int:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
 
-    runtime = ChatRuntime(OpenAICompatibleChatModel(config))
+    runtime = ChatRuntime(OpenAICompatibleChatModel(config), approval_provider=CLIApprovalProvider())
     failed = False
     async for event in runtime.stream_user_message(message):
         if event.type == RuntimeEventType.TEXT_DELTA and event.text:
@@ -104,6 +105,29 @@ def _build_builtin_tool_registry() -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(EchoTool())
     return registry
+
+
+class CLIApprovalProvider:
+    def __init__(self, input_stream=None, output_stream=None) -> None:
+        self._input_stream = input_stream or sys.stdin
+        self._output_stream = output_stream or sys.stderr
+
+    async def request(self, request: ApprovalRequest) -> ApprovalDecision:
+        print("Tool approval required", file=self._output_stream)
+        print(f"Tool: {_safe_cli_field(request.tool_name, max_length=120)}", file=self._output_stream)
+        print(f"Risk: {request.risk_level.value}", file=self._output_stream)
+        print(f"Action: {_safe_cli_field(request.summary, max_length=160)}", file=self._output_stream)
+        print("", file=self._output_stream)
+        print("[a] Allow once", file=self._output_stream)
+        print("[d] Deny", file=self._output_stream)
+        print("> ", end="", file=self._output_stream, flush=True)
+        try:
+            answer = self._input_stream.readline()
+        except Exception:
+            return ApprovalDecision.DENY
+        if not answer:
+            return ApprovalDecision.DENY
+        return ApprovalDecision.ALLOW_ONCE if answer.strip().lower() == "a" else ApprovalDecision.DENY
 
 
 async def _mcp(args: argparse.Namespace) -> int:

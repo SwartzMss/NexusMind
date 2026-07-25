@@ -1,8 +1,11 @@
 import asyncio
+from io import StringIO
 
 from nexusmind import cli
 from nexusmind.config import ConfigError, ModelConfig
+from nexusmind.runtime.policy import ApprovalDecision, ApprovalRequest
 from nexusmind.runtime.events import RuntimeEvent, RuntimeEventType
+from nexusmind.tools import ToolRiskLevel
 
 
 def test_cli_outputs_streaming_text(monkeypatch, capsys) -> None:
@@ -13,8 +16,9 @@ def test_cli_outputs_streaming_text(monkeypatch, capsys) -> None:
             self.config = config
 
     class StubRuntime:
-        def __init__(self, model):
+        def __init__(self, model, **kwargs):
             self.model = model
+            self.kwargs = kwargs
 
         async def stream_user_message(self, message):
             yield RuntimeEvent(RuntimeEventType.RUN_STARTED)
@@ -41,8 +45,9 @@ def test_cli_returns_nonzero_on_model_failure(monkeypatch, capsys) -> None:
             self.config = config
 
     class StubRuntime:
-        def __init__(self, model):
+        def __init__(self, model, **kwargs):
             self.model = model
+            self.kwargs = kwargs
 
         async def stream_user_message(self, message):
             yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error="provider rejected request")
@@ -67,4 +72,34 @@ def test_cli_returns_nonzero_on_missing_config(monkeypatch, capsys) -> None:
 
     captured = capsys.readouterr()
     assert "Configuration error" in captured.err
+
+
+def test_cli_approval_provider_allows_once_for_a() -> None:
+    provider = cli.CLIApprovalProvider(input_stream=StringIO("a\n"), output_stream=StringIO())
+    request = ApprovalRequest("req_1", "call_1", "write_file", ToolRiskLevel.LOCAL_WRITE, "Write file ./report.md")
+
+    decision = asyncio.run(provider.request(request))
+
+    assert decision == ApprovalDecision.ALLOW_ONCE
+
+
+def test_cli_approval_provider_denies_by_default_for_invalid_or_eof() -> None:
+    request = ApprovalRequest("req_1", "call_1", "write_file", ToolRiskLevel.LOCAL_WRITE, "Write file ./report.md")
+
+    invalid = asyncio.run(cli.CLIApprovalProvider(input_stream=StringIO("x\n"), output_stream=StringIO()).request(request))
+    eof = asyncio.run(cli.CLIApprovalProvider(input_stream=StringIO(""), output_stream=StringIO()).request(request))
+
+    assert invalid == ApprovalDecision.DENY
+    assert eof == ApprovalDecision.DENY
+
+
+def test_cli_approval_provider_does_not_print_arguments() -> None:
+    output = StringIO()
+    provider = cli.CLIApprovalProvider(input_stream=StringIO("d\n"), output_stream=output)
+    request = ApprovalRequest("req_1", "call_1", "write_file", ToolRiskLevel.LOCAL_WRITE, "Write file ./safe.md")
+
+    decision = asyncio.run(provider.request(request))
+
+    assert decision == ApprovalDecision.DENY
+    assert "Write file ./safe.md" in output.getvalue()
 

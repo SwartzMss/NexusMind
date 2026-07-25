@@ -8,7 +8,7 @@ from jsonschema.exceptions import SchemaError
 from jsonschema.validators import Draft202012Validator
 
 from nexusmind.tools.base import Tool
-from nexusmind.tools.contracts import ToolDefinition
+from nexusmind.tools.contracts import ToolDefinition, ToolRiskLevel
 
 _TOOL_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 
@@ -76,6 +76,8 @@ class ToolRegistry:
 def validate_tool_definition(definition: ToolDefinition) -> None:
     if not definition.name or not _TOOL_NAME_RE.fullmatch(definition.name):
         raise ToolRegistryError("Tool name must start with a letter and contain only letters, digits, '_' or '-'")
+    if not isinstance(definition.risk_level, ToolRiskLevel):
+        raise ToolRegistryError("Tool risk_level must be a ToolRiskLevel")
     schema = definition.input_schema
     if not isinstance(schema, dict):
         raise ToolRegistryError("Tool input_schema must be a JSON Schema object")
@@ -92,4 +94,5 @@ def _copy_tool_definition(definition: ToolDefinition) -> ToolDefinition:
         name=definition.name,
         description=definition.description,
         input_schema=deepcopy(definition.input_schema),
+        risk_level=definition.risk_level,
     )
