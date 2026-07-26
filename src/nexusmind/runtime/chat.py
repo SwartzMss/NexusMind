@@ -277,7 +277,6 @@ class ChatRuntime:
                                     or call.name not in tool_definitions
                                     or not _can_fit_minimal_tool_result(self._limits, remaining_result_bytes)
                                     or not _tool_call_matches_snapshot(call, approval_call_snapshot)
-                                    or not _executor_definition_matches(self._tool_executor, call.name, definition)
                                 ):
                                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                                     return
@@ -293,6 +292,9 @@ class ChatRuntime:
                                 if post_approval_decision == ToolPolicyDecision.DENY:
                                     result = _permission_denied_result(call)
                                 else:
+                                    if not _executor_definition_matches(self._tool_executor, call.name, definition):
+                                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                                        return
                                     started_tool_call_ids.add(call.id)
                                     try:
                                         result = await self._tool_executor.execute(call)
