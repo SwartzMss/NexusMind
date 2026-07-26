@@ -116,9 +116,11 @@ class MCPStdioClient:
                             cleanup_error = cleanup_error or exc
                         else:
                             base_error = base_error or exc
+        if not raise_errors:
+            return
         if base_error is not None:
             raise base_error
-        if cleanup_error is not None and raise_errors:
+        if cleanup_error is not None:
             raise MCPConnectionError("MCP stdio client cleanup failed") from cleanup_error
 
 

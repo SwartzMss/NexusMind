@@ -145,8 +145,15 @@ NexusMind 可以把已注册的 `ToolDefinition` 传给 OpenAI-compatible chat m
 
 工具定义的默认风险级别是 `UNSPECIFIED`，默认策略会要求审批；确认只读工具时应显式设置 `ToolRiskLevel.READ_ONLY`。
 
-## 测试
+## 开发验证
 
-```powershell
-pytest
+```bash
+python -m pip install -e ".[dev]"
+python -m pip check
+python -m compileall -q src
+python -m pytest -q
 ```
+
+项目支持 Python 3.11、3.12 和 3.13。CI 在 Ubuntu 和 Windows 上运行完整离线测试套件。
+
+测试不得依赖真实 API Key、真实模型服务、真实外部 MCP Server 或开发者本机目录。新增功能应包含对应测试；MCP 测试应继续使用仓库内离线 fixture。
