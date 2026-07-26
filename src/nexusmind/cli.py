@@ -19,11 +19,13 @@ from nexusmind.skills.resolver import (
     build_skill_loop_limits,
     skill_mcp_server_ids,
     skill_requires_mcp,
+    skill_requires_workspace,
     validate_builtin_skill_tool_references,
 )
 from nexusmind.tools import ToolCall, ToolErrorCode, ToolExecutor, ToolRegistry
 from nexusmind.tools.contracts import ToolDefinition
-from nexusmind.tools.builtin import ApprovalDemoTool, EchoTool
+from nexusmind.tools.builtin import ApprovalDemoTool, EchoTool, ListFilesTool, ReadFileTool, SearchTextTool
+from nexusmind.workspace import Workspace, WorkspaceError
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -32,6 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     chat_parser = subparsers.add_parser("chat")
     chat_parser.add_argument("--mcp-config")
     chat_parser.add_argument("--mcp-server")
+    chat_parser.add_argument("--workspace")
     chat_parser.add_argument("message", nargs="?")
     tools_parser = subparsers.add_parser("tools")
     tools_subparsers = tools_parser.add_subparsers(dest="tools_command", required=True)
@@ -60,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
     skill_run_parser.add_argument("name")
     skill_run_parser.add_argument("--skills-dir", default="./skills")
     skill_run_parser.add_argument("--mcp-config")
+    skill_run_parser.add_argument("--workspace")
     skill_run_parser.add_argument("message", nargs="*")
 
     parse_argv, separator_message = _split_skill_run_separator_message(argv)
@@ -75,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
         if bool(args.mcp_config) != bool(args.mcp_server):
             print("chat requires --mcp-config and --mcp-server together", file=sys.stderr)
             return 2
-        return asyncio.run(_chat(args.message, mcp_config=args.mcp_config, mcp_server=args.mcp_server))
+        return asyncio.run(_chat(args.message, mcp_config=args.mcp_config, mcp_server=args.mcp_server, workspace_path=args.workspace))
     if args.command == "tools":
         return asyncio.run(_tools(args))
     if args.command == "mcp":
@@ -85,7 +89,13 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
-async def _chat(message: str | None, *, mcp_config: str | None = None, mcp_server: str | None = None) -> int:
+async def _chat(
+    message: str | None,
+    *,
+    mcp_config: str | None = None,
+    mcp_server: str | None = None,
+    workspace_path: str | None = None,
+) -> int:
     if not message:
         message = input("> ").strip()
     if not message:
@@ -98,7 +108,13 @@ async def _chat(message: str | None, *, mcp_config: str | None = None, mcp_serve
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
 
-    registry = _build_builtin_tool_registry()
+    try:
+        workspace = _build_workspace(workspace_path)
+    except WorkspaceError as exc:
+        print(f"Workspace error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
+        return 2
+
+    registry = _build_builtin_tool_registry() if workspace is None else build_builtin_tool_registry(workspace=workspace)
     if mcp_config is None:
         return await _run_chat(message, registry, model_config=model_config)
 
@@ -195,7 +211,7 @@ async def _run_chat(
 
 
 async def _tools(args: argparse.Namespace) -> int:
-    registry = _build_builtin_tool_registry()
+    registry = build_builtin_tool_registry()
     if args.tools_command == "list":
         for definition in registry.list_definitions():
             description = definition.description or ""
@@ -220,11 +236,17 @@ async def _tools(args: argparse.Namespace) -> int:
     return 2
 
 
-def _build_builtin_tool_registry() -> ToolRegistry:
+def build_builtin_tool_registry(*, workspace: Workspace | None = None) -> ToolRegistry:
     registry = ToolRegistry()
-    registry.register(ApprovalDemoTool())
-    registry.register(EchoTool())
+    tools = [ApprovalDemoTool(), EchoTool()]
+    if workspace is not None:
+        tools.extend([ListFilesTool(workspace), ReadFileTool(workspace), SearchTextTool(workspace)])
+    registry.register_many(tools)
     return registry
+
+
+def _build_builtin_tool_registry() -> ToolRegistry:
+    return build_builtin_tool_registry()
 
 
 class CLIApprovalProvider:
@@ -334,6 +356,9 @@ async def _skill_run(args: argparse.Namespace) -> int:
     if skill_requires_mcp(skill) and not args.mcp_config:
         print("Skill error: MCP tool references require --mcp-config", file=sys.stderr)
         return 2
+    if skill_requires_workspace(skill) and not args.workspace:
+        print("Skill error: workspace tool references require --workspace", file=sys.stderr)
+        return 2
     message = " ".join(args.message).strip()
     if not message:
         message = input("> ").strip()
@@ -346,7 +371,13 @@ async def _skill_run(args: argparse.Namespace) -> int:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
 
-    registry = _build_builtin_tool_registry()
+    try:
+        workspace = _build_workspace(args.workspace)
+    except WorkspaceError as exc:
+        print(f"Workspace error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
+        return 2
+
+    registry = build_builtin_tool_registry(workspace=workspace)
     try:
         validate_builtin_skill_tool_references(skill, registry)
     except SkillError as exc:
@@ -440,6 +471,12 @@ def _find_skill(skills_dir: str, name: str):
         if skill.name == name:
             return skill
     raise SkillError(f"Skill error: skill not found: {name}")
+
+
+def _build_workspace(path: str | None) -> Workspace | None:
+    if path is None:
+        return None
+    return Workspace(Path(path))
 
 
 def _path_relative_display(path, root) -> str:
