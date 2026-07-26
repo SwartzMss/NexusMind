@@ -65,10 +65,12 @@ nexusmind tools list
 nexusmind tools call echo '{"text":"hello"}'
 ```
 
-内置 `approval_demo` 工具用于演示审批流程。它标记为 `LOCAL_WRITE` 以触发 Allow once / Deny，但不会修改本地状态：
+`tools call` 是用户主动直调工具，不会经过 Agent Tool Loop，也不会触发审批。
+
+内置 `approval_demo` 工具用于通过 `chat` 演示审批流程。它标记为 `LOCAL_WRITE` 以触发 Allow once / Deny，但不会修改本地状态：
 
 ```powershell
-nexusmind tools call approval_demo '{"message":"hello"}'
+nexusmind chat "请调用 approval_demo 工具，message 设置为 hello"
 ```
 
 ## MCP Stdio 工具

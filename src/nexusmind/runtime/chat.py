@@ -277,6 +277,7 @@ class ChatRuntime:
                                     or call.name not in tool_definitions
                                     or not _can_fit_minimal_tool_result(self._limits, remaining_result_bytes)
                                     or not _tool_call_matches_snapshot(call, approval_call_snapshot)
+                                    or not _executor_definition_matches(self._tool_executor, call.name, definition)
                                 ):
                                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                                     return
@@ -302,6 +303,9 @@ class ChatRuntime:
                                         return
                         else:
                             if call.id in started_tool_call_ids:
+                                yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                                return
+                            if not _executor_definition_matches(self._tool_executor, call.name, definition):
                                 yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                                 return
                             started_tool_call_ids.add(call.id)
@@ -487,6 +491,24 @@ def _snapshot_runtime_tool_definitions(
             raise RuntimeError("Advertised tool definition does not match executor definition")
         snapshotted[name] = actual_snapshot
     return _snapshot_tool_definitions(list(snapshotted.values()))
+
+
+def _executor_definition_matches(
+    tool_executor: ToolExecutorProtocol | None,
+    name: str,
+    expected_definition: ToolDefinition,
+) -> bool:
+    if tool_executor is None or not isinstance(tool_executor, ToolExecutorProtocol):
+        return False
+    actual_definition = tool_executor.definition(name)
+    if actual_definition is None:
+        return False
+    try:
+        actual_snapshot = _snapshot_tool_definitions([actual_definition])[name]
+        expected_snapshot = _snapshot_tool_definitions([expected_definition])[name]
+    except RuntimeError:
+        return False
+    return actual_snapshot == expected_snapshot
 
 
 def _snapshot_tool_definitions(definitions: list[ToolDefinition]) -> dict[str, ToolDefinition]:
