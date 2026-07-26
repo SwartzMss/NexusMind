@@ -31,7 +31,7 @@ class MCPStdioClient:
             command=self._config.command,
             args=list(self._config.args),
             cwd=self._config.cwd,
-            env=self._config.env or None,
+            env=dict(self._config.env) or None,
         )
         try:
             self._errlog = _open_errlog()

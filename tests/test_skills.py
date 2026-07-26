@@ -1,9 +1,12 @@
 import os
 from pathlib import Path
 
+import pytest
+
 from nexusmind.runtime.chat import AgentLoopLimits
 from nexusmind.skills.loader import SkillDefinition, SkillError, discover_skills, load_skill
-from nexusmind.skills.resolver import build_skill_loop_limits, resolve_skill_tool_references
+from nexusmind.mcp import MAX_MCP_CLIENTS_PER_GROUP
+from nexusmind.skills.resolver import build_skill_loop_limits, resolve_skill_tool_references, skill_mcp_server_ids
 from nexusmind.tools.builtin import EchoTool
 from nexusmind.tools.contracts import ToolDefinition, ToolRiskLevel
 from nexusmind.tools.registry import ToolRegistry
@@ -278,6 +281,40 @@ def test_resolve_builtin_tool_reference_and_limits(tmp_path) -> None:
     assert limits.max_model_turns == 4
     assert limits.max_tool_calls_total == 8
     assert limits.max_json_depth == AgentLoopLimits().max_json_depth
+
+
+def test_skill_mcp_server_ids_are_deduplicated_sorted_and_ignore_builtin(tmp_path) -> None:
+    skill = SkillDefinition(
+        1,
+        "x",
+        "desc",
+        tmp_path,
+        "instructions",
+        (
+            "builtin:echo",
+            "mcp:zeta:namespace:read",
+            "mcp:alpha:read_file",
+            "mcp:zeta:search_files",
+        ),
+    )
+
+    assert skill_mcp_server_ids(skill) == ("alpha", "zeta")
+
+
+def test_skill_mcp_server_ids_rejects_too_many_servers(tmp_path) -> None:
+    references = tuple(f"mcp:server{i}:echo" for i in range(MAX_MCP_CLIENTS_PER_GROUP + 1))
+    skill = SkillDefinition(1, "x", "desc", tmp_path, "instructions", references)
+
+    with pytest.raises(SkillError, match="too many MCP servers"):
+        skill_mcp_server_ids(skill)
+
+
+def test_load_skill_rejects_too_many_mcp_servers(tmp_path) -> None:
+    allowed_tools = "[" + ", ".join(f'"mcp:server{i}:echo"' for i in range(MAX_MCP_CLIENTS_PER_GROUP + 1)) + "]"
+    skill_dir = _write_skill(tmp_path, "too-many-servers", allowed_tools=allowed_tools)
+
+    with pytest.raises(SkillError, match="too many MCP servers"):
+        load_skill(skill_dir)
 
 
 def test_skill_allows_mcp_remote_names_that_adapter_can_normalize(tmp_path) -> None:

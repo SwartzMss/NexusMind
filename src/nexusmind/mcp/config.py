@@ -6,11 +6,15 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Iterable, Mapping
+from types import MappingProxyType
 from typing import Any
 
 from nexusmind.mcp.errors import MCPConfigError
+from nexusmind.mcp.limits import MAX_MCP_CLIENTS_PER_GROUP
 
 _SERVER_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
+_MAX_CONFIG_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,7 +23,7 @@ class MCPStdioServerConfig:
     command: str
     args: tuple[str, ...] = ()
     cwd: str | None = None
-    env: dict[str, str] = field(default_factory=dict, repr=False)
+    env: Mapping[str, str] = field(default_factory=dict, repr=False)
     connect_timeout: float = 10.0
     request_timeout: float = 30.0
 
@@ -34,20 +38,65 @@ class MCPStdioServerConfig:
             raise MCPConfigError("MCP stdio server cwd must be a string or null")
         if not all(isinstance(key, str) and isinstance(value, str) for key, value in self.env.items()):
             raise MCPConfigError("MCP stdio server env must contain string keys and values")
+        object.__setattr__(self, "args", tuple(self.args))
+        object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
         _validate_timeout("connect_timeout", self.connect_timeout)
         _validate_timeout("request_timeout", self.request_timeout)
 
 
 def load_mcp_server_config(path: str | Path, server_id: str) -> MCPStdioServerConfig:
+    raw = _read_mcp_config(path)
+    return _server_config_from_raw(raw, server_id)
+
+
+def load_mcp_server_configs(path: str | Path, server_ids: Iterable[str]) -> dict[str, MCPStdioServerConfig]:
+    requested = _limited_server_id_tuple(server_ids)
+    raw = _read_mcp_config(path)
+    return {server_id: _server_config_from_raw(raw, server_id) for server_id in requested}
+
+
+def _limited_server_id_tuple(server_ids: Iterable[str]) -> tuple[str, ...]:
+    requested: set[str] = set()
+    consumed = 0
+    for server_id in server_ids:
+        consumed += 1
+        if consumed > MAX_MCP_CLIENTS_PER_GROUP:
+            raise MCPConfigError("MCP config references too many servers")
+        if type(server_id) is not str:
+            raise MCPConfigError("MCP server_id must be a string")
+        if not _SERVER_ID_RE.fullmatch(server_id):
+            raise MCPConfigError("MCP server_id is invalid")
+        requested.add(server_id)
+        if len(requested) > MAX_MCP_CLIENTS_PER_GROUP:
+            raise MCPConfigError("MCP config references too many servers")
+    return tuple(sorted(requested))
+
+
+def _read_mcp_config(path: str | Path) -> dict[str, Any]:
     config_path = Path(path)
     try:
-        raw = json.loads(config_path.read_text(encoding="utf-8"))
+        with config_path.open("rb") as handle:
+            raw_bytes = handle.read(_MAX_CONFIG_BYTES + 1)
     except FileNotFoundError as exc:
         raise MCPConfigError(f"MCP config file not found: {config_path}") from exc
+    except OSError as exc:
+        raise MCPConfigError(f"MCP config file is not readable: {config_path}") from exc
+    if len(raw_bytes) > _MAX_CONFIG_BYTES:
+        raise MCPConfigError("MCP config file is too large")
+    try:
+        raw_text = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise MCPConfigError(f"MCP config file is not valid UTF-8: {config_path}") from exc
+    try:
+        raw = json.loads(raw_text)
     except json.JSONDecodeError as exc:
         raise MCPConfigError(f"MCP config file is not valid JSON: {config_path}") from exc
     if not isinstance(raw, dict):
         raise MCPConfigError("MCP config must be a JSON object")
+    return raw
+
+
+def _server_config_from_raw(raw: dict[str, Any], server_id: str) -> MCPStdioServerConfig:
     servers = raw.get("servers")
     if not isinstance(servers, dict):
         raise MCPConfigError("MCP config must contain a servers object")

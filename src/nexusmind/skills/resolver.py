@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from nexusmind.mcp.limits import MAX_MCP_CLIENTS_PER_GROUP
 from nexusmind.mcp.naming import mcp_tool_local_name
 from nexusmind.runtime.chat import AgentLoopLimits
 from nexusmind.skills.loader import SkillDefinition, SkillError
 from nexusmind.tools.contracts import ToolDefinition
 from nexusmind.tools.registry import ToolRegistry
+
+MAX_MCP_SERVERS_PER_SKILL = MAX_MCP_CLIENTS_PER_GROUP
 
 
 def resolve_skill_tool_references(skill: SkillDefinition, registry: ToolRegistry) -> list[ToolDefinition]:
@@ -56,13 +59,15 @@ def skill_requires_mcp(skill: SkillDefinition) -> bool:
     return any(reference.startswith("mcp:") for reference in skill.allowed_tools)
 
 
-def skill_mcp_server_ids(skill: SkillDefinition) -> set[str]:
+def skill_mcp_server_ids(skill: SkillDefinition) -> tuple[str, ...]:
     server_ids: set[str] = set()
     for reference in skill.allowed_tools:
         if reference.startswith("mcp:"):
             _, server_id, _ = reference.split(":", 2)
             server_ids.add(server_id)
-    return server_ids
+            if len(server_ids) > MAX_MCP_SERVERS_PER_SKILL:
+                raise SkillError("Skill error: too many MCP servers referenced")
+    return tuple(sorted(server_ids))
 
 
 def validate_skill_mcp_server_id(skill: SkillDefinition, server_id: str) -> None:

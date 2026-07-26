@@ -113,6 +113,32 @@ nexusmind chat --mcp-config mcp.json --mcp-server demo "请调用 MCP 工具完�
 
 `chat` 会在首次模型调用前发现并注册该 Server 的工具。MCP 工具默认风险级别为 `UNSPECIFIED`，因此模型请求调用时会经过 CLI Allow once / Deny 审批。
 
+## Skill
+
+Skill 是本地声明式任务定义，由 instructions、工具白名单和收紧后的运行上限组成。示例：
+
+```powershell
+nexusmind skill list --skills-dir ./examples/skills
+nexusmind skill show mcp-echo --skills-dir ./examples/skills
+```
+
+运行不依赖 MCP 的 Skill：
+
+```powershell
+nexusmind skill run code-review --skills-dir ./skills "检查当前项目"
+```
+
+运行引用多个 MCP Server 的 Skill 时，只需要提供 Host 管理的 MCP 配置文件；NexusMind 会从 `allowed_tools` 中自动推导并连接实际需要的 Server，不会启动未引用的 Server：
+
+```powershell
+nexusmind skill run multi-mcp-review `
+  --skills-dir ./examples/skills `
+  --mcp-config mcp.json `
+  "检查这个 PR"
+```
+
+普通 `chat` 仍只支持显式指定单个 `--mcp-server`。
+
 ## 模型工具调用
 
 NexusMind 可以把已注册的 `ToolDefinition` 传给 OpenAI-compatible chat model，把流式 `tool_calls` 解析成与服务商无关的事件，通过 `ToolExecutor` 执行模型请求的工具，并把结构化 `role=tool` 结果回填到下一轮模型调用。运行时使用有界的单 Agent 循环限制，避免模型轮次或工具结果无限增长。

@@ -8,6 +8,8 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - only used on Python < 3.11
     import tomli as tomllib
 
+from nexusmind.mcp.limits import MAX_MCP_CLIENTS_PER_GROUP
+
 _MANIFEST_NAME = "skill.toml"
 _NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _BUILTIN_TOOL_REF_RE = re.compile(r"^builtin:[A-Za-z][A-Za-z0-9_-]{0,63}$")
@@ -125,12 +127,18 @@ def _validate_allowed_tools(value: object) -> None:
     if not isinstance(value, list):
         raise SkillError("Skill error: allowed_tools must be a list")
     seen: set[str] = set()
+    mcp_server_ids: set[str] = set()
     for item in value:
         if type(item) is not str or not _valid_tool_reference(item):
             raise SkillError("Skill error: allowed_tools contains an invalid tool reference")
         if item in seen:
             raise SkillError(f"Skill error: duplicate tool reference: {item}")
         seen.add(item)
+        if item.startswith("mcp:"):
+            _, server_id, _ = item.split(":", 2)
+            mcp_server_ids.add(server_id)
+            if len(mcp_server_ids) > MAX_MCP_CLIENTS_PER_GROUP:
+                raise SkillError("Skill error: too many MCP servers referenced")
 
 
 def _validate_limits(value: object) -> None:
