@@ -21,6 +21,21 @@ class WorkspaceEncodingError(WorkspaceError):
     pass
 
 
+class WorkspaceConflictError(WorkspaceError):
+    pass
+
+
+class WorkspaceWriteError(WorkspaceError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceWriteTarget:
+    path: Path
+    relative_path: str
+    parent: Path
+
+
 @dataclass(frozen=True, slots=True)
 class Workspace:
     root: Path = field(repr=False)
@@ -80,6 +95,39 @@ def workspace_relative_path(workspace: Workspace, path: Path) -> str:
         raise WorkspacePathError("Workspace path is outside the configured root") from exc
     text = relative.as_posix()
     return "." if text == "." else text
+
+
+def resolve_workspace_create_target(workspace: Workspace, relative_path: str) -> WorkspaceWriteTarget:
+    if type(relative_path) is not str:
+        raise WorkspacePathError("Workspace path must be a string")
+    _validate_relative_path_text(relative_path)
+    parts = _relative_parts(relative_path)
+    if not parts:
+        raise WorkspacePathError("Workspace path is not a regular file")
+    parent = workspace.root
+    for part in parts[:-1]:
+        parent = parent / part
+        try:
+            if parent.is_symlink():
+                raise WorkspacePathError("Workspace path contains a symlink")
+            parent = parent.resolve(strict=True)
+        except WorkspacePathError:
+            raise
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise WorkspacePathError("Workspace path does not exist") from exc
+        _ensure_inside(workspace.root, parent)
+        if not parent.is_dir():
+            raise WorkspacePathError("Workspace path is not a directory")
+    target = parent / parts[-1]
+    if target.is_symlink():
+        raise WorkspacePathError("Workspace path contains a symlink")
+    try:
+        resolved_parent = parent.resolve(strict=True)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise WorkspacePathError("Workspace path does not exist") from exc
+    _ensure_inside(workspace.root, resolved_parent)
+    relative = "/".join(parts)
+    return WorkspaceWriteTarget(path=target, relative_path=relative, parent=resolved_parent)
 
 
 def _validate_relative_path_text(relative_path: str) -> None:

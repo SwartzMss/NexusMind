@@ -6,6 +6,7 @@ from typing import Protocol, runtime_checkable
 from jsonschema import ValidationError
 from nexusmind.tools.contracts import ToolCall, ToolDefinition, ToolError, ToolErrorCode, ToolResult
 from nexusmind.tools.registry import ToolNotFoundError, ToolRegistry
+from nexusmind.workspace import WorkspaceError
 
 
 @runtime_checkable
@@ -45,6 +46,8 @@ class ToolExecutor:
             return _failure(call, ToolErrorCode.EXECUTION_TIMEOUT, f"Tool timed out after {self._timeout:g} seconds")
         except asyncio.CancelledError:
             raise
+        except WorkspaceError as exc:
+            return _failure(call, ToolErrorCode.EXECUTION_FAILED, str(exc))
         except Exception:
             return _failure(call, ToolErrorCode.EXECUTION_FAILED, "Tool execution failed")
 

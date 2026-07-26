@@ -1,12 +1,26 @@
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import dataclass
+import hashlib
 import json
+import os
 from pathlib import Path
+import stat
+import tempfile
 from typing import Any
 
 from nexusmind.tools.contracts import ToolDefinition, ToolRiskLevel
-from nexusmind.workspace import Workspace, WorkspaceEncodingError, WorkspaceLimitError, WorkspacePathError, workspace_relative_path
+from nexusmind.workspace import (
+    Workspace,
+    WorkspaceConflictError,
+    WorkspaceEncodingError,
+    WorkspaceLimitError,
+    WorkspacePathError,
+    WorkspaceWriteError,
+    resolve_workspace_create_target,
+    workspace_relative_path,
+)
 
 MAX_LIST_ENTRIES = 1000
 MAX_LIST_DEPTH = 6
@@ -24,6 +38,35 @@ MAX_SEARCH_ENTRIES_VISITED = 10000
 MAX_SEARCH_DIRECTORIES_VISITED = 1000
 MAX_SEARCH_FILES_CONSIDERED = 1000
 MAX_WORKSPACE_PATH_CHARS = 4096
+MAX_WRITE_CONTENT_CHARS = 262144
+MAX_WRITE_CONTENT_BYTES = 256 * 1024
+MAX_REPLACE_TEXT_CHARS = 65536
+MAX_REPLACE_OCCURRENCES = 100
+MAX_REPLACE_RESULT_BYTES = 2 * 1024 * 1024
+SHA256_RE = "^[0-9a-f]{64}$"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceWriteLimits:
+    max_successful_mutations: int = 16
+    max_total_bytes_written: int = 8 * 1024 * 1024
+
+
+class WorkspaceWriteBudget:
+    def __init__(self, limits: WorkspaceWriteLimits | None = None) -> None:
+        self._limits = limits or WorkspaceWriteLimits()
+        self.successful_mutations = 0
+        self.total_bytes_written = 0
+
+    def check(self, bytes_to_write: int) -> None:
+        if self.successful_mutations >= self._limits.max_successful_mutations:
+            raise WorkspaceLimitError("Workspace write budget exceeded")
+        if self.total_bytes_written + bytes_to_write > self._limits.max_total_bytes_written:
+            raise WorkspaceLimitError("Workspace write budget exceeded")
+
+    def record_success(self, bytes_written: int) -> None:
+        self.successful_mutations += 1
+        self.total_bytes_written += bytes_written
 
 
 class ListFilesTool:
@@ -134,6 +177,8 @@ class ReadFileTool:
             "path": workspace_relative_path(self._workspace, path),
             "start_line": start_line,
             "end_line": end_line,
+            "sha256": _sha256_hex(raw),
+            "size": len(raw),
             "content": content,
             "truncated": truncated,
         }
@@ -274,6 +319,135 @@ class SearchTextTool:
         return result
 
 
+class WriteFileTool:
+    def __init__(self, workspace: Workspace, budget: WorkspaceWriteBudget) -> None:
+        self._workspace = workspace
+        self._budget = budget
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="write_file",
+            description="Create or replace a UTF-8 workspace file.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "maxLength": MAX_WORKSPACE_PATH_CHARS},
+                    "mode": {"type": "string", "enum": ["create", "replace"]},
+                    "content": {"type": "string", "maxLength": MAX_WRITE_CONTENT_CHARS},
+                    "expected_sha256": {"type": "string", "pattern": SHA256_RE},
+                },
+                "required": ["path", "mode", "content"],
+                "additionalProperties": False,
+            },
+            risk_level=ToolRiskLevel.LOCAL_WRITE,
+        )
+
+    async def invoke(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        content_bytes = _encode_write_content(arguments["content"], max_bytes=MAX_WRITE_CONTENT_BYTES)
+        mode = arguments["mode"]
+        if mode == "create":
+            if "expected_sha256" in arguments:
+                raise WorkspaceConflictError("Workspace file already exists")
+            target = resolve_workspace_create_target(self._workspace, arguments["path"])
+            if target.path.exists() or target.path.is_symlink():
+                raise WorkspaceConflictError("Workspace file already exists")
+            self._budget.check(len(content_bytes))
+            cleanup_warning = _create_file_exclusive(target.path, content_bytes)
+            self._budget.record_success(len(content_bytes))
+            result = {
+                "path": target.relative_path,
+                "operation": "create",
+                "previous_sha256": None,
+                "sha256": _sha256_hex(content_bytes),
+                "bytes_written": len(content_bytes),
+                "committed": True,
+            }
+            if cleanup_warning:
+                result["cleanup_warning"] = True
+            return result
+        expected_sha = arguments.get("expected_sha256")
+        if type(expected_sha) is not str:
+            raise WorkspaceConflictError("Workspace file changed since it was read")
+        path = self._workspace.resolve_existing_file(arguments["path"])
+        relative_path = workspace_relative_path(self._workspace, path)
+        previous_raw = _read_existing_utf8_bytes(path)
+        previous_sha = _sha256_hex(previous_raw)
+        if previous_sha != expected_sha:
+            raise WorkspaceConflictError("Workspace file changed since it was read")
+        self._budget.check(len(content_bytes))
+        _atomic_replace_file(path, content_bytes, expected_sha256=expected_sha)
+        self._budget.record_success(len(content_bytes))
+        return {
+            "path": relative_path,
+            "operation": "replace",
+            "previous_sha256": previous_sha,
+            "sha256": _sha256_hex(content_bytes),
+            "bytes_written": len(content_bytes),
+        }
+
+
+class ReplaceTextTool:
+    def __init__(self, workspace: Workspace, budget: WorkspaceWriteBudget) -> None:
+        self._workspace = workspace
+        self._budget = budget
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="replace_text",
+            description="Replace exact UTF-8 text inside a workspace file.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "maxLength": MAX_WORKSPACE_PATH_CHARS},
+                    "expected_sha256": {"type": "string", "pattern": SHA256_RE},
+                    "old_text": {"type": "string", "minLength": 1, "maxLength": MAX_REPLACE_TEXT_CHARS},
+                    "new_text": {"type": "string", "maxLength": MAX_REPLACE_TEXT_CHARS},
+                    "expected_occurrences": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_REPLACE_OCCURRENCES,
+                        "default": 1,
+                    },
+                },
+                "required": ["path", "expected_sha256", "old_text", "new_text"],
+                "additionalProperties": False,
+            },
+            risk_level=ToolRiskLevel.LOCAL_WRITE,
+        )
+
+    async def invoke(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        old_text = arguments["old_text"]
+        new_text = arguments["new_text"]
+        if old_text == new_text:
+            raise WorkspaceWriteError("Workspace replacement text is unchanged")
+        path = self._workspace.resolve_existing_file(arguments["path"])
+        relative_path = workspace_relative_path(self._workspace, path)
+        previous_raw = _read_existing_utf8_bytes(path)
+        previous_sha = _sha256_hex(previous_raw)
+        if previous_sha != arguments["expected_sha256"]:
+            raise WorkspaceConflictError("Workspace file changed since it was read")
+        text = previous_raw.decode("utf-8")
+        expected_occurrences = int(arguments.get("expected_occurrences", 1))
+        occurrences = text.count(old_text)
+        if occurrences != expected_occurrences:
+            raise WorkspaceWriteError("Workspace replacement count does not match")
+        result_text = text.replace(old_text, new_text)
+        result_bytes = _encode_write_content(result_text, max_bytes=MAX_REPLACE_RESULT_BYTES)
+        self._budget.check(len(result_bytes))
+        _atomic_replace_file(path, result_bytes, expected_sha256=arguments["expected_sha256"])
+        self._budget.record_success(len(result_bytes))
+        return {
+            "path": relative_path,
+            "operation": "replace_text",
+            "previous_sha256": previous_sha,
+            "sha256": _sha256_hex(result_bytes),
+            "replacements": occurrences,
+            "bytes_written": len(result_bytes),
+        }
+
+
 def _limited_sorted_children(directory: Path, limit: int) -> tuple[list[Path], bool]:
     children: list[Path] = []
     for child in directory.iterdir():
@@ -309,6 +483,105 @@ def _read_limited(path: Path, max_bytes: int) -> bytes:
     if len(data) > max_bytes:
         raise WorkspaceLimitError("Workspace file exceeds the size limit")
     return data
+
+
+def _read_existing_utf8_bytes(path: Path) -> bytes:
+    raw = _read_limited(path, MAX_READ_FILE_BYTES)
+    if b"\x00" in raw:
+        raise WorkspaceEncodingError("Workspace file is not valid UTF-8")
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise WorkspaceEncodingError("Workspace file is not valid UTF-8") from exc
+    return raw
+
+
+def _encode_write_content(content: str, *, max_bytes: int) -> bytes:
+    raw = content.encode("utf-8")
+    if b"\x00" in raw:
+        raise WorkspaceEncodingError("Workspace file is not valid UTF-8")
+    if len(raw) > max_bytes:
+        raise WorkspaceLimitError("Workspace write exceeds the size limit")
+    return raw
+
+
+def _create_file_exclusive(path: Path, content: bytes) -> bool:
+    temp_name: str | None = None
+    original_error: BaseException | None = None
+    committed = False
+    cleanup_warning = False
+    try:
+        fd, temp_name = tempfile.mkstemp(prefix=".nexusmind-", suffix=".tmp", dir=str(path.parent))
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temp_name, path)
+            committed = True
+        except FileExistsError as exc:
+            raise WorkspaceConflictError("Workspace file already exists") from exc
+    except FileExistsError as exc:
+        original_error = WorkspaceConflictError("Workspace file already exists")
+        original_error.__cause__ = exc
+    except OSError as exc:
+        original_error = WorkspaceWriteError("Workspace file could not be committed")
+        original_error.__cause__ = exc
+    finally:
+        if temp_name is not None:
+            try:
+                os.unlink(temp_name)
+            except OSError as cleanup_exc:
+                if committed:
+                    cleanup_warning = True
+                    temp_name = None
+                    return cleanup_warning
+                cleanup_error = WorkspaceWriteError("Workspace temporary file could not be cleaned up")
+                cleanup_error.__cause__ = cleanup_exc
+                if original_error is not None:
+                    cleanup_error.__context__ = original_error
+                raise cleanup_error
+    if original_error is not None:
+        raise original_error
+    return cleanup_warning
+
+
+def _atomic_replace_file(path: Path, content: bytes, *, expected_sha256: str) -> None:
+    mode = stat.S_IMODE(path.stat().st_mode)
+    temp_name: str | None = None
+    original_error: BaseException | None = None
+    try:
+        fd, temp_name = tempfile.mkstemp(prefix=".nexusmind-", suffix=".tmp", dir=str(path.parent))
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_name, mode)
+        if _sha256_hex(_read_existing_utf8_bytes(path)) != expected_sha256:
+            raise WorkspaceConflictError("Workspace file changed since it was read")
+        os.replace(temp_name, path)
+        temp_name = None
+    except WorkspaceConflictError as exc:
+        original_error = exc
+    except OSError as exc:
+        original_error = WorkspaceWriteError("Workspace file could not be committed")
+        original_error.__cause__ = exc
+    finally:
+        if temp_name is not None:
+            try:
+                os.unlink(temp_name)
+            except OSError as cleanup_exc:
+                cleanup_error = WorkspaceWriteError("Workspace temporary file could not be cleaned up")
+                cleanup_error.__cause__ = cleanup_exc
+                if original_error is not None:
+                    cleanup_error.__context__ = original_error
+                raise cleanup_error
+    if original_error is not None:
+        raise original_error
+
+
+def _sha256_hex(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
 
 
 def _json_output_bytes(value: Any) -> int:
