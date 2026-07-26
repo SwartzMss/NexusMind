@@ -3,16 +3,26 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from pathlib import Path
 import re
 import sys
 
 from nexusmind.config import ConfigError, ModelConfig, load_model_config_from_env
 from nexusmind.mcp import MCPError, MCPStdioClient, load_mcp_server_config, register_mcp_tools
 from nexusmind.models.openai_compatible import OpenAICompatibleChatModel
+from nexusmind.runtime.chat import AgentLoopLimits
 from nexusmind.runtime.policy import ApprovalDecision, ApprovalRequest
 from nexusmind.runtime.chat import ChatRuntime
 from nexusmind.runtime.events import RuntimeEventType
+from nexusmind.skills import SkillError, discover_skills, load_skill, resolve_skill_tool_references
+from nexusmind.skills.resolver import (
+    build_skill_loop_limits,
+    skill_requires_mcp,
+    validate_builtin_skill_tool_references,
+    validate_skill_mcp_server_id,
+)
 from nexusmind.tools import ToolCall, ToolErrorCode, ToolExecutor, ToolRegistry
+from nexusmind.tools.contracts import ToolDefinition
 from nexusmind.tools.builtin import ApprovalDemoTool, EchoTool
 
 
@@ -39,8 +49,29 @@ def main(argv: list[str] | None = None) -> int:
     mcp_call_parser.add_argument("--server", required=True)
     mcp_call_parser.add_argument("--tool", required=True)
     mcp_call_parser.add_argument("--arguments", required=True)
+    skill_parser = subparsers.add_parser("skill")
+    skill_subparsers = skill_parser.add_subparsers(dest="skill_command", required=True)
+    skill_list_parser = skill_subparsers.add_parser("list")
+    skill_list_parser.add_argument("--skills-dir", default="./skills")
+    skill_show_parser = skill_subparsers.add_parser("show")
+    skill_show_parser.add_argument("name")
+    skill_show_parser.add_argument("--skills-dir", default="./skills")
+    skill_run_parser = skill_subparsers.add_parser("run")
+    skill_run_parser.add_argument("name")
+    skill_run_parser.add_argument("--skills-dir", default="./skills")
+    skill_run_parser.add_argument("--mcp-config")
+    skill_run_parser.add_argument("--mcp-server")
+    skill_run_parser.add_argument("message", nargs="*")
 
-    args = parser.parse_args(argv)
+    parse_argv, separator_message = _split_skill_run_separator_message(argv)
+    args, extra_args = parser.parse_known_args(parse_argv)
+    if extra_args:
+        if args.command == "skill" and getattr(args, "skill_command", None) == "run" and _skill_run_extra_args_are_message(extra_args):
+            args.message.extend(_strip_argument_separator(extra_args))
+        else:
+            parser.error(f"unrecognized arguments: {' '.join(extra_args)}")
+    if separator_message and args.command == "skill" and getattr(args, "skill_command", None) == "run":
+        args.message.extend(separator_message)
     if args.command == "chat":
         if bool(args.mcp_config) != bool(args.mcp_server):
             print("chat requires --mcp-config and --mcp-server together", file=sys.stderr)
@@ -50,6 +81,8 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_tools(args))
     if args.command == "mcp":
         return asyncio.run(_mcp(args))
+    if args.command == "skill":
+        return asyncio.run(_skill(args))
     return 2
 
 
@@ -115,7 +148,10 @@ async def _run_chat_with_mcp(
                 executor_timeout=config.request_timeout,
             )
     except BaseException as exc:
-        await client.__aexit__(type(exc), exc, exc.__traceback__)
+        try:
+            await client.__aexit__(type(exc), exc, exc.__traceback__)
+        except BaseException:
+            pass
         raise
 
     try:
@@ -132,15 +168,22 @@ async def _run_chat(
     *,
     model_config: ModelConfig,
     executor_timeout: float = 30.0,
+    system_prompt: str | None = None,
+    tools: list[ToolDefinition] | None = None,
+    limits: AgentLoopLimits | None = None,
 ) -> int:
     runtime = ChatRuntime(
         OpenAICompatibleChatModel(model_config),
         tool_executor=ToolExecutor(registry, timeout=executor_timeout),
         approval_provider=CLIApprovalProvider(),
+        limits=limits,
     )
-    tools = registry.list_definitions()
+    tools = registry.list_definitions() if tools is None else tools
     failed = False
-    async for event in runtime.stream_user_message(message, tools=tools):
+    stream_kwargs = {"tools": tools}
+    if system_prompt is not None:
+        stream_kwargs["system_prompt"] = system_prompt
+    async for event in runtime.stream_user_message(message, **stream_kwargs):
         if event.type == RuntimeEventType.TEXT_DELTA and event.text:
             print(event.text, end="", flush=True)
         elif event.type == RuntimeEventType.RUN_FAILED:
@@ -252,6 +295,180 @@ async def _mcp(args: argparse.Namespace) -> int:
         print(f"MCP error: {exc}", file=sys.stderr)
         return 1
     return 2
+
+
+async def _skill(args: argparse.Namespace) -> int:
+    if args.skill_command == "list":
+        try:
+            for skill in discover_skills(args.skills_dir):
+                print(f"{skill.name}\t{_safe_cli_field(skill.description, max_length=240)}")
+        except SkillError as exc:
+            print(_safe_cli_field(str(exc), max_length=240), file=sys.stderr)
+            return 2
+        return 0
+    if args.skill_command == "show":
+        try:
+            skill = _find_skill(args.skills_dir, args.name)
+        except SkillError as exc:
+            print(_safe_cli_field(str(exc), max_length=240), file=sys.stderr)
+            return 2
+        print(f"name\t{skill.name}")
+        print(f"description\t{_safe_cli_field(skill.description, max_length=240)}")
+        print(f"schema_version\t{skill.schema_version}")
+        print(f"source_dir\t{_path_relative_display(skill.source_dir, args.skills_dir)}")
+        print(f"allowed_tools\t{','.join(skill.allowed_tools)}")
+        print(f"max_model_turns\t{skill.max_model_turns or ''}")
+        print(f"max_tool_calls_total\t{skill.max_tool_calls_total or ''}")
+        return 0
+    if args.skill_command == "run":
+        if bool(args.mcp_config) != bool(args.mcp_server):
+            print("skill run requires --mcp-config and --mcp-server together", file=sys.stderr)
+            return 2
+        return await _skill_run(args)
+    return 2
+
+
+async def _skill_run(args: argparse.Namespace) -> int:
+    try:
+        skill = _find_skill(args.skills_dir, args.name)
+        limits = build_skill_loop_limits(skill)
+    except SkillError as exc:
+        print(_safe_cli_field(str(exc), max_length=240), file=sys.stderr)
+        return 2
+    if skill_requires_mcp(skill) and not args.mcp_config:
+        print("Skill error: MCP tool references require --mcp-config and --mcp-server", file=sys.stderr)
+        return 2
+    message = " ".join(args.message).strip()
+    if not message:
+        message = input("> ").strip()
+    if not message:
+        print("No message provided.", file=sys.stderr)
+        return 2
+    try:
+        model_config = load_model_config_from_env()
+    except ConfigError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        return 2
+
+    registry = _build_builtin_tool_registry()
+    try:
+        validate_builtin_skill_tool_references(skill, registry)
+    except SkillError as exc:
+        print(_safe_cli_field(str(exc), max_length=240), file=sys.stderr)
+        return 2
+    if args.mcp_config is None:
+        try:
+            tools = resolve_skill_tool_references(skill, registry)
+        except SkillError as exc:
+            print(_safe_cli_field(str(exc), max_length=240), file=sys.stderr)
+            return 2
+        return await _run_chat(
+            message,
+            registry,
+            model_config=model_config,
+            system_prompt=skill.instructions,
+            tools=tools,
+            limits=limits,
+        )
+    try:
+        config = load_mcp_server_config(args.mcp_config, args.mcp_server)
+        validate_skill_mcp_server_id(skill, config.server_id)
+    except MCPError as exc:
+        print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
+        return 1
+    except SkillError as exc:
+        print(_safe_cli_field(str(exc), max_length=240), file=sys.stderr)
+        return 2
+    except Exception:
+        print("MCP error: MCP chat tool setup failed", file=sys.stderr)
+        return 1
+    return await _run_skill_with_mcp(message, skill, registry, config=config, model_config=model_config, limits=limits)
+
+
+async def _run_skill_with_mcp(
+    message: str,
+    skill,
+    registry: ToolRegistry,
+    *,
+    config,
+    model_config: ModelConfig,
+    limits: AgentLoopLimits,
+) -> int:
+    client = MCPStdioClient(config)
+    try:
+        await client.__aenter__()
+    except MCPError as exc:
+        print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
+        return 1
+    except Exception:
+        print("MCP error: MCP chat tool setup failed", file=sys.stderr)
+        return 1
+    try:
+        try:
+            await register_mcp_tools(client, config.server_id, registry)
+            tools = resolve_skill_tool_references(skill, registry)
+        except SkillError as exc:
+            print(_safe_cli_field(str(exc), max_length=240), file=sys.stderr)
+            return_code = 2
+        except MCPError as exc:
+            print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
+            return_code = 1
+        except Exception:
+            print("MCP error: MCP chat tool setup failed", file=sys.stderr)
+            return_code = 1
+        else:
+            return_code = await _run_chat(
+                message,
+                registry,
+                model_config=model_config,
+                executor_timeout=config.request_timeout,
+                system_prompt=skill.instructions,
+                tools=tools,
+                limits=limits,
+            )
+    except BaseException as exc:
+        try:
+            await client.__aexit__(type(exc), exc, exc.__traceback__)
+        except BaseException:
+            pass
+        raise
+    try:
+        await client.__aexit__(None, None, None)
+    except MCPError as exc:
+        print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
+        return 1
+    return return_code
+
+
+def _find_skill(skills_dir: str, name: str):
+    for skill in discover_skills(skills_dir):
+        if skill.name == name:
+            return skill
+    raise SkillError(f"Skill error: skill not found: {name}")
+
+
+def _path_relative_display(path, root) -> str:
+    try:
+        return str(path.relative_to(Path(root).resolve()))
+    except Exception:
+        return path.name
+
+
+def _split_skill_run_separator_message(argv: list[str] | None) -> tuple[list[str] | None, list[str]]:
+    if argv is None:
+        argv = sys.argv[1:]
+    if len(argv) >= 2 and argv[0] == "skill" and argv[1] == "run" and "--" in argv:
+        separator_index = argv.index("--")
+        return argv[:separator_index], argv[separator_index + 1 :]
+    return argv, []
+
+
+def _skill_run_extra_args_are_message(extra_args: list[str]) -> bool:
+    return all(not item.startswith("-") for item in extra_args)
+
+
+def _strip_argument_separator(args: list[str]) -> list[str]:
+    return [arg for arg in args if arg != "--"]
 
 
 def _remote_name_from_registry_tool(registry: ToolRegistry, local_name: str) -> str:
