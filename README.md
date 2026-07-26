@@ -65,6 +65,12 @@ nexusmind tools list
 nexusmind tools call echo '{"text":"hello"}'
 ```
 
+内置 `approval_demo` 工具用于演示审批流程。它标记为 `LOCAL_WRITE` 以触发 Allow once / Deny，但不会修改本地状态：
+
+```powershell
+nexusmind tools call approval_demo '{"message":"hello"}'
+```
+
 ## MCP Stdio 工具
 
 MCP server 配置从 JSON 文件读取。如果配置文件包含环境变量或密钥，请把它当作敏感文件处理。

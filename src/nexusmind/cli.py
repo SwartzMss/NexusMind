@@ -13,7 +13,7 @@ from nexusmind.runtime.policy import ApprovalDecision, ApprovalRequest
 from nexusmind.runtime.chat import ChatRuntime
 from nexusmind.runtime.events import RuntimeEventType
 from nexusmind.tools import ToolCall, ToolErrorCode, ToolExecutor, ToolRegistry
-from nexusmind.tools.builtin import EchoTool
+from nexusmind.tools.builtin import ApprovalDemoTool, EchoTool
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -109,6 +109,7 @@ async def _tools(args: argparse.Namespace) -> int:
 
 def _build_builtin_tool_registry() -> ToolRegistry:
     registry = ToolRegistry()
+    registry.register(ApprovalDemoTool())
     registry.register(EchoTool())
     return registry
 

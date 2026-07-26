@@ -115,6 +115,30 @@ class _ToolCallThenStopModel:
             yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="stop")
 
 
+class _ApprovalDemoModel:
+    instances = []
+
+    def __init__(self, config):
+        self.config = config
+        self.messages_by_turn = []
+        self.tools_by_turn = []
+        _ApprovalDemoModel.instances.append(self)
+
+    async def stream(self, messages, tools=None):
+        self.messages_by_turn.append(list(messages))
+        self.tools_by_turn.append(tools)
+        yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+        if len(self.messages_by_turn) == 1:
+            yield RuntimeEvent(
+                RuntimeEventType.TOOL_CALL_COMPLETED,
+                tool_call=ToolCall(id="call_1", name="approval_demo", arguments={"message": "ok"}),
+            )
+            yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+        else:
+            yield RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="done")
+            yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="stop")
+
+
 def test_cli_chat_approval_allow_executes_tool_and_feeds_result(monkeypatch, capsys) -> None:
     tool = _RecordingWriteTool()
 
@@ -136,6 +160,22 @@ def test_cli_chat_approval_allow_executes_tool_and_feeds_result(monkeypatch, cap
     assert tool.calls == [{}]
     assert model.tools_by_turn[0][0].name == "write_file"
     assert model.messages_by_turn[1][-1].content == '{"ok":true,"output":{"written":true}}'
+    assert "Tool approval required" in captured.err
+    assert captured.out == "done\n"
+
+
+def test_cli_chat_default_registry_can_trigger_real_approval_demo(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "load_model_config_from_env", lambda: ModelConfig("https://example.test", "secret", "fake"))
+    monkeypatch.setattr(cli, "OpenAICompatibleChatModel", _ApprovalDemoModel)
+    monkeypatch.setattr(cli.sys, "stdin", StringIO("a\n"))
+    _ApprovalDemoModel.instances = []
+
+    assert cli.main(["chat", "approval demo"]) == 0
+
+    captured = capsys.readouterr()
+    model = _ApprovalDemoModel.instances[0]
+    assert [tool.name for tool in model.tools_by_turn[0]] == ["approval_demo", "echo"]
+    assert model.messages_by_turn[1][-1].content == '{"ok":true,"output":{"message":"ok"}}'
     assert "Tool approval required" in captured.err
     assert captured.out == "done\n"
 

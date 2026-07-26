@@ -18,6 +18,21 @@ def _executor_with_echo() -> ToolExecutor:
     return ToolExecutor(registry)
 
 
+def _echo_definition() -> ToolDefinition:
+    return EchoTool().definition
+
+
+class _ReadOnlyDefinitionExecutor:
+    def definition(self, name: str) -> ToolDefinition | None:
+        if name == "echo":
+            return _echo_definition()
+        if name == "write_file":
+            return ToolDefinition(name=name, risk_level=ToolRiskLevel.LOCAL_WRITE)
+        if name == "send_email":
+            return ToolDefinition(name=name, risk_level=ToolRiskLevel.EXTERNAL_WRITE)
+        return ToolDefinition(name=name, risk_level=ToolRiskLevel.READ_ONLY)
+
+
 def test_runtime_streams_model_events_in_order() -> None:
     async def collect():
         runtime = ChatRuntime(FakeChatModel(["a", "b", "c"]))
@@ -207,7 +222,7 @@ def test_runtime_rejects_raw_string_event_type_before_dispatch() -> None:
 
     async def collect():
         runtime = ChatRuntime(RawStringTypeModel(), tool_executor=_executor_with_echo())
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     events = asyncio.run(collect())
 
@@ -244,7 +259,7 @@ def test_runtime_rejects_non_runtime_event_dto_and_does_not_execute_tool() -> No
         finish_reason = None
         metadata = {}
 
-    class CountingExecutor:
+    class CountingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = 0
 
@@ -259,7 +274,7 @@ def test_runtime_rejects_non_runtime_event_dto_and_does_not_execute_tool() -> No
 
     async def collect(executor):
         runtime = ChatRuntime(FakeEventModel(), tool_executor=executor)
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     executor = CountingExecutor()
     events = asyncio.run(collect(executor))
@@ -508,7 +523,7 @@ def test_runtime_executes_tool_call_and_feeds_result_to_next_turn() -> None:
 
     async def collect(model):
         runtime = ChatRuntime(model, tool_executor=_executor_with_echo())
-        tools = [ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)]
+        tools = [_echo_definition()]
         return [event async for event in runtime.stream_user_message("hello", tools=tools)]
 
     model = ToolLoopModel()
@@ -534,7 +549,7 @@ def test_runtime_executes_tool_call_and_feeds_result_to_next_turn() -> None:
 
 
 def test_runtime_default_policy_allows_read_only_tool_without_approval() -> None:
-    class RecordingExecutor:
+    class RecordingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = 0
 
@@ -557,7 +572,7 @@ def test_runtime_default_policy_allows_read_only_tool_without_approval() -> None
 
     async def collect(executor):
         runtime = ChatRuntime(ToolModel(), tool_executor=executor)
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     executor = RecordingExecutor()
     events = asyncio.run(collect(executor))
@@ -609,13 +624,69 @@ def test_runtime_authorizes_against_executor_registry_definition() -> None:
     events = asyncio.run(collect(model, registry))
 
     assert tool.calls == 0
-    assert model.tools_seen[0].risk_level == ToolRiskLevel.EXTERNAL_WRITE
+    assert model.tools_seen is None
     assert RuntimeEventType.TOOL_APPROVAL_REQUIRED not in [event.type for event in events]
-    assert events[-1].type == RuntimeEventType.RUN_FAILED
+    assert [event.type for event in events] == [
+        RuntimeEventType.RUN_STARTED,
+        RuntimeEventType.RUN_FAILED,
+    ]
+
+
+def test_runtime_fails_before_model_turn_when_executor_has_no_definition_protocol() -> None:
+    class LegacyExecutor:
+        async def execute(self, call):
+            return ToolResult(call_id=call.id, name=call.name, output={})
+
+    class ToolModel:
+        def __init__(self) -> None:
+            self.started = False
+
+        async def stream(self, messages, tools=None):
+            self.started = True
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="stop")
+
+    async def collect(model):
+        runtime = ChatRuntime(model, tool_executor=LegacyExecutor())
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
+
+    model = ToolModel()
+    events = asyncio.run(collect(model))
+
+    assert model.started is False
+    assert [event.type for event in events] == [
+        RuntimeEventType.RUN_STARTED,
+        RuntimeEventType.RUN_FAILED,
+    ]
+
+
+def test_runtime_fails_before_model_turn_when_executor_missing_advertised_definition() -> None:
+    class ToolModel:
+        def __init__(self) -> None:
+            self.started = False
+
+        async def stream(self, messages, tools=None):
+            self.started = True
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="stop")
+
+    async def collect(model):
+        runtime = ChatRuntime(model, tool_executor=ToolExecutor(ToolRegistry()))
+        spoofed_definition = ToolDefinition(name="send_email", risk_level=ToolRiskLevel.READ_ONLY)
+        return [event async for event in runtime.stream_user_message("hello", tools=[spoofed_definition])]
+
+    model = ToolModel()
+    events = asyncio.run(collect(model))
+
+    assert model.started is False
+    assert [event.type for event in events] == [
+        RuntimeEventType.RUN_STARTED,
+        RuntimeEventType.RUN_FAILED,
+    ]
 
 
 def test_runtime_rejects_invalid_tool_definition_risk_level_before_execution() -> None:
-    class RecordingExecutor:
+    class RecordingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = 0
 
@@ -642,7 +713,7 @@ def test_runtime_rejects_invalid_tool_definition_risk_level_before_execution() -
 
 
 def test_runtime_requires_approval_for_local_write_and_allows_once() -> None:
-    class RecordingExecutor:
+    class RecordingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = []
 
@@ -693,8 +764,69 @@ def test_runtime_requires_approval_for_local_write_and_allows_once() -> None:
     assert events[-1].type == RuntimeEventType.RUN_COMPLETED
 
 
+def test_runtime_approval_summarizer_cannot_mutate_internal_tool_definition_schema() -> None:
+    class MutatingSummarizer:
+        def summarize(self, call, definition):
+            definition.input_schema["properties"].clear()
+            return "Approve write schema"
+
+    class DenyApproval:
+        async def request(self, request):
+            return ApprovalDecision.DENY
+
+    definition = ToolDefinition(
+        name="write_schema",
+        input_schema={
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "additionalProperties": False,
+        },
+        risk_level=ToolRiskLevel.LOCAL_WRITE,
+    )
+
+    class RecordingExecutor(_ReadOnlyDefinitionExecutor):
+        def definition(self, name: str) -> ToolDefinition | None:
+            if name == "write_schema":
+                return definition
+            return super().definition(name)
+
+        async def execute(self, call):
+            return ToolResult(call_id=call.id, name=call.name, output={})
+
+    class ToolModel:
+        def __init__(self) -> None:
+            self.tools_by_turn = []
+
+        async def stream(self, messages, tools=None):
+            self.tools_by_turn.append(tools)
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            if len(self.tools_by_turn) == 1:
+                yield RuntimeEvent(
+                    RuntimeEventType.TOOL_CALL_COMPLETED,
+                    tool_call=ToolCall(id="call_1", name="write_schema", arguments={}),
+                )
+                yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+            else:
+                yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="stop")
+
+    async def collect(model):
+        runtime = ChatRuntime(
+            model,
+            tool_executor=RecordingExecutor(),
+            approval_provider=DenyApproval(),
+            approval_summarizer=MutatingSummarizer(),
+        )
+        return [event async for event in runtime.stream_user_message("hello", tools=[definition])]
+
+    model = ToolModel()
+    events = asyncio.run(collect(model))
+
+    assert events[-1].type == RuntimeEventType.RUN_COMPLETED
+    assert model.tools_by_turn[1][0].input_schema["properties"] == {"path": {"type": "string"}}
+
+
 def test_runtime_fails_without_approval_provider_before_required_event() -> None:
-    class RecordingExecutor:
+    class RecordingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = 0
 
@@ -725,7 +857,7 @@ def test_runtime_fails_without_approval_provider_before_required_event() -> None
 
 
 def test_unspecified_tool_risk_requires_approval_by_default() -> None:
-    class RecordingExecutor:
+    class RecordingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = 0
 
@@ -772,7 +904,7 @@ def test_approval_request_metadata_is_isolated_from_source_dict() -> None:
 
 
 def test_runtime_approval_deny_returns_permission_denied_and_continues() -> None:
-    class RecordingExecutor:
+    class RecordingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = 0
 
@@ -821,7 +953,7 @@ def test_runtime_policy_deny_returns_permission_denied_without_approval_or_execu
         async def evaluate(self, call, context):
             return ToolPolicyDecision.DENY
 
-    class RecordingExecutor:
+    class RecordingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = 0
 
@@ -844,7 +976,7 @@ def test_runtime_policy_deny_returns_permission_denied_without_approval_or_execu
 
     async def collect(executor):
         runtime = ChatRuntime(ToolModel(), tool_executor=executor, tool_policy=DenyPolicy())
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     executor = RecordingExecutor()
     events = asyncio.run(collect(executor))
@@ -852,6 +984,58 @@ def test_runtime_policy_deny_returns_permission_denied_without_approval_or_execu
     assert executor.calls == 0
     assert RuntimeEventType.TOOL_APPROVAL_REQUIRED not in [event.type for event in events]
     assert [event for event in events if event.type == RuntimeEventType.TOOL_RESULT][0].tool_result.error.code == ToolErrorCode.PERMISSION_DENIED
+
+
+def test_runtime_policy_cannot_mutate_internal_tool_definition_schema() -> None:
+    class MutatingPolicy:
+        async def evaluate(self, call, context):
+            context.tool_definition.input_schema["properties"].clear()
+            return ToolPolicyDecision.ALLOW
+
+    class RecordingExecutor(_ReadOnlyDefinitionExecutor):
+        def definition(self, name: str) -> ToolDefinition | None:
+            if name == "read_schema":
+                return definition
+            return super().definition(name)
+
+        async def execute(self, call):
+            return ToolResult(call_id=call.id, name=call.name, output={})
+
+    class ToolModel:
+        def __init__(self) -> None:
+            self.tools_by_turn = []
+
+        async def stream(self, messages, tools=None):
+            self.tools_by_turn.append(tools)
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            if len(self.tools_by_turn) == 1:
+                yield RuntimeEvent(
+                    RuntimeEventType.TOOL_CALL_COMPLETED,
+                    tool_call=ToolCall(id="call_1", name="read_schema", arguments={}),
+                )
+                yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+            else:
+                yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="stop")
+
+    definition = ToolDefinition(
+        name="read_schema",
+        input_schema={
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "additionalProperties": False,
+        },
+        risk_level=ToolRiskLevel.READ_ONLY,
+    )
+
+    async def collect(model):
+        runtime = ChatRuntime(model, tool_executor=RecordingExecutor(), tool_policy=MutatingPolicy())
+        return [event async for event in runtime.stream_user_message("hello", tools=[definition])]
+
+    model = ToolModel()
+    events = asyncio.run(collect(model))
+
+    assert events[-1].type == RuntimeEventType.RUN_COMPLETED
+    assert model.tools_by_turn[1][0].input_schema["properties"] == {"path": {"type": "string"}}
 
 
 def test_runtime_policy_and_approval_failures_are_run_failed_without_secret_leak() -> None:
@@ -867,7 +1051,7 @@ def test_runtime_policy_and_approval_failures_are_run_failed_without_secret_leak
 
     async def collect():
         runtime = ChatRuntime(ToolModel(), tool_executor=_executor_with_echo(), tool_policy=BadPolicy())
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     events = asyncio.run(collect())
 
@@ -880,7 +1064,7 @@ def test_runtime_invalid_policy_decision_fails_before_execution() -> None:
         async def evaluate(self, call, context):
             return "allow"
 
-    class RecordingExecutor:
+    class RecordingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = 0
 
@@ -896,7 +1080,7 @@ def test_runtime_invalid_policy_decision_fails_before_execution() -> None:
 
     async def collect(executor):
         runtime = ChatRuntime(ToolModel(), tool_executor=executor, tool_policy=BadPolicy())
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     executor = RecordingExecutor()
     events = asyncio.run(collect(executor))
@@ -910,7 +1094,7 @@ def test_runtime_invalid_approval_decision_fails_without_execution() -> None:
         async def request(self, request):
             return "allow_once"
 
-    class RecordingExecutor:
+    class RecordingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = 0
 
@@ -953,7 +1137,7 @@ def test_runtime_revalidates_policy_after_approval_before_execution() -> None:
         async def request(self, request):
             return ApprovalDecision.ALLOW_ONCE
 
-    class RecordingExecutor:
+    class RecordingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = 0
 
@@ -1012,7 +1196,7 @@ def test_runtime_policy_cancel_propagates_without_terminal_events() -> None:
 
     async def collect(events):
         runtime = ChatRuntime(ToolModel(), tool_executor=_executor_with_echo(), tool_policy=CancelPolicy())
-        async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)]):
+        async for event in runtime.stream_user_message("hello", tools=[_echo_definition()]):
             events.append(event)
 
     events = []
@@ -1038,8 +1222,12 @@ def test_runtime_approval_cancel_has_no_resolved_result_or_next_turn() -> None:
             yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=ToolCall(id="call_1", name="write_file", arguments={}))
             yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
 
+    class RecordingExecutor(_ReadOnlyDefinitionExecutor):
+        async def execute(self, call):
+            return ToolResult(call_id=call.id, name=call.name, output={})
+
     async def collect(events):
-        runtime = ChatRuntime(ToolModel(), tool_executor=_executor_with_echo(), approval_provider=CancelApproval())
+        runtime = ChatRuntime(ToolModel(), tool_executor=RecordingExecutor(), approval_provider=CancelApproval())
         tools = [ToolDefinition(name="write_file", risk_level=ToolRiskLevel.LOCAL_WRITE)]
         async for event in runtime.stream_user_message("hello", tools=tools):
             events.append(event)
@@ -1067,7 +1255,7 @@ def test_runtime_multiple_approvals_are_processed_in_order_after_denial() -> Non
             self.requests.append(request.call_id)
             return ApprovalDecision.DENY if request.call_id == "one" else ApprovalDecision.ALLOW_ONCE
 
-    class RecordingExecutor:
+    class RecordingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = []
 
@@ -1114,7 +1302,7 @@ def test_runtime_multiple_approvals_are_processed_in_order_after_denial() -> Non
 
 
 def test_runtime_completes_after_multiple_tool_turns_with_history_preserved() -> None:
-    class RecordingExecutor:
+    class RecordingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = []
 
@@ -1149,7 +1337,7 @@ def test_runtime_completes_after_multiple_tool_turns_with_history_preserved() ->
 
     async def collect(model, executor):
         runtime = ChatRuntime(model, tool_executor=executor)
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     model = MultiTurnToolModel()
     executor = RecordingExecutor()
@@ -1186,7 +1374,7 @@ def test_runtime_completes_after_multiple_tool_turns_with_history_preserved() ->
 
 
 def test_runtime_model_cannot_mutate_internal_message_history() -> None:
-    class RecordingExecutor:
+    class RecordingExecutor(_ReadOnlyDefinitionExecutor):
         async def execute(self, call):
             return ToolResult(call_id=call.id, name=call.name, output={"path": call.arguments["path"]})
 
@@ -1218,7 +1406,7 @@ def test_runtime_model_cannot_mutate_internal_message_history() -> None:
 
     async def collect(model):
         runtime = ChatRuntime(model, tool_executor=RecordingExecutor())
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     model = MutatingModel()
     events = asyncio.run(collect(model))
@@ -1239,6 +1427,16 @@ def test_runtime_model_cannot_mutate_internal_message_history() -> None:
 
 
 def test_runtime_executes_multiple_tool_calls_in_order_even_when_one_fails() -> None:
+    class MixedExecutor(_ReadOnlyDefinitionExecutor):
+        async def execute(self, call):
+            if call.name == "missing":
+                return ToolResult(
+                    call_id=call.id,
+                    name=call.name,
+                    error=ToolError(code=ToolErrorCode.TOOL_NOT_FOUND, message="Tool not found: missing"),
+                )
+            return ToolResult(call_id=call.id, name=call.name, output={"text": "ok"})
+
     class MultiToolModel:
         async def stream(self, messages, tools=None):
             yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
@@ -1256,12 +1454,12 @@ def test_runtime_executes_multiple_tool_calls_in_order_even_when_one_fails() -> 
                 yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="stop")
 
     async def collect():
-        runtime = ChatRuntime(MultiToolModel(), tool_executor=_executor_with_echo())
+        runtime = ChatRuntime(MultiToolModel(), tool_executor=MixedExecutor())
         return [
             event
             async for event in runtime.stream_user_message(
                 "hello",
-                tools=[ToolDefinition(name="missing", risk_level=ToolRiskLevel.READ_ONLY), ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)],
+                tools=[ToolDefinition(name="missing", risk_level=ToolRiskLevel.READ_ONLY), _echo_definition()],
             )
         ]
 
@@ -1275,7 +1473,7 @@ def test_runtime_executes_multiple_tool_calls_in_order_even_when_one_fails() -> 
 
 
 def test_runtime_feeds_timeout_and_execution_failed_results_and_continues_same_turn() -> None:
-    class MixedFailureExecutor:
+    class MixedFailureExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = []
 
@@ -1318,7 +1516,7 @@ def test_runtime_feeds_timeout_and_execution_failed_results_and_continues_same_t
 
     async def collect(model, executor):
         runtime = ChatRuntime(model, tool_executor=executor)
-        tools = [ToolDefinition(name="slow", risk_level=ToolRiskLevel.READ_ONLY), ToolDefinition(name="fail", risk_level=ToolRiskLevel.READ_ONLY), ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)]
+        tools = [ToolDefinition(name="slow", risk_level=ToolRiskLevel.READ_ONLY), ToolDefinition(name="fail", risk_level=ToolRiskLevel.READ_ONLY), _echo_definition()]
         return [event async for event in runtime.stream_user_message("hello", tools=tools)]
 
     model = MixedFailureModel()
@@ -1356,7 +1554,7 @@ def test_runtime_fails_duplicate_tool_call_ids_before_executing() -> None:
 
     async def collect():
         runtime = ChatRuntime(DuplicateToolModel(), tool_executor=_executor_with_echo())
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     events = asyncio.run(collect())
 
@@ -1365,7 +1563,7 @@ def test_runtime_fails_duplicate_tool_call_ids_before_executing() -> None:
 
 
 def test_runtime_fails_when_tool_result_identity_mismatches_call() -> None:
-    class BadExecutor:
+    class BadExecutor(_ReadOnlyDefinitionExecutor):
         async def execute(self, call):
             return ToolResult(call_id="other", name=call.name, output={})
 
@@ -1377,7 +1575,7 @@ def test_runtime_fails_when_tool_result_identity_mismatches_call() -> None:
 
     async def collect():
         runtime = ChatRuntime(ToolModel(), tool_executor=BadExecutor())
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     events = asyncio.run(collect())
 
@@ -1399,7 +1597,7 @@ def test_runtime_fails_when_tool_call_total_limit_would_be_exceeded() -> None:
             tool_executor=_executor_with_echo(),
             limits=AgentLoopLimits(max_tool_calls_total=1),
         )
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     events = asyncio.run(collect())
 
@@ -1408,7 +1606,7 @@ def test_runtime_fails_when_tool_call_total_limit_would_be_exceeded() -> None:
 
 
 def test_runtime_fails_when_tool_result_is_not_json_serializable_without_echoing_output() -> None:
-    class BadExecutor:
+    class BadExecutor(_ReadOnlyDefinitionExecutor):
         async def execute(self, call):
             return ToolResult(call_id=call.id, name=call.name, output={"secret": {1, 2, 3}})
 
@@ -1420,7 +1618,7 @@ def test_runtime_fails_when_tool_result_is_not_json_serializable_without_echoing
 
     async def collect():
         runtime = ChatRuntime(ToolModel(), tool_executor=BadExecutor())
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     events = asyncio.run(collect())
 
@@ -1430,7 +1628,7 @@ def test_runtime_fails_when_tool_result_is_not_json_serializable_without_echoing
 
 
 def test_runtime_fails_repeated_tool_call_id_across_turns_before_reexecution() -> None:
-    class CountingExecutor:
+    class CountingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = 0
 
@@ -1450,7 +1648,7 @@ def test_runtime_fails_repeated_tool_call_id_across_turns_before_reexecution() -
 
     async def collect(executor):
         runtime = ChatRuntime(RepeatingModel(), tool_executor=executor)
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     executor = CountingExecutor()
     events = asyncio.run(collect(executor))
@@ -1460,7 +1658,7 @@ def test_runtime_fails_repeated_tool_call_id_across_turns_before_reexecution() -
 
 
 def test_runtime_rejects_non_json_tool_arguments_before_executing_tool() -> None:
-    class CountingExecutor:
+    class CountingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = 0
 
@@ -1476,7 +1674,7 @@ def test_runtime_rejects_non_json_tool_arguments_before_executing_tool() -> None
 
     async def collect(executor):
         runtime = ChatRuntime(BadArgumentModel(), tool_executor=executor)
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     executor = CountingExecutor()
     events = asyncio.run(collect(executor))
@@ -1486,7 +1684,7 @@ def test_runtime_rejects_non_json_tool_arguments_before_executing_tool() -> None
 
 
 def test_runtime_snapshots_nested_tool_arguments_before_tool_mutation() -> None:
-    class MutatingExecutor:
+    class MutatingExecutor(_ReadOnlyDefinitionExecutor):
         async def execute(self, call):
             call.arguments["nested"]["text"] = "mutated"
             return ToolResult(call_id=call.id, name=call.name, output={"ok": True})
@@ -1506,7 +1704,7 @@ def test_runtime_snapshots_nested_tool_arguments_before_tool_mutation() -> None:
 
     async def collect(model):
         runtime = ChatRuntime(model, tool_executor=MutatingExecutor())
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     model = SnapshotModel()
     asyncio.run(collect(model))
@@ -1515,7 +1713,7 @@ def test_runtime_snapshots_nested_tool_arguments_before_tool_mutation() -> None:
 
 
 def test_runtime_rejects_conflicting_tool_result_output_and_error() -> None:
-    class BadExecutor:
+    class BadExecutor(_ReadOnlyDefinitionExecutor):
         async def execute(self, call):
             from nexusmind.tools.contracts import ToolError, ToolErrorCode
 
@@ -1534,7 +1732,7 @@ def test_runtime_rejects_conflicting_tool_result_output_and_error() -> None:
 
     async def collect():
         runtime = ChatRuntime(ToolModel(), tool_executor=BadExecutor())
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     events = asyncio.run(collect())
 
@@ -1543,7 +1741,7 @@ def test_runtime_rejects_conflicting_tool_result_output_and_error() -> None:
 
 
 def test_runtime_reports_tool_executor_exception_as_run_failure_only() -> None:
-    class ExplodingExecutor:
+    class ExplodingExecutor(_ReadOnlyDefinitionExecutor):
         async def execute(self, call):
             raise RuntimeError("sk-live-secret")
 
@@ -1555,7 +1753,7 @@ def test_runtime_reports_tool_executor_exception_as_run_failure_only() -> None:
 
     async def collect():
         runtime = ChatRuntime(ToolModel(), tool_executor=ExplodingExecutor())
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     events = asyncio.run(collect())
 
@@ -1565,7 +1763,7 @@ def test_runtime_reports_tool_executor_exception_as_run_failure_only() -> None:
 
 
 def test_runtime_enforces_tool_result_size_limit_without_tool_result_event() -> None:
-    class BigExecutor:
+    class BigExecutor(_ReadOnlyDefinitionExecutor):
         async def execute(self, call):
             return ToolResult(call_id=call.id, name=call.name, output={"text": "x" * 100})
 
@@ -1581,7 +1779,7 @@ def test_runtime_enforces_tool_result_size_limit_without_tool_result_event() -> 
             tool_executor=BigExecutor(),
             limits=AgentLoopLimits(max_tool_result_bytes_per_call=20),
         )
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     events = asyncio.run(collect())
 
@@ -1590,7 +1788,7 @@ def test_runtime_enforces_tool_result_size_limit_without_tool_result_event() -> 
 
 
 def test_runtime_rejects_tool_call_name_not_advertised_for_this_run() -> None:
-    class CountingExecutor:
+    class CountingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = 0
 
@@ -1606,7 +1804,7 @@ def test_runtime_rejects_tool_call_name_not_advertised_for_this_run() -> None:
 
     async def collect(executor):
         runtime = ChatRuntime(UnadvertisedToolModel(), tool_executor=executor)
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     executor = CountingExecutor()
     events = asyncio.run(collect(executor))
@@ -1616,7 +1814,7 @@ def test_runtime_rejects_tool_call_name_not_advertised_for_this_run() -> None:
 
 
 def test_runtime_allows_successful_tool_result_with_null_output() -> None:
-    class NullExecutor:
+    class NullExecutor(_ReadOnlyDefinitionExecutor):
         async def execute(self, call):
             return ToolResult(call_id=call.id, name=call.name, output=None)
 
@@ -1645,7 +1843,7 @@ def test_runtime_allows_successful_tool_result_with_null_output() -> None:
 
 
 def test_runtime_rejects_invalid_tool_error_shape_before_event() -> None:
-    class BadExecutor:
+    class BadExecutor(_ReadOnlyDefinitionExecutor):
         async def execute(self, call):
             return ToolResult(
                 call_id=call.id,
@@ -1665,7 +1863,7 @@ def test_runtime_rejects_invalid_tool_error_shape_before_event() -> None:
 
     async def collect():
         runtime = ChatRuntime(ToolModel(), tool_executor=BadExecutor())
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     events = asyncio.run(collect())
 
@@ -1674,7 +1872,7 @@ def test_runtime_rejects_invalid_tool_error_shape_before_event() -> None:
 
 
 def test_runtime_enforces_tool_argument_size_limit_before_executing_tool() -> None:
-    class CountingExecutor:
+    class CountingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = 0
 
@@ -1694,7 +1892,7 @@ def test_runtime_enforces_tool_argument_size_limit_before_executing_tool() -> No
             tool_executor=executor,
             limits=AgentLoopLimits(max_tool_arguments_bytes_per_call=20),
         )
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     executor = CountingExecutor()
     events = asyncio.run(collect(executor))
@@ -1716,7 +1914,7 @@ def test_tool_result_repr_redacts_error_message_and_metadata() -> None:
 
 
 def test_runtime_executes_original_tool_arguments_when_consumer_mutates_event() -> None:
-    class RecordingExecutor:
+    class RecordingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.arguments = None
 
@@ -1743,7 +1941,7 @@ def test_runtime_executes_original_tool_arguments_when_consumer_mutates_event() 
     async def run(executor):
         stream = ChatRuntime(ToolModel(), tool_executor=executor).stream_user_message(
             "hello",
-            tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)],
+            tools=[_echo_definition()],
         )
         events = []
         async for event in stream:
@@ -1760,7 +1958,7 @@ def test_runtime_executes_original_tool_arguments_when_consumer_mutates_event() 
 
 
 def test_runtime_does_not_execute_tools_when_no_model_turn_budget_remains() -> None:
-    class CountingExecutor:
+    class CountingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = 0
 
@@ -1780,7 +1978,7 @@ def test_runtime_does_not_execute_tools_when_no_model_turn_budget_remains() -> N
             tool_executor=executor,
             limits=AgentLoopLimits(max_model_turns=1),
         )
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     executor = CountingExecutor()
     events = asyncio.run(collect(executor))
@@ -1803,7 +2001,7 @@ def test_runtime_enforces_tool_call_count_limit_as_calls_arrive() -> None:
             tool_executor=_executor_with_echo(),
             limits=AgentLoopLimits(max_tool_calls_total=1),
         )
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     events = asyncio.run(collect())
 
@@ -1812,7 +2010,7 @@ def test_runtime_enforces_tool_call_count_limit_as_calls_arrive() -> None:
 
 
 def test_runtime_does_not_start_next_tool_when_result_budget_is_exhausted() -> None:
-    class BudgetExecutor:
+    class BudgetExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = []
 
@@ -1833,7 +2031,7 @@ def test_runtime_does_not_start_next_tool_when_result_budget_is_exhausted() -> N
             tool_executor=executor,
             limits=AgentLoopLimits(max_tool_result_bytes_total=23),
         )
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     executor = BudgetExecutor()
     events = asyncio.run(collect(executor))
@@ -1843,7 +2041,7 @@ def test_runtime_does_not_start_next_tool_when_result_budget_is_exhausted() -> N
 
 
 def test_runtime_json_budget_accepts_short_control_character_escape() -> None:
-    class NewlineExecutor:
+    class NewlineExecutor(_ReadOnlyDefinitionExecutor):
         async def execute(self, call):
             return ToolResult(call_id=call.id, name=call.name, output={"x": "\n"})
 
@@ -1866,7 +2064,7 @@ def test_runtime_json_budget_accepts_short_control_character_escape() -> None:
             tool_executor=NewlineExecutor(),
             limits=AgentLoopLimits(max_tool_result_bytes_per_call=31),
         )
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     model = ToolModel()
     events = asyncio.run(collect(model))
@@ -1900,7 +2098,7 @@ def test_message_content_none_is_limited_to_assistant_tool_call_messages() -> No
 
 
 def test_runtime_reports_non_json_tool_arguments_as_model_failure() -> None:
-    class CountingExecutor:
+    class CountingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = 0
 
@@ -1919,7 +2117,7 @@ def test_runtime_reports_non_json_tool_arguments_as_model_failure() -> None:
 
     async def collect(executor):
         runtime = ChatRuntime(BadArgumentModel(), tool_executor=executor)
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     executor = CountingExecutor()
     events = asyncio.run(collect(executor))
@@ -1932,7 +2130,7 @@ def test_runtime_reports_non_json_tool_arguments_as_model_failure() -> None:
 
 
 def test_runtime_does_not_execute_tool_when_minimum_result_envelope_cannot_fit() -> None:
-    class CountingExecutor:
+    class CountingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = 0
 
@@ -1952,7 +2150,7 @@ def test_runtime_does_not_execute_tool_when_minimum_result_envelope_cannot_fit()
             tool_executor=executor,
             limits=AgentLoopLimits(max_tool_result_bytes_per_call=10),
         )
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     executor = CountingExecutor()
     events = asyncio.run(collect(executor))
@@ -1968,7 +2166,7 @@ def test_runtime_rejects_executor_result_that_is_not_tool_result() -> None:
         output = {"ok": True}
         error = None
 
-    class BadExecutor:
+    class BadExecutor(_ReadOnlyDefinitionExecutor):
         async def execute(self, call):
             return FakeResult()
 
@@ -1980,7 +2178,7 @@ def test_runtime_rejects_executor_result_that_is_not_tool_result() -> None:
 
     async def collect():
         runtime = ChatRuntime(ToolModel(), tool_executor=BadExecutor())
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     events = asyncio.run(collect())
 
@@ -1989,7 +2187,7 @@ def test_runtime_rejects_executor_result_that_is_not_tool_result() -> None:
 
 
 def test_runtime_json_budget_counts_container_punctuation_before_encoding() -> None:
-    class CountingExecutor:
+    class CountingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = 0
 
@@ -2012,7 +2210,7 @@ def test_runtime_json_budget_counts_container_punctuation_before_encoding() -> N
             tool_executor=executor,
             limits=AgentLoopLimits(max_tool_arguments_bytes_per_call=14),
         )
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     executor = CountingExecutor()
     events = asyncio.run(collect(executor))
@@ -2022,7 +2220,7 @@ def test_runtime_json_budget_counts_container_punctuation_before_encoding() -> N
 
 
 def test_runtime_json_budget_rejects_excessive_nodes_before_encoding() -> None:
-    class CountingExecutor:
+    class CountingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = 0
 
@@ -2045,7 +2243,7 @@ def test_runtime_json_budget_rejects_excessive_nodes_before_encoding() -> None:
             tool_executor=executor,
             limits=AgentLoopLimits(max_json_nodes_per_payload=3),
         )
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     executor = CountingExecutor()
     events = asyncio.run(collect(executor))
@@ -2055,7 +2253,7 @@ def test_runtime_json_budget_rejects_excessive_nodes_before_encoding() -> None:
 
 
 def test_runtime_json_budget_rejects_circular_arguments() -> None:
-    class CountingExecutor:
+    class CountingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = 0
 
@@ -2077,7 +2275,7 @@ def test_runtime_json_budget_rejects_circular_arguments() -> None:
 
     async def collect(executor):
         runtime = ChatRuntime(CircularModel(), tool_executor=executor)
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     executor = CountingExecutor()
     events = asyncio.run(collect(executor))
@@ -2097,7 +2295,7 @@ def test_runtime_rejects_tool_result_string_subclass_identity_fields() -> None:
         def __ne__(self, other):
             return False
 
-    class BadExecutor:
+    class BadExecutor(_ReadOnlyDefinitionExecutor):
         async def execute(self, call):
             return ToolResult(call_id=SneakyStr("other"), name=SneakyStr("other"), output={})
 
@@ -2109,7 +2307,7 @@ def test_runtime_rejects_tool_result_string_subclass_identity_fields() -> None:
 
     async def collect():
         runtime = ChatRuntime(ToolModel(), tool_executor=BadExecutor())
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     events = asyncio.run(collect())
 
@@ -2125,7 +2323,7 @@ def test_runtime_rejects_tool_call_string_subclass_identity_before_execution() -
         def __ne__(self, other):
             return False
 
-    class CountingExecutor:
+    class CountingExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = 0
 
@@ -2144,7 +2342,7 @@ def test_runtime_rejects_tool_call_string_subclass_identity_before_execution() -
 
     async def collect(executor):
         runtime = ChatRuntime(ToolModel(), tool_executor=executor)
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     executor = CountingExecutor()
     events = asyncio.run(collect(executor))
@@ -2157,7 +2355,7 @@ def test_runtime_rejects_tool_call_string_subclass_identity_before_execution() -
 
 
 def test_runtime_rejects_tool_result_metadata_that_is_not_dict() -> None:
-    class BadExecutor:
+    class BadExecutor(_ReadOnlyDefinitionExecutor):
         async def execute(self, call):
             return ToolResult(
                 call_id=call.id,
@@ -2174,7 +2372,7 @@ def test_runtime_rejects_tool_result_metadata_that_is_not_dict() -> None:
 
     async def collect():
         runtime = ChatRuntime(ToolModel(), tool_executor=BadExecutor())
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     events = asyncio.run(collect())
 
@@ -2219,7 +2417,7 @@ def test_runtime_propagates_cancel_during_model_call() -> None:
 
 
 def test_runtime_propagates_cancel_during_tool_call() -> None:
-    class CancelExecutor:
+    class CancelExecutor(_ReadOnlyDefinitionExecutor):
         async def execute(self, call):
             raise asyncio.CancelledError()
 
@@ -2231,7 +2429,7 @@ def test_runtime_propagates_cancel_during_tool_call() -> None:
 
     async def collect(events):
         runtime = ChatRuntime(ToolModel(), tool_executor=CancelExecutor())
-        async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)]):
+        async for event in runtime.stream_user_message("hello", tools=[_echo_definition()]):
             events.append(event)
 
     events = []
@@ -2255,7 +2453,7 @@ def test_runtime_propagates_cancel_during_tool_call() -> None:
 
 
 def test_runtime_does_not_start_later_tools_after_mid_batch_cancel() -> None:
-    class CancelSecondExecutor:
+    class CancelSecondExecutor(_ReadOnlyDefinitionExecutor):
         def __init__(self) -> None:
             self.calls = []
 
@@ -2275,7 +2473,7 @@ def test_runtime_does_not_start_later_tools_after_mid_batch_cancel() -> None:
 
     async def collect(executor):
         runtime = ChatRuntime(MultiToolModel(), tool_executor=executor)
-        return [event async for event in runtime.stream_user_message("hello", tools=[ToolDefinition(name="echo", risk_level=ToolRiskLevel.READ_ONLY)])]
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     executor = CancelSecondExecutor()
     try:

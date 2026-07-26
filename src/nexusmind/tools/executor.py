@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Protocol, runtime_checkable
 
 from jsonschema import ValidationError
 from nexusmind.tools.contracts import ToolCall, ToolDefinition, ToolError, ToolErrorCode, ToolResult
 from nexusmind.tools.registry import ToolNotFoundError, ToolRegistry
+
+
+@runtime_checkable
+class ToolExecutorProtocol(Protocol):
+    def definition(self, name: str) -> ToolDefinition | None:
+        ...
+
+    async def execute(self, call: ToolCall) -> ToolResult:
+        ...
 
 
 class ToolExecutor:

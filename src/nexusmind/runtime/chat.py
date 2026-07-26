@@ -25,7 +25,7 @@ from nexusmind.runtime.policy import (
     new_approval_request_id,
 )
 from nexusmind.tools.contracts import ToolCall, ToolDefinition, ToolError, ToolErrorCode, ToolResult, ToolRiskLevel
-from nexusmind.tools.executor import ToolExecutor
+from nexusmind.tools.executor import ToolExecutorProtocol
 
 _MODEL_EXECUTION_ERROR = "Model execution failed"
 _FINISH_REASONS = {
@@ -75,7 +75,7 @@ class ChatRuntime:
     def __init__(
         self,
         model: ChatModel,
-        tool_executor: ToolExecutor | None = None,
+        tool_executor: ToolExecutorProtocol | None = None,
         limits: AgentLoopLimits | None = None,
         tool_policy: ToolPolicy | None = None,
         approval_provider: ApprovalProvider | None = None,
@@ -108,7 +108,11 @@ class ChatRuntime:
             tool_result_bytes_total = 0
             started_tool_call_ids: set[str] = set()
             executed_tool_call_ids: set[str] = set()
-            tool_definitions = _snapshot_runtime_tool_definitions(tools or [], self._tool_executor)
+            try:
+                tool_definitions = _snapshot_runtime_tool_definitions(tools or [], self._tool_executor)
+            except RuntimeError:
+                yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                return
             model_tools = list(tool_definitions.values())
             allowed_tool_names = set(tool_definitions)
             while True:
@@ -376,7 +380,7 @@ class ChatRuntime:
         if decision == ToolPolicyDecision.DENY:
             return _PolicyResolution(result=_permission_denied_result(call))
         try:
-            summary = self._approval_summarizer.summarize(_copy_tool_call(call), definition)
+            summary = self._approval_summarizer.summarize(_copy_tool_call(call), _copy_tool_definition(definition))
         except Exception:
             return _PolicyResolution(failed=True)
         if type(summary) is not str:
@@ -410,7 +414,7 @@ class ChatRuntime:
             run_id=None,
             model_turn=model_turn,
             tool_call_index=tool_call_index,
-            tool_definition=definition,
+            tool_definition=_copy_tool_definition(definition),
         )
         try:
             decision = await self._tool_policy.evaluate(_copy_tool_call(call), context)
@@ -467,14 +471,21 @@ def _has_duplicate_call_ids(tool_calls: list[ToolCall]) -> bool:
 
 def _snapshot_runtime_tool_definitions(
     definitions: list[ToolDefinition],
-    tool_executor: ToolExecutor | None,
+    tool_executor: ToolExecutorProtocol | None,
 ) -> dict[str, ToolDefinition]:
     snapshotted = _snapshot_tool_definitions(definitions)
-    if isinstance(tool_executor, ToolExecutor):
-        for name in list(snapshotted):
-            actual_definition = tool_executor.definition(name)
-            if actual_definition is not None:
-                snapshotted[name] = actual_definition
+    if tool_executor is None:
+        return snapshotted
+    if not isinstance(tool_executor, ToolExecutorProtocol):
+        raise RuntimeError("Tool executor does not expose definitions")
+    for name, advertised_definition in snapshotted.items():
+        actual_definition = tool_executor.definition(name)
+        if actual_definition is None:
+            raise RuntimeError("Tool executor is missing an advertised definition")
+        actual_snapshot = _snapshot_tool_definitions([actual_definition])[name]
+        if actual_snapshot != advertised_definition:
+            raise RuntimeError("Advertised tool definition does not match executor definition")
+        snapshotted[name] = actual_snapshot
     return _snapshot_tool_definitions(list(snapshotted.values()))
 
 
@@ -491,6 +502,10 @@ def _snapshot_tool_definitions(definitions: list[ToolDefinition]) -> dict[str, T
 
 def _snapshot_tool_definition_list(definitions: list[ToolDefinition]) -> list[ToolDefinition]:
     return list(_snapshot_tool_definitions(definitions).values())
+
+
+def _copy_tool_definition(definition: ToolDefinition) -> ToolDefinition:
+    return _snapshot_tool_definitions([definition])[definition.name]
 
 
 def _copy_tool_call(call: ToolCall) -> ToolCall:
