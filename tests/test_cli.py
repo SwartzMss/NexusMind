@@ -78,6 +78,43 @@ def test_cli_returns_nonzero_on_missing_config(monkeypatch, capsys) -> None:
     assert "Configuration error" in captured.err
 
 
+def test_cli_chat_mcp_does_not_start_client_when_model_config_is_missing(monkeypatch, capsys) -> None:
+    calls = {
+        "load_mcp_config": 0,
+        "client_enter": 0,
+        "list_tools": 0,
+    }
+
+    class TrackingClient:
+        def __init__(self, config):
+            pass
+
+        async def __aenter__(self):
+            calls["client_enter"] += 1
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        async def list_tools(self):
+            calls["list_tools"] += 1
+            return []
+
+    def load_mcp_config(path, server):
+        calls["load_mcp_config"] += 1
+        return MCPStdioServerConfig(server_id=server, command="python")
+
+    monkeypatch.setattr(cli, "load_model_config_from_env", lambda: (_ for _ in ()).throw(ConfigError("missing config")))
+    monkeypatch.setattr(cli, "load_mcp_server_config", load_mcp_config)
+    monkeypatch.setattr(cli, "MCPStdioClient", TrackingClient)
+
+    assert cli.main(["chat", "--mcp-config", "mcp.json", "--mcp-server", "demo", "hi"]) == 2
+
+    captured = capsys.readouterr()
+    assert "Configuration error" in captured.err
+    assert calls == {"load_mcp_config": 0, "client_enter": 0, "list_tools": 0}
+
+
 class _RecordingWriteTool:
     def __init__(self) -> None:
         self.calls = []
@@ -388,6 +425,26 @@ def test_cli_chat_mcp_model_failure_closes_client(monkeypatch, capsys) -> None:
     captured = capsys.readouterr()
     assert fake_client.exited is True
     assert "sk-live-secret" not in captured.err
+
+
+def test_cli_chat_mcp_model_constructor_error_is_not_reported_as_mcp_setup(monkeypatch, capsys) -> None:
+    class BadModel:
+        def __init__(self, config):
+            raise RuntimeError("adapter bug")
+
+    fake_client = _FakeMCPStdioClient(None)
+    _install_mcp_chat_fakes(monkeypatch, fake_client, model_class=BadModel)
+
+    try:
+        cli.main(["chat", "--mcp-config", "mcp.json", "--mcp-server", "demo", "use mcp"])
+    except RuntimeError as exc:
+        assert str(exc) == "adapter bug"
+    else:
+        raise AssertionError("expected RuntimeError")
+
+    captured = capsys.readouterr()
+    assert fake_client.exited is True
+    assert "MCP chat tool setup failed" not in captured.err
 
 
 def test_cli_chat_mcp_cancel_closes_client_and_propagates(monkeypatch) -> None:

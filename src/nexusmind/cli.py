@@ -6,7 +6,7 @@ import json
 import re
 import sys
 
-from nexusmind.config import ConfigError, load_model_config_from_env
+from nexusmind.config import ConfigError, ModelConfig, load_model_config_from_env
 from nexusmind.mcp import MCPError, MCPStdioClient, load_mcp_server_config, register_mcp_tools
 from nexusmind.models.openai_compatible import OpenAICompatibleChatModel
 from nexusmind.runtime.policy import ApprovalDecision, ApprovalRequest
@@ -60,19 +60,37 @@ async def _chat(message: str | None, *, mcp_config: str | None = None, mcp_serve
         print("No message provided.", file=sys.stderr)
         return 2
 
+    try:
+        model_config = load_model_config_from_env()
+    except ConfigError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        return 2
+
     registry = _build_builtin_tool_registry()
     if mcp_config is None:
-        return await _run_chat(message, registry)
+        return await _run_chat(message, registry, model_config=model_config)
 
     try:
         config = load_mcp_server_config(mcp_config, mcp_server)
-        async with MCPStdioClient(config) as client:
-            await register_mcp_tools(client, config.server_id, registry)
-            return await _run_chat(
-                message,
-                registry,
-                executor_timeout=config.request_timeout,
-            )
+    except MCPError as exc:
+        print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
+        return 1
+    except Exception:
+        print("MCP error: MCP chat tool setup failed", file=sys.stderr)
+        return 1
+    return await _run_chat_with_mcp(message, registry, config=config, model_config=model_config)
+
+
+async def _run_chat_with_mcp(
+    message: str,
+    registry: ToolRegistry,
+    *,
+    config,
+    model_config: ModelConfig,
+) -> int:
+    client = MCPStdioClient(config)
+    try:
+        await client.__aenter__()
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
         return 1
@@ -80,16 +98,43 @@ async def _chat(message: str | None, *, mcp_config: str | None = None, mcp_serve
         print("MCP error: MCP chat tool setup failed", file=sys.stderr)
         return 1
 
-
-async def _run_chat(message: str, registry: ToolRegistry, *, executor_timeout: float = 30.0) -> int:
     try:
-        config = load_model_config_from_env()
-    except ConfigError as exc:
-        print(f"Configuration error: {exc}", file=sys.stderr)
-        return 2
+        try:
+            await register_mcp_tools(client, config.server_id, registry)
+        except MCPError as exc:
+            print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
+            return_code = 1
+        except Exception:
+            print("MCP error: MCP chat tool setup failed", file=sys.stderr)
+            return_code = 1
+        else:
+            return_code = await _run_chat(
+                message,
+                registry,
+                model_config=model_config,
+                executor_timeout=config.request_timeout,
+            )
+    except BaseException as exc:
+        await client.__aexit__(type(exc), exc, exc.__traceback__)
+        raise
 
+    try:
+        await client.__aexit__(None, None, None)
+    except MCPError as exc:
+        print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
+        return 1
+    return return_code
+
+
+async def _run_chat(
+    message: str,
+    registry: ToolRegistry,
+    *,
+    model_config: ModelConfig,
+    executor_timeout: float = 30.0,
+) -> int:
     runtime = ChatRuntime(
-        OpenAICompatibleChatModel(config),
+        OpenAICompatibleChatModel(model_config),
         tool_executor=ToolExecutor(registry, timeout=executor_timeout),
         approval_provider=CLIApprovalProvider(),
     )
