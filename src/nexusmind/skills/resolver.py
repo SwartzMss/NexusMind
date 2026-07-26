@@ -10,13 +10,20 @@ from nexusmind.tools.contracts import ToolDefinition
 from nexusmind.tools.registry import ToolRegistry
 
 MAX_MCP_SERVERS_PER_SKILL = MAX_MCP_CLIENTS_PER_GROUP
-WORKSPACE_TOOL_REFERENCES = frozenset(
+WORKSPACE_READ_TOOL_REFERENCES = frozenset(
     {
         "builtin:list_files",
         "builtin:read_file",
         "builtin:search_text",
     }
 )
+WORKSPACE_WRITE_TOOL_REFERENCES = frozenset(
+    {
+        "builtin:write_file",
+        "builtin:replace_text",
+    }
+)
+WORKSPACE_TOOL_REFERENCES = WORKSPACE_READ_TOOL_REFERENCES | WORKSPACE_WRITE_TOOL_REFERENCES
 
 
 def resolve_skill_tool_references(skill: SkillDefinition, registry: ToolRegistry) -> list[ToolDefinition]:
@@ -68,6 +75,10 @@ def skill_requires_mcp(skill: SkillDefinition) -> bool:
 
 def skill_requires_workspace(skill: SkillDefinition) -> bool:
     return any(reference in WORKSPACE_TOOL_REFERENCES for reference in skill.allowed_tools)
+
+
+def skill_requires_workspace_write(skill: SkillDefinition) -> bool:
+    return any(reference in WORKSPACE_WRITE_TOOL_REFERENCES for reference in skill.allowed_tools)
 
 
 def skill_mcp_server_ids(skill: SkillDefinition) -> tuple[str, ...]:

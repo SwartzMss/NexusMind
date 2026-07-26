@@ -1,6 +1,14 @@
 from nexusmind.tools.builtin.approval_demo import ApprovalDemoTool
 from nexusmind.tools.builtin.echo import EchoTool
-from nexusmind.tools.builtin.workspace import ListFilesTool, ReadFileTool, SearchTextTool
+from nexusmind.tools.builtin.workspace import ListFilesTool, ReadFileTool, ReplaceTextTool, SearchTextTool, WriteFileTool
 
-__all__ = ["ApprovalDemoTool", "EchoTool", "ListFilesTool", "ReadFileTool", "SearchTextTool"]
+__all__ = [
+    "ApprovalDemoTool",
+    "EchoTool",
+    "ListFilesTool",
+    "ReadFileTool",
+    "ReplaceTextTool",
+    "SearchTextTool",
+    "WriteFileTool",
+]
 
