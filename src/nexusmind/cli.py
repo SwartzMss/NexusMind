@@ -8,7 +8,7 @@ import re
 import sys
 
 from nexusmind.config import ConfigError, ModelConfig, load_model_config_from_env
-from nexusmind.mcp import MCPError, MCPStdioClient, load_mcp_server_config, register_mcp_tools
+from nexusmind.mcp import MCPClientGroup, MCPError, MCPStdioClient, load_mcp_server_config, load_mcp_server_configs, register_mcp_tools
 from nexusmind.models.openai_compatible import OpenAICompatibleChatModel
 from nexusmind.runtime.chat import AgentLoopLimits
 from nexusmind.runtime.policy import ApprovalDecision, ApprovalRequest
@@ -17,9 +17,9 @@ from nexusmind.runtime.events import RuntimeEventType
 from nexusmind.skills import SkillError, discover_skills, load_skill, resolve_skill_tool_references
 from nexusmind.skills.resolver import (
     build_skill_loop_limits,
+    skill_mcp_server_ids,
     skill_requires_mcp,
     validate_builtin_skill_tool_references,
-    validate_skill_mcp_server_id,
 )
 from nexusmind.tools import ToolCall, ToolErrorCode, ToolExecutor, ToolRegistry
 from nexusmind.tools.contracts import ToolDefinition
@@ -60,7 +60,6 @@ def main(argv: list[str] | None = None) -> int:
     skill_run_parser.add_argument("name")
     skill_run_parser.add_argument("--skills-dir", default="./skills")
     skill_run_parser.add_argument("--mcp-config")
-    skill_run_parser.add_argument("--mcp-server")
     skill_run_parser.add_argument("message", nargs="*")
 
     parse_argv, separator_message = _split_skill_run_separator_message(argv)
@@ -321,9 +320,6 @@ async def _skill(args: argparse.Namespace) -> int:
         print(f"max_tool_calls_total\t{skill.max_tool_calls_total or ''}")
         return 0
     if args.skill_command == "run":
-        if bool(args.mcp_config) != bool(args.mcp_server):
-            print("skill run requires --mcp-config and --mcp-server together", file=sys.stderr)
-            return 2
         return await _skill_run(args)
     return 2
 
@@ -336,7 +332,7 @@ async def _skill_run(args: argparse.Namespace) -> int:
         print(_safe_cli_field(str(exc), max_length=240), file=sys.stderr)
         return 2
     if skill_requires_mcp(skill) and not args.mcp_config:
-        print("Skill error: MCP tool references require --mcp-config and --mcp-server", file=sys.stderr)
+        print("Skill error: MCP tool references require --mcp-config", file=sys.stderr)
         return 2
     message = " ".join(args.message).strip()
     if not message:
@@ -371,18 +367,18 @@ async def _skill_run(args: argparse.Namespace) -> int:
             limits=limits,
         )
     try:
-        config = load_mcp_server_config(args.mcp_config, args.mcp_server)
-        validate_skill_mcp_server_id(skill, config.server_id)
+        required_server_ids = skill_mcp_server_ids(skill)
+        configs = load_mcp_server_configs(args.mcp_config, required_server_ids)
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
-        return 1
+        return 2
     except SkillError as exc:
         print(_safe_cli_field(str(exc), max_length=240), file=sys.stderr)
         return 2
     except Exception:
-        print("MCP error: MCP chat tool setup failed", file=sys.stderr)
+        print("MCP error: MCP skill tool setup failed", file=sys.stderr)
         return 1
-    return await _run_skill_with_mcp(message, skill, registry, config=config, model_config=model_config, limits=limits)
+    return await _run_skill_with_mcp(message, skill, registry, configs=configs, model_config=model_config, limits=limits)
 
 
 async def _run_skill_with_mcp(
@@ -390,22 +386,22 @@ async def _run_skill_with_mcp(
     skill,
     registry: ToolRegistry,
     *,
-    config,
+    configs,
     model_config: ModelConfig,
     limits: AgentLoopLimits,
 ) -> int:
-    client = MCPStdioClient(config)
+    group = MCPClientGroup(configs)
     try:
-        await client.__aenter__()
+        await group.__aenter__()
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
         return 1
     except Exception:
-        print("MCP error: MCP chat tool setup failed", file=sys.stderr)
+        print("MCP error: MCP skill tool setup failed", file=sys.stderr)
         return 1
     try:
         try:
-            await register_mcp_tools(client, config.server_id, registry)
+            await group.register_tools(registry)
             tools = resolve_skill_tool_references(skill, registry)
         except SkillError as exc:
             print(_safe_cli_field(str(exc), max_length=240), file=sys.stderr)
@@ -421,19 +417,18 @@ async def _run_skill_with_mcp(
                 message,
                 registry,
                 model_config=model_config,
-                executor_timeout=config.request_timeout,
                 system_prompt=skill.instructions,
                 tools=tools,
                 limits=limits,
             )
     except BaseException as exc:
         try:
-            await client.__aexit__(type(exc), exc, exc.__traceback__)
+            await group.__aexit__(type(exc), exc, exc.__traceback__)
         except BaseException:
             pass
         raise
     try:
-        await client.__aexit__(None, None, None)
+        await group.__aexit__(None, None, None)
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
         return 1
