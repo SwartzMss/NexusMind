@@ -20,6 +20,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="nexusmind")
     subparsers = parser.add_subparsers(dest="command", required=True)
     chat_parser = subparsers.add_parser("chat")
+    chat_parser.add_argument("--mcp-config")
+    chat_parser.add_argument("--mcp-server")
     chat_parser.add_argument("message", nargs="?")
     tools_parser = subparsers.add_parser("tools")
     tools_subparsers = tools_parser.add_subparsers(dest="tools_command", required=True)
@@ -40,7 +42,10 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.command == "chat":
-        return asyncio.run(_chat(args.message))
+        if bool(args.mcp_config) != bool(args.mcp_server):
+            print("chat requires --mcp-config and --mcp-server together", file=sys.stderr)
+            return 2
+        return asyncio.run(_chat(args.message, mcp_config=args.mcp_config, mcp_server=args.mcp_server))
     if args.command == "tools":
         return asyncio.run(_tools(args))
     if args.command == "mcp":
@@ -48,23 +53,44 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
-async def _chat(message: str | None) -> int:
+async def _chat(message: str | None, *, mcp_config: str | None = None, mcp_server: str | None = None) -> int:
     if not message:
         message = input("> ").strip()
     if not message:
         print("No message provided.", file=sys.stderr)
         return 2
 
+    registry = _build_builtin_tool_registry()
+    if mcp_config is None:
+        return await _run_chat(message, registry)
+
+    try:
+        config = load_mcp_server_config(mcp_config, mcp_server)
+        async with MCPStdioClient(config) as client:
+            await register_mcp_tools(client, config.server_id, registry)
+            return await _run_chat(
+                message,
+                registry,
+                executor_timeout=config.request_timeout,
+            )
+    except MCPError as exc:
+        print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
+        return 1
+    except Exception:
+        print("MCP error: MCP chat tool setup failed", file=sys.stderr)
+        return 1
+
+
+async def _run_chat(message: str, registry: ToolRegistry, *, executor_timeout: float = 30.0) -> int:
     try:
         config = load_model_config_from_env()
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
 
-    registry = _build_builtin_tool_registry()
     runtime = ChatRuntime(
         OpenAICompatibleChatModel(config),
-        tool_executor=ToolExecutor(registry),
+        tool_executor=ToolExecutor(registry, timeout=executor_timeout),
         approval_provider=CLIApprovalProvider(),
     )
     tools = registry.list_definitions()
