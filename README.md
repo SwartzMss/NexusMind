@@ -105,6 +105,14 @@ nexusmind mcp tools --config mcp.json --server demo
 nexusmind mcp call --config mcp.json --server demo --tool demo__echo_290c9db7d5 --arguments '{"text":"hello"}'
 ```
 
+把单个 MCP Stdio Server 接入 `chat` 的 Agent Tool Loop：
+
+```powershell
+nexusmind chat --mcp-config mcp.json --mcp-server demo "请调用 MCP 工具完成任务"
+```
+
+`chat` 会在首次模型调用前发现并注册该 Server 的工具。MCP 工具默认风险级别为 `UNSPECIFIED`，因此模型请求调用时会经过 CLI Allow once / Deny 审批。
+
 ## 模型工具调用
 
 NexusMind 可以把已注册的 `ToolDefinition` 传给 OpenAI-compatible chat model，把流式 `tool_calls` 解析成与服务商无关的事件，通过 `ToolExecutor` 执行模型请求的工具，并把结构化 `role=tool` 结果回填到下一轮模型调用。运行时使用有界的单 Agent 循环限制，避免模型轮次或工具结果无限增长。
