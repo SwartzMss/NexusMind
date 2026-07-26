@@ -69,6 +69,9 @@ class ToolRegistry:
     def contains(self, name: str) -> bool:
         return name in self._tools
 
+    def definition(self, name: str) -> ToolDefinition:
+        return _copy_tool_definition(self._get_registered(name).definition)
+
     def list_definitions(self) -> list[ToolDefinition]:
         return [_copy_tool_definition(self._tools[name].definition) for name in sorted(self._tools)]
 

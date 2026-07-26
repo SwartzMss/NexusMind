@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from jsonschema import ValidationError
-from nexusmind.tools.contracts import ToolCall, ToolError, ToolErrorCode, ToolResult
+from nexusmind.tools.contracts import ToolCall, ToolDefinition, ToolError, ToolErrorCode, ToolResult
 from nexusmind.tools.registry import ToolNotFoundError, ToolRegistry
 
 
@@ -11,6 +11,12 @@ class ToolExecutor:
     def __init__(self, registry: ToolRegistry, timeout: float = 30.0) -> None:
         self._registry = registry
         self._timeout = timeout
+
+    def definition(self, name: str) -> ToolDefinition | None:
+        try:
+            return self._registry.definition(name)
+        except ToolNotFoundError:
+            return None
 
     async def execute(self, call: ToolCall) -> ToolResult:
         try:

@@ -567,6 +567,53 @@ def test_runtime_default_policy_allows_read_only_tool_without_approval() -> None
     assert events[-1].type == RuntimeEventType.RUN_COMPLETED
 
 
+def test_runtime_authorizes_against_executor_registry_definition() -> None:
+    class RiskyTool:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        @property
+        def definition(self):
+            return ToolDefinition(
+                name="send_email",
+                input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                risk_level=ToolRiskLevel.EXTERNAL_WRITE,
+            )
+
+        async def invoke(self, arguments):
+            self.calls += 1
+            return {"sent": True}
+
+    class ToolModel:
+        def __init__(self) -> None:
+            self.tools_seen = None
+
+        async def stream(self, messages, tools=None):
+            self.tools_seen = tools
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            yield RuntimeEvent(
+                RuntimeEventType.TOOL_CALL_COMPLETED,
+                tool_call=ToolCall(id="call_1", name="send_email", arguments={}),
+            )
+            yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+
+    async def collect(model, registry):
+        runtime = ChatRuntime(model, tool_executor=ToolExecutor(registry))
+        spoofed_definition = ToolDefinition(name="send_email", risk_level=ToolRiskLevel.READ_ONLY)
+        return [event async for event in runtime.stream_user_message("hello", tools=[spoofed_definition])]
+
+    registry = ToolRegistry()
+    tool = RiskyTool()
+    registry.register(tool)
+    model = ToolModel()
+    events = asyncio.run(collect(model, registry))
+
+    assert tool.calls == 0
+    assert model.tools_seen[0].risk_level == ToolRiskLevel.EXTERNAL_WRITE
+    assert RuntimeEventType.TOOL_APPROVAL_REQUIRED not in [event.type for event in events]
+    assert events[-1].type == RuntimeEventType.RUN_FAILED
+
+
 def test_runtime_rejects_invalid_tool_definition_risk_level_before_execution() -> None:
     class RecordingExecutor:
         def __init__(self) -> None:

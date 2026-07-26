@@ -3,9 +3,9 @@ from io import StringIO
 
 from nexusmind import cli
 from nexusmind.config import ConfigError, ModelConfig
-from nexusmind.runtime.policy import ApprovalDecision, ApprovalRequest
 from nexusmind.runtime.events import RuntimeEvent, RuntimeEventType
-from nexusmind.tools import ToolRiskLevel
+from nexusmind.runtime.policy import ApprovalDecision, ApprovalRequest
+from nexusmind.tools import ToolCall, ToolDefinition, ToolRegistry, ToolRiskLevel
 
 
 def test_cli_outputs_streaming_text(monkeypatch, capsys) -> None:
@@ -20,7 +20,7 @@ def test_cli_outputs_streaming_text(monkeypatch, capsys) -> None:
             self.model = model
             self.kwargs = kwargs
 
-        async def stream_user_message(self, message):
+        async def stream_user_message(self, message, tools=None):
             yield RuntimeEvent(RuntimeEventType.RUN_STARTED)
             yield RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="hello")
             yield RuntimeEvent(RuntimeEventType.TEXT_DELTA, text=" world")
@@ -49,7 +49,7 @@ def test_cli_returns_nonzero_on_model_failure(monkeypatch, capsys) -> None:
             self.model = model
             self.kwargs = kwargs
 
-        async def stream_user_message(self, message):
+        async def stream_user_message(self, message, tools=None):
             yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error="provider rejected request")
 
     monkeypatch.setattr(cli, "OpenAICompatibleChatModel", StubModel)
@@ -72,6 +72,96 @@ def test_cli_returns_nonzero_on_missing_config(monkeypatch, capsys) -> None:
 
     captured = capsys.readouterr()
     assert "Configuration error" in captured.err
+
+
+class _RecordingWriteTool:
+    def __init__(self) -> None:
+        self.calls = []
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="write_file",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            risk_level=ToolRiskLevel.LOCAL_WRITE,
+        )
+
+    async def invoke(self, arguments):
+        self.calls.append(arguments)
+        return {"written": True}
+
+
+class _ToolCallThenStopModel:
+    instances = []
+
+    def __init__(self, config):
+        self.config = config
+        self.messages_by_turn = []
+        self.tools_by_turn = []
+        _ToolCallThenStopModel.instances.append(self)
+
+    async def stream(self, messages, tools=None):
+        self.messages_by_turn.append(list(messages))
+        self.tools_by_turn.append(tools)
+        yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+        if len(self.messages_by_turn) == 1:
+            yield RuntimeEvent(
+                RuntimeEventType.TOOL_CALL_COMPLETED,
+                tool_call=ToolCall(id="call_1", name="write_file", arguments={}),
+            )
+            yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+        else:
+            yield RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="done")
+            yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="stop")
+
+
+def test_cli_chat_approval_allow_executes_tool_and_feeds_result(monkeypatch, capsys) -> None:
+    tool = _RecordingWriteTool()
+
+    def registry_factory():
+        registry = ToolRegistry()
+        registry.register(tool)
+        return registry
+
+    monkeypatch.setattr(cli, "load_model_config_from_env", lambda: ModelConfig("https://example.test", "secret", "fake"))
+    monkeypatch.setattr(cli, "OpenAICompatibleChatModel", _ToolCallThenStopModel)
+    monkeypatch.setattr(cli, "_build_builtin_tool_registry", registry_factory)
+    monkeypatch.setattr(cli.sys, "stdin", StringIO("a\n"))
+    _ToolCallThenStopModel.instances = []
+
+    assert cli.main(["chat", "write"]) == 0
+
+    captured = capsys.readouterr()
+    model = _ToolCallThenStopModel.instances[0]
+    assert tool.calls == [{}]
+    assert model.tools_by_turn[0][0].name == "write_file"
+    assert model.messages_by_turn[1][-1].content == '{"ok":true,"output":{"written":true}}'
+    assert "Tool approval required" in captured.err
+    assert captured.out == "done\n"
+
+
+def test_cli_chat_approval_deny_does_not_execute_tool(monkeypatch, capsys) -> None:
+    tool = _RecordingWriteTool()
+
+    def registry_factory():
+        registry = ToolRegistry()
+        registry.register(tool)
+        return registry
+
+    monkeypatch.setattr(cli, "load_model_config_from_env", lambda: ModelConfig("https://example.test", "secret", "fake"))
+    monkeypatch.setattr(cli, "OpenAICompatibleChatModel", _ToolCallThenStopModel)
+    monkeypatch.setattr(cli, "_build_builtin_tool_registry", registry_factory)
+    monkeypatch.setattr(cli.sys, "stdin", StringIO("d\n"))
+    _ToolCallThenStopModel.instances = []
+
+    assert cli.main(["chat", "write"]) == 0
+
+    captured = capsys.readouterr()
+    model = _ToolCallThenStopModel.instances[0]
+    assert tool.calls == []
+    assert '"code":"PERMISSION_DENIED"' in model.messages_by_turn[1][-1].content
+    assert "Tool approval required" in captured.err
+    assert captured.out == "done\n"
 
 
 def test_cli_approval_provider_allows_once_for_a() -> None:

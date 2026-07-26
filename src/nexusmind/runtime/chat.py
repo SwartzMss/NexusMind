@@ -108,7 +108,7 @@ class ChatRuntime:
             tool_result_bytes_total = 0
             started_tool_call_ids: set[str] = set()
             executed_tool_call_ids: set[str] = set()
-            tool_definitions = _snapshot_tool_definitions(tools or [])
+            tool_definitions = _snapshot_runtime_tool_definitions(tools or [], self._tool_executor)
             model_tools = list(tool_definitions.values())
             allowed_tool_names = set(tool_definitions)
             while True:
@@ -463,6 +463,19 @@ def _has_duplicate_call_ids(tool_calls: list[ToolCall]) -> bool:
             return True
         seen.add(call.id)
     return False
+
+
+def _snapshot_runtime_tool_definitions(
+    definitions: list[ToolDefinition],
+    tool_executor: ToolExecutor | None,
+) -> dict[str, ToolDefinition]:
+    snapshotted = _snapshot_tool_definitions(definitions)
+    if isinstance(tool_executor, ToolExecutor):
+        for name in list(snapshotted):
+            actual_definition = tool_executor.definition(name)
+            if actual_definition is not None:
+                snapshotted[name] = actual_definition
+    return _snapshot_tool_definitions(list(snapshotted.values()))
 
 
 def _snapshot_tool_definitions(definitions: list[ToolDefinition]) -> dict[str, ToolDefinition]:

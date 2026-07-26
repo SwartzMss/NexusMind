@@ -61,9 +61,15 @@ async def _chat(message: str | None) -> int:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
 
-    runtime = ChatRuntime(OpenAICompatibleChatModel(config), approval_provider=CLIApprovalProvider())
+    registry = _build_builtin_tool_registry()
+    runtime = ChatRuntime(
+        OpenAICompatibleChatModel(config),
+        tool_executor=ToolExecutor(registry),
+        approval_provider=CLIApprovalProvider(),
+    )
+    tools = registry.list_definitions()
     failed = False
-    async for event in runtime.stream_user_message(message):
+    async for event in runtime.stream_user_message(message, tools=tools):
         if event.type == RuntimeEventType.TEXT_DELTA and event.text:
             print(event.text, end="", flush=True)
         elif event.type == RuntimeEventType.RUN_FAILED:
