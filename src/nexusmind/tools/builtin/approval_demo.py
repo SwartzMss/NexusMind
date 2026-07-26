@@ -5,21 +5,20 @@ from typing import Any
 from nexusmind.tools.contracts import ToolDefinition, ToolRiskLevel
 
 
-class EchoTool:
+class ApprovalDemoTool:
     @property
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
-            name="echo",
-            description="Return the provided text.",
+            name="approval_demo",
+            description="Demonstrate approval flow without modifying local state.",
             input_schema={
                 "type": "object",
-                "properties": {"text": {"type": "string"}},
-                "required": ["text"],
+                "properties": {"message": {"type": "string"}},
+                "required": ["message"],
                 "additionalProperties": False,
             },
-            risk_level=ToolRiskLevel.READ_ONLY,
+            risk_level=ToolRiskLevel.LOCAL_WRITE,
         )
 
     async def invoke(self, arguments: dict[str, Any]) -> dict[str, str]:
-        return {"text": arguments["text"]}
-
+        return {"message": arguments["message"]}

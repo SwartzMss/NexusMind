@@ -9,11 +9,20 @@ def _default_input_schema() -> dict[str, Any]:
     return {"type": "object", "properties": {}, "additionalProperties": False}
 
 
+class ToolRiskLevel(str, Enum):
+    UNSPECIFIED = "unspecified"
+    READ_ONLY = "read_only"
+    LOCAL_WRITE = "local_write"
+    EXTERNAL_WRITE = "external_write"
+    COMMAND_EXECUTION = "command_execution"
+
+
 @dataclass(frozen=True, slots=True)
 class ToolDefinition:
     name: str
     description: str | None = None
     input_schema: dict[str, Any] = field(default_factory=_default_input_schema)
+    risk_level: ToolRiskLevel = ToolRiskLevel.UNSPECIFIED
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +37,7 @@ class ToolErrorCode(str, Enum):
     INVALID_ARGUMENTS = "INVALID_ARGUMENTS"
     EXECUTION_FAILED = "EXECUTION_FAILED"
     EXECUTION_TIMEOUT = "EXECUTION_TIMEOUT"
+    PERMISSION_DENIED = "PERMISSION_DENIED"
 
 
 @dataclass(frozen=True, slots=True)

@@ -8,7 +8,7 @@ from jsonschema.exceptions import SchemaError
 from jsonschema.validators import Draft202012Validator
 
 from nexusmind.tools.base import Tool
-from nexusmind.tools.contracts import ToolDefinition
+from nexusmind.tools.contracts import ToolDefinition, ToolRiskLevel
 
 _TOOL_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 
@@ -69,6 +69,9 @@ class ToolRegistry:
     def contains(self, name: str) -> bool:
         return name in self._tools
 
+    def definition(self, name: str) -> ToolDefinition:
+        return _copy_tool_definition(self._get_registered(name).definition)
+
     def list_definitions(self) -> list[ToolDefinition]:
         return [_copy_tool_definition(self._tools[name].definition) for name in sorted(self._tools)]
 
@@ -76,6 +79,8 @@ class ToolRegistry:
 def validate_tool_definition(definition: ToolDefinition) -> None:
     if not definition.name or not _TOOL_NAME_RE.fullmatch(definition.name):
         raise ToolRegistryError("Tool name must start with a letter and contain only letters, digits, '_' or '-'")
+    if type(definition.risk_level) is not ToolRiskLevel:
+        raise ToolRegistryError("Tool risk_level must be a ToolRiskLevel")
     schema = definition.input_schema
     if not isinstance(schema, dict):
         raise ToolRegistryError("Tool input_schema must be a JSON Schema object")
@@ -88,8 +93,4 @@ def validate_tool_definition(definition: ToolDefinition) -> None:
 
 
 def _copy_tool_definition(definition: ToolDefinition) -> ToolDefinition:
-    return ToolDefinition(
-        name=definition.name,
-        description=definition.description,
-        input_schema=deepcopy(definition.input_schema),
-    )
+    return deepcopy(definition)

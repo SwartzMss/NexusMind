@@ -22,11 +22,7 @@ class MCPToolAdapter:
 
     @property
     def definition(self) -> ToolDefinition:
-        return ToolDefinition(
-            name=self._definition.name,
-            description=self._definition.description,
-            input_schema=deepcopy(self._definition.input_schema),
-        )
+        return deepcopy(self._definition)
 
     async def invoke(self, arguments: dict[str, Any]) -> Any:
         result = await self._client.call_tool(self.remote_name, arguments)

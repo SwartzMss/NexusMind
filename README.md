@@ -65,6 +65,14 @@ nexusmind tools list
 nexusmind tools call echo '{"text":"hello"}'
 ```
 
+`tools call` 是用户主动直调工具，不会经过 Agent Tool Loop，也不会触发审批。
+
+内置 `approval_demo` 工具用于通过 `chat` 演示审批流程。它标记为 `LOCAL_WRITE` 以触发 Allow once / Deny，但不会修改本地状态：
+
+```powershell
+nexusmind chat "请调用 approval_demo 工具，message 设置为 hello"
+```
+
 ## MCP Stdio 工具
 
 MCP server 配置从 JSON 文件读取。如果配置文件包含环境变量或密钥，请把它当作敏感文件处理。
@@ -100,6 +108,8 @@ nexusmind mcp call --config mcp.json --server demo --tool demo__echo_290c9db7d5 
 ## 模型工具调用
 
 NexusMind 可以把已注册的 `ToolDefinition` 传给 OpenAI-compatible chat model，把流式 `tool_calls` 解析成与服务商无关的事件，通过 `ToolExecutor` 执行模型请求的工具，并把结构化 `role=tool` 结果回填到下一轮模型调用。运行时使用有界的单 Agent 循环限制，避免模型轮次或工具结果无限增长。
+
+工具定义的默认风险级别是 `UNSPECIFIED`，默认策略会要求审批；确认只读工具时应显式设置 `ToolRiskLevel.READ_ONLY`。
 
 ## 测试
 
