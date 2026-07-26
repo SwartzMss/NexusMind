@@ -73,6 +73,27 @@ nexusmind tools call echo '{"text":"hello"}'
 nexusmind chat "请调用 approval_demo 工具，message 设置为 hello"
 ```
 
+### Workspace 只读文件工具
+
+默认情况下，普通 `chat` 不会暴露文件系统工具。用户必须为单次运行显式提供一个 Workspace Root：
+
+```powershell
+nexusmind chat --workspace ./project "分析这个项目的入口和主要模块"
+```
+
+提供 `--workspace` 后，NexusMind 会注册三个只读工具：`list_files`、`read_file` 和 `search_text`。这些工具只能访问 Workspace Root 内部，只返回相对路径，第一版不跟随任何符号链接，仅支持严格 UTF-8 文本，并对目录遍历、文件大小、扫描字节、匹配数和输出大小设置上限。
+
+Workspace 内容可能通过工具结果发送给模型 Provider。文件工具不支持写文件、Patch、Shell、glob 或正则搜索。
+
+Skill 可以在 `allowed_tools` 中引用文件工具，但不能声明或改变 Workspace Root；Host 仍必须在运行时传入 `--workspace`：
+
+```powershell
+nexusmind skill run workspace-code-review `
+  --skills-dir ./examples/skills `
+  --workspace ./project `
+  "检查项目中的并发与资源释放问题"
+```
+
 ## MCP Stdio 工具
 
 MCP server 配置从 JSON 文件读取。如果配置文件包含环境变量或密钥，请把它当作敏感文件处理。
