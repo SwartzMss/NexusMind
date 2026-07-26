@@ -76,7 +76,7 @@ class ToolRegistry:
 def validate_tool_definition(definition: ToolDefinition) -> None:
     if not definition.name or not _TOOL_NAME_RE.fullmatch(definition.name):
         raise ToolRegistryError("Tool name must start with a letter and contain only letters, digits, '_' or '-'")
-    if not isinstance(definition.risk_level, ToolRiskLevel):
+    if type(definition.risk_level) is not ToolRiskLevel:
         raise ToolRegistryError("Tool risk_level must be a ToolRiskLevel")
     schema = definition.input_schema
     if not isinstance(schema, dict):
@@ -90,9 +90,4 @@ def validate_tool_definition(definition: ToolDefinition) -> None:
 
 
 def _copy_tool_definition(definition: ToolDefinition) -> ToolDefinition:
-    return ToolDefinition(
-        name=definition.name,
-        description=definition.description,
-        input_schema=deepcopy(definition.input_schema),
-        risk_level=definition.risk_level,
-    )
+    return deepcopy(definition)

@@ -122,7 +122,7 @@ class CLIApprovalProvider:
         print("[d] Deny", file=self._output_stream)
         print("> ", end="", file=self._output_stream, flush=True)
         try:
-            answer = self._input_stream.readline()
+            answer = await asyncio.to_thread(self._input_stream.readline)
         except Exception:
             return ApprovalDecision.DENY
         if not answer:

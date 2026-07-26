@@ -10,6 +10,7 @@ def _default_input_schema() -> dict[str, Any]:
 
 
 class ToolRiskLevel(str, Enum):
+    UNSPECIFIED = "unspecified"
     READ_ONLY = "read_only"
     LOCAL_WRITE = "local_write"
     EXTERNAL_WRITE = "external_write"
@@ -21,7 +22,7 @@ class ToolDefinition:
     name: str
     description: str | None = None
     input_schema: dict[str, Any] = field(default_factory=_default_input_schema)
-    risk_level: ToolRiskLevel = ToolRiskLevel.READ_ONLY
+    risk_level: ToolRiskLevel = ToolRiskLevel.UNSPECIFIED
 
 
 @dataclass(frozen=True, slots=True)

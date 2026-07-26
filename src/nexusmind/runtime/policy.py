@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol
@@ -35,6 +36,11 @@ class ApprovalRequest:
     risk_level: ToolRiskLevel
     summary: str
     metadata: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        if type(self.metadata) is not dict:
+            raise TypeError("ApprovalRequest metadata must be a dict")
+        object.__setattr__(self, "metadata", deepcopy(self.metadata))
 
 
 @dataclass(frozen=True, slots=True)

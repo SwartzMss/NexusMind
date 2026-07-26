@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from nexusmind.tools.contracts import ToolDefinition
+from nexusmind.tools.contracts import ToolDefinition, ToolRiskLevel
 
 
 class EchoTool:
@@ -17,6 +17,7 @@ class EchoTool:
                 "required": ["text"],
                 "additionalProperties": False,
             },
+            risk_level=ToolRiskLevel.READ_ONLY,
         )
 
     async def invoke(self, arguments: dict[str, Any]) -> dict[str, str]:

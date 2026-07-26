@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
 from typing import cast
 
 from nexusmind.models.base import ChatModel
@@ -105,8 +106,10 @@ class ChatRuntime:
             tool_calls_total = 0
             tool_arguments_bytes_total = 0
             tool_result_bytes_total = 0
+            started_tool_call_ids: set[str] = set()
             executed_tool_call_ids: set[str] = set()
             tool_definitions = _snapshot_tool_definitions(tools or [])
+            model_tools = list(tool_definitions.values())
             allowed_tool_names = set(tool_definitions)
             while True:
                 if model_turns >= self._limits.max_model_turns:
@@ -115,7 +118,10 @@ class ChatRuntime:
                 model_turns += 1
                 turn = _ModelTurn()
                 try:
-                    async for event in self._model.stream(_snapshot_messages(messages), tools=tools):
+                    async for event in self._model.stream(
+                        _snapshot_messages(messages),
+                        tools=_snapshot_tool_definition_list(model_tools),
+                    ):
                         validation_error = _validate_model_event(event, turn.model_started, turn.completed)
                         if validation_error:
                             yield RuntimeEvent(RuntimeEventType.MODEL_FAILED, error=validation_error)
@@ -207,10 +213,7 @@ class ChatRuntime:
                 )
                 for call in turn.tool_calls:
                     remaining_result_bytes = self._limits.max_tool_result_bytes_total - tool_result_bytes_total
-                    if (
-                        remaining_result_bytes < _MIN_TOOL_RESULT_ENVELOPE_BYTES
-                        or self._limits.max_tool_result_bytes_per_call < _MIN_TOOL_RESULT_ENVELOPE_BYTES
-                    ):
+                    if not _can_fit_minimal_tool_result(self._limits, remaining_result_bytes):
                         yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
                         return
                     definition = tool_definitions[call.name]
@@ -227,15 +230,18 @@ class ChatRuntime:
                         result = policy_result.result
                     else:
                         if policy_result.approval_required is not None:
+                            if self._approval_provider is None or policy_result.request is None:
+                                yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                                return
+                            approval_call_snapshot = _copy_tool_call(call)
                             yield RuntimeEvent(
                                 RuntimeEventType.TOOL_APPROVAL_REQUIRED,
                                 tool_approval=policy_result.approval_required,
                             )
-                            if self._approval_provider is None:
-                                yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
-                                return
                             try:
-                                decision = await self._approval_provider.request(policy_result.request)
+                                decision = await self._approval_provider.request(
+                                    _copy_approval_request(policy_result.request)
+                                )
                             except asyncio.CancelledError:
                                 raise
                             except Exception:
@@ -259,14 +265,42 @@ class ChatRuntime:
                             if decision == ApprovalDecision.DENY:
                                 result = _permission_denied_result(call)
                             else:
-                                try:
-                                    result = await self._tool_executor.execute(call)
-                                except asyncio.CancelledError:
-                                    raise
-                                except Exception:
+                                remaining_result_bytes = self._limits.max_tool_result_bytes_total - tool_result_bytes_total
+                                if (
+                                    call.id in started_tool_call_ids
+                                    or call.id in executed_tool_call_ids
+                                    or call.name not in allowed_tool_names
+                                    or call.name not in tool_definitions
+                                    or not _can_fit_minimal_tool_result(self._limits, remaining_result_bytes)
+                                    or not _tool_call_matches_snapshot(call, approval_call_snapshot)
+                                ):
                                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                                     return
+                                post_approval_decision = await self._evaluate_tool_policy_decision(
+                                    call,
+                                    definition,
+                                    model_turn=model_turns,
+                                    tool_call_index=tool_calls_total,
+                                )
+                                if post_approval_decision is None:
+                                    yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                                    return
+                                if post_approval_decision == ToolPolicyDecision.DENY:
+                                    result = _permission_denied_result(call)
+                                else:
+                                    started_tool_call_ids.add(call.id)
+                                    try:
+                                        result = await self._tool_executor.execute(call)
+                                    except asyncio.CancelledError:
+                                        raise
+                                    except Exception:
+                                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                                        return
                         else:
+                            if call.id in started_tool_call_ids:
+                                yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                                return
+                            started_tool_call_ids.add(call.id)
                             try:
                                 result = await self._tool_executor.execute(call)
                             except asyncio.CancelledError:
@@ -329,19 +363,13 @@ class ChatRuntime:
         model_turn: int,
         tool_call_index: int,
     ) -> _PolicyResolution:
-        context = ToolPolicyContext(
-            run_id=None,
+        decision = await self._evaluate_tool_policy_decision(
+            call,
+            definition,
             model_turn=model_turn,
             tool_call_index=tool_call_index,
-            tool_definition=definition,
         )
-        try:
-            decision = await self._tool_policy.evaluate(_copy_tool_call(call), context)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            return _PolicyResolution(failed=True)
-        if type(decision) is not ToolPolicyDecision:
+        if decision is None:
             return _PolicyResolution(failed=True)
         if decision == ToolPolicyDecision.ALLOW:
             return _PolicyResolution()
@@ -369,6 +397,30 @@ class ChatRuntime:
             summary=summary,
         )
         return _PolicyResolution(request=request, approval_required=approval)
+
+    async def _evaluate_tool_policy_decision(
+        self,
+        call: ToolCall,
+        definition: ToolDefinition,
+        *,
+        model_turn: int,
+        tool_call_index: int,
+    ) -> ToolPolicyDecision | None:
+        context = ToolPolicyContext(
+            run_id=None,
+            model_turn=model_turn,
+            tool_call_index=tool_call_index,
+            tool_definition=definition,
+        )
+        try:
+            decision = await self._tool_policy.evaluate(_copy_tool_call(call), context)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return None
+        if type(decision) is not ToolPolicyDecision:
+            return None
+        return decision
 
 
 @dataclass(frozen=True, slots=True)
@@ -418,13 +470,14 @@ def _snapshot_tool_definitions(definitions: list[ToolDefinition]) -> dict[str, T
     for definition in definitions:
         if type(definition.risk_level) is not ToolRiskLevel:
             raise RuntimeError("Tool definition risk_level is invalid")
-        snapshotted[definition.name] = ToolDefinition(
-            name=definition.name,
-            description=definition.description,
-            input_schema=json.loads(json.dumps(definition.input_schema, allow_nan=False)),
-            risk_level=definition.risk_level,
-        )
+        copied = deepcopy(definition)
+        input_schema = json.loads(json.dumps(copied.input_schema, allow_nan=False))
+        snapshotted[copied.name] = replace(copied, input_schema=input_schema)
     return snapshotted
+
+
+def _snapshot_tool_definition_list(definitions: list[ToolDefinition]) -> list[ToolDefinition]:
+    return list(_snapshot_tool_definitions(definitions).values())
 
 
 def _copy_tool_call(call: ToolCall) -> ToolCall:
@@ -432,6 +485,37 @@ def _copy_tool_call(call: ToolCall) -> ToolCall:
         id=call.id,
         name=call.name,
         arguments=json.loads(json.dumps(call.arguments, ensure_ascii=False, allow_nan=False, separators=(",", ":"))),
+    )
+
+
+def _copy_approval_request(request: ApprovalRequest) -> ApprovalRequest:
+    return ApprovalRequest(
+        request_id=request.request_id,
+        call_id=request.call_id,
+        tool_name=request.tool_name,
+        risk_level=request.risk_level,
+        summary=request.summary,
+        metadata=deepcopy(request.metadata),
+    )
+
+
+def _tool_call_matches_snapshot(call: ToolCall, snapshot: ToolCall) -> bool:
+    try:
+        return (
+            call.id == snapshot.id
+            and call.name == snapshot.name
+            and json.dumps(call.arguments, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+            == json.dumps(snapshot.arguments, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        )
+    except (TypeError, ValueError, RecursionError):
+        return False
+
+
+def _can_fit_minimal_tool_result(limits: AgentLoopLimits, remaining_result_bytes: int) -> bool:
+    return (
+        remaining_result_bytes >= _MIN_TOOL_RESULT_ENVELOPE_BYTES
+        and limits.max_tool_result_bytes_per_call >= _MIN_TOOL_RESULT_ENVELOPE_BYTES
+        and limits.max_json_nodes_per_payload >= _MIN_TOOL_RESULT_ENVELOPE_NODES
     )
 
 
