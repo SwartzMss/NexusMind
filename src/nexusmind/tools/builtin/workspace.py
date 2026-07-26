@@ -10,7 +10,13 @@ import stat
 import tempfile
 from typing import Any
 
-from nexusmind.tools.contracts import ToolDefinition, ToolRiskLevel
+from nexusmind.tools.contracts import (
+    ToolDefinition,
+    ToolResultBudget,
+    ToolResultRequirements,
+    ToolRiskLevel,
+    json_result_requirements,
+)
 from nexusmind.workspace import (
     Workspace,
     WorkspaceConflictError,
@@ -125,6 +131,21 @@ class ListFilesTool:
         _ensure_json_output_limit(result, MAX_LIST_OUTPUT_BYTES)
         return result
 
+    def result_requirements(self, arguments: dict[str, Any]) -> ToolResultRequirements:
+        return _workspace_result_requirements(
+            {"path": _normalized_request_path(arguments.get("path", ".")), "entries": [], "truncated": True}
+        )
+
+    async def invoke_with_result_budget(
+        self, arguments: dict[str, Any], *, result_budget: ToolResultBudget
+    ) -> dict[str, Any]:
+        result = await self.invoke(arguments)
+        while result["entries"] and not _workspace_output_fits(result, result_budget):
+            result["entries"].pop()
+            result["truncated"] = True
+        _require_workspace_output_fits(result, result_budget)
+        return result
+
 
 class ReadFileTool:
     def __init__(self, workspace: Workspace) -> None:
@@ -182,6 +203,44 @@ class ReadFileTool:
             "content": content,
             "truncated": truncated,
         }
+
+    def result_requirements(self, arguments: dict[str, Any]) -> ToolResultRequirements:
+        start_line = int(arguments.get("start_line", 1))
+        return _workspace_result_requirements(
+            {
+                "path": _normalized_request_path(arguments["path"]),
+                "start_line": start_line,
+                "end_line": start_line - 1,
+                "sha256": "f" * 64,
+                "size": MAX_READ_FILE_BYTES,
+                "content": "",
+                "truncated": True,
+            }
+        )
+
+    async def invoke_with_result_budget(
+        self, arguments: dict[str, Any], *, result_budget: ToolResultBudget
+    ) -> dict[str, Any]:
+        result = await self.invoke(arguments)
+        content = result["content"]
+        if not _workspace_output_fits(result, result_budget):
+            low, high = 0, len(content)
+            while low < high:
+                middle = (low + high + 1) // 2
+                candidate = {**result, "content": content[:middle], "truncated": True}
+                if _workspace_output_fits(candidate, result_budget):
+                    low = middle
+                else:
+                    high = middle - 1
+            result["content"] = content[:low]
+            result["end_line"] = (
+                result["start_line"] + len(result["content"].splitlines()) - 1
+                if result["content"]
+                else result["start_line"] - 1
+            )
+            result["truncated"] = True
+        _require_workspace_output_fits(result, result_budget)
+        return result
 
 
 class SearchTextTool:
@@ -318,6 +377,28 @@ class SearchTextTool:
         _ensure_json_output_limit(result, MAX_SEARCH_OUTPUT_BYTES)
         return result
 
+    def result_requirements(self, arguments: dict[str, Any]) -> ToolResultRequirements:
+        return _workspace_result_requirements(
+            {
+                "query": arguments["query"],
+                "path": _normalized_request_path(arguments.get("path", ".")),
+                "matches": [],
+                "files_scanned": MAX_SEARCH_FILES,
+                "bytes_scanned": MAX_SEARCH_TOTAL_BYTES,
+                "truncated": True,
+            }
+        )
+
+    async def invoke_with_result_budget(
+        self, arguments: dict[str, Any], *, result_budget: ToolResultBudget
+    ) -> dict[str, Any]:
+        result = await self.invoke(arguments)
+        while result["matches"] and not _workspace_output_fits(result, result_budget):
+            result["matches"].pop()
+            result["truncated"] = True
+        _require_workspace_output_fits(result, result_budget)
+        return result
+
 
 class WriteFileTool:
     def __init__(self, workspace: Workspace, budget: WorkspaceWriteBudget) -> None:
@@ -386,6 +467,36 @@ class WriteFileTool:
             "bytes_written": len(content_bytes),
         }
 
+    def result_requirements(self, arguments: dict[str, Any]) -> ToolResultRequirements:
+        path = _normalized_request_path(arguments["path"])
+        if arguments["mode"] == "create":
+            output = {
+                "path": path,
+                "operation": "create",
+                "previous_sha256": None,
+                "sha256": "f" * 64,
+                "bytes_written": MAX_WRITE_CONTENT_BYTES,
+                "committed": True,
+                "cleanup_warning": True,
+            }
+        else:
+            output = {
+                "path": path,
+                "operation": "replace",
+                "previous_sha256": "f" * 64,
+                "sha256": "f" * 64,
+                "bytes_written": MAX_WRITE_CONTENT_BYTES,
+            }
+        return _workspace_result_requirements(output)
+
+    async def invoke_with_result_budget(
+        self,
+        arguments: dict[str, Any],
+        *,
+        result_budget: ToolResultBudget,
+    ) -> dict[str, Any]:
+        return await self.invoke(arguments)
+
 
 class ReplaceTextTool:
     def __init__(self, workspace: Workspace, budget: WorkspaceWriteBudget) -> None:
@@ -446,6 +557,26 @@ class ReplaceTextTool:
             "replacements": occurrences,
             "bytes_written": len(result_bytes),
         }
+
+    def result_requirements(self, arguments: dict[str, Any]) -> ToolResultRequirements:
+        return _workspace_result_requirements(
+            {
+                "path": _normalized_request_path(arguments["path"]),
+                "operation": "replace_text",
+                "previous_sha256": "f" * 64,
+                "sha256": "f" * 64,
+                "replacements": MAX_REPLACE_OCCURRENCES,
+                "bytes_written": MAX_REPLACE_RESULT_BYTES,
+            }
+        )
+
+    async def invoke_with_result_budget(
+        self,
+        arguments: dict[str, Any],
+        *,
+        result_budget: ToolResultBudget,
+    ) -> dict[str, Any]:
+        return await self.invoke(arguments)
 
 
 def _limited_sorted_children(directory: Path, limit: int) -> tuple[list[Path], bool]:
@@ -586,6 +717,25 @@ def _sha256_hex(raw: bytes) -> str:
 
 def _json_output_bytes(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _workspace_result_requirements(output: dict[str, Any]) -> ToolResultRequirements:
+    return json_result_requirements({"ok": True, "output": output})
+
+
+def _workspace_output_fits(output: dict[str, Any], budget: ToolResultBudget) -> bool:
+    return budget.satisfies(_workspace_result_requirements(output))
+
+
+def _require_workspace_output_fits(output: dict[str, Any], budget: ToolResultBudget) -> None:
+    if not _workspace_output_fits(output, budget):
+        raise WorkspaceLimitError("Workspace tool result budget is too small")
+
+
+def _normalized_request_path(path: str) -> str:
+    normalized = path.replace("\\", "/")
+    parts = [part for part in normalized.split("/") if part not in {"", "."}]
+    return "/".join(parts) or "."
 
 
 def _ensure_json_output_limit(value: Any, max_bytes: int) -> None:

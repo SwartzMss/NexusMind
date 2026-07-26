@@ -4,7 +4,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from nexusmind.tools import ToolCall, ToolErrorCode, ToolExecutor, ToolRegistry, ToolRiskLevel
+from nexusmind.tools import ToolCall, ToolErrorCode, ToolExecutor, ToolRegistry, ToolResultBudget, ToolRiskLevel
 from nexusmind.tools.builtin import workspace as workspace_tools
 from nexusmind.tools.builtin import ListFilesTool, ReadFileTool, SearchTextTool
 from nexusmind.workspace import Workspace
@@ -61,6 +61,50 @@ def test_read_file_supports_utf8_lines_and_rejects_binary(tmp_path: Path) -> Non
     assert failed.error.code is ToolErrorCode.EXECUTION_FAILED
 
 
+def test_read_file_compacts_content_to_runtime_result_budget(tmp_path: Path) -> None:
+    (tmp_path / "note.txt").write_text("x" * 2000, encoding="utf-8")
+    executor = ToolExecutor(_registry(Workspace(tmp_path)))
+    call = ToolCall(id="1", name="read_file", arguments={"path": "note.txt"})
+    requirements = executor.result_requirements(call)
+
+    result = asyncio.run(
+        executor.execute_with_result_budget(
+            call,
+            result_budget=ToolResultBudget(
+                max_bytes=requirements.min_bytes + 100,
+                max_nodes=requirements.min_nodes,
+                max_depth=requirements.min_depth,
+            ),
+        )
+    )
+
+    assert result.error is None
+    assert result.output["truncated"] is True
+    assert len(result.output["content"]) < 2000
+
+
+def test_list_files_compacts_entries_for_node_and_depth_budgets(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("a", encoding="utf-8")
+    executor = ToolExecutor(_registry(Workspace(tmp_path)))
+    call = ToolCall(id="1", name="list_files", arguments={"path": "."})
+    requirements = executor.result_requirements(call)
+
+    for max_depth in (2, 3):
+        result = asyncio.run(
+            executor.execute_with_result_budget(
+                call,
+                result_budget=ToolResultBudget(
+                    max_bytes=4096,
+                    max_nodes=requirements.min_nodes,
+                    max_depth=max_depth,
+                ),
+            )
+        )
+        assert result.error is None
+        assert result.output["entries"] == []
+        assert result.output["truncated"] is True
+
+
 def test_search_text_skips_binary_and_symlinks(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "main.py").write_text("class Runner:\npass\n", encoding="utf-8")
@@ -78,6 +122,28 @@ def test_search_text_skips_binary_and_symlinks(tmp_path: Path) -> None:
     assert result.error is None
     assert result.output["matches"] == [{"path": "src/main.py", "line": 1, "text": "class Runner:"}]
     assert result.output["files_scanned"] == 1
+
+
+def test_search_text_compacts_matches_for_node_and_depth_budgets(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("needle\n", encoding="utf-8")
+    executor = ToolExecutor(_registry(Workspace(tmp_path)))
+    call = ToolCall(id="1", name="search_text", arguments={"query": "needle"})
+    requirements = executor.result_requirements(call)
+
+    for max_depth in (2, 3):
+        result = asyncio.run(
+            executor.execute_with_result_budget(
+                call,
+                result_budget=ToolResultBudget(
+                    max_bytes=4096,
+                    max_nodes=requirements.min_nodes,
+                    max_depth=max_depth,
+                ),
+            )
+        )
+        assert result.error is None
+        assert result.output["matches"] == []
+        assert result.output["truncated"] is True
 
 
 def test_search_text_consumes_budget_for_skipped_files(tmp_path: Path, monkeypatch) -> None:

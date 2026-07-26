@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
+import sys
 
 import pytest
 
@@ -48,6 +50,46 @@ def test_workspace_write_requires_workspace_before_model_config(
     assert code == 2
     assert called["model_config"] is False
     assert "--workspace-write requires --workspace" in capsys.readouterr().err
+
+
+def test_workspace_exec_requires_workspace_and_config_before_model_config(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = {"model_config": False}
+
+    def load_model_config():
+        called["model_config"] = True
+        raise AssertionError("model config should not be loaded")
+
+    monkeypatch.setattr(cli, "load_model_config_from_env", load_model_config)
+
+    code = cli.main(["chat", "--workspace-exec", "hello"])
+
+    assert code == 2
+    assert called["model_config"] is False
+    assert "--workspace-exec requires --workspace" in capsys.readouterr().err
+
+
+def test_builtin_registry_registers_run_command_only_with_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "commands.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "commands": {"tests": {"argv": [sys.executable, "-V"], "cwd": ".", "timeout_seconds": 5}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    workspace = cli.Workspace(tmp_path)
+    command_config = cli.load_command_config(config_path, workspace)
+
+    without_exec = cli.build_builtin_tool_registry(workspace=workspace)
+    with_exec = cli.build_builtin_tool_registry(workspace=workspace, command_config=command_config)
+
+    assert not without_exec.contains("run_command")
+    assert with_exec.contains("run_command")
 
 
 def test_skill_run_requires_workspace_before_model_config(tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -98,6 +140,33 @@ allowed_tools = ["builtin:write_file"]
 
     assert code == 2
     assert "workspace write tool references require --workspace-write" in capsys.readouterr().err
+
+
+def test_skill_run_requires_workspace_exec_before_model_config(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    skills_dir = tmp_path / "skills"
+    skill_dir = skills_dir / "test"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "instructions.md").write_text("Run tests.\n", encoding="utf-8")
+    (skill_dir / "skill.toml").write_text(
+        """
+schema_version = 1
+name = "test"
+description = "Test"
+instructions_file = "instructions.md"
+allowed_tools = ["builtin:run_command"]
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    code = cli.main(["skill", "run", "test", "--skills-dir", str(skills_dir), "--workspace", str(tmp_path), "hello"])
+
+    assert code == 2
+    assert "command tool references require --workspace-exec" in capsys.readouterr().err
 
 
 def test_workspace_approval_summary_does_not_include_content() -> None:
@@ -159,3 +228,28 @@ def test_workspace_approval_summary_distinguishes_same_prefix_different_basename
     assert "alpha.py" in alpha
     assert "beta.py" in beta
     assert alpha != beta
+
+
+def test_run_command_approval_summary_uses_profile_snapshot(tmp_path: Path) -> None:
+    config_path = tmp_path / "commands.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "commands": {"tests": {"argv": [sys.executable, "-m", "pytest", "-q"], "cwd": ".", "timeout_seconds": 30}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    workspace = cli.Workspace(tmp_path)
+    config = cli.load_command_config(config_path, workspace)
+    summary = cli.CLIApprovalSummarizer(workspace=workspace, command_config=config).summarize(
+        cli.ToolCall(id="1", name="run_command", arguments={"profile": "tests"}),
+        cli.ToolDefinition(name="run_command"),
+    )
+
+    assert "profile=tests" in summary
+    assert 'cwd="."' in summary
+    assert "pytest" in summary
+    assert str(tmp_path) not in summary
+    assert str(config_path) not in summary

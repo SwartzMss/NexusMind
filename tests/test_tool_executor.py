@@ -2,7 +2,16 @@ import asyncio
 
 import pytest
 
-from nexusmind.tools import ToolCall, ToolDefinition, ToolErrorCode, ToolExecutor, ToolRegistry
+from nexusmind.tools import (
+    ToolCall,
+    ToolDefinition,
+    ToolErrorCode,
+    ToolExecutor,
+    ToolRegistry,
+    ToolResultBudget,
+    ToolResultRequirements,
+    ToolRiskLevel,
+)
 from nexusmind.tools.builtin import EchoTool
 
 
@@ -68,6 +77,52 @@ class SecretArgumentTool:
 
     async def invoke(self, arguments):
         return arguments
+
+
+class StrictRequirementsTool:
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="strict_requirements",
+            input_schema={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+        )
+
+    def result_requirements(self, arguments):
+        return ToolResultRequirements(min_bytes=22 + len(arguments["text"]), min_nodes=3, min_depth=1)
+
+    async def invoke(self, arguments):
+        return arguments
+
+
+class UnbudgetedWriteTool:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="unbudgeted_write",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            risk_level=ToolRiskLevel.LOCAL_WRITE,
+        )
+
+    async def invoke(self, arguments):
+        self.calls += 1
+        return {"committed": True}
+
+
+class UnbudgetedUnspecifiedTool(UnbudgetedWriteTool):
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="unbudgeted_unspecified",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        )
 
 
 def _registry_with(*tools) -> ToolRegistry:
@@ -154,6 +209,70 @@ def test_executor_validation_error_does_not_include_secret_argument_value() -> N
     assert result.error.code == ToolErrorCode.INVALID_ARGUMENTS
     assert "sk-live-secret" not in result.error.message
     assert result.error.message == "Invalid arguments at token: expected integer"
+
+
+def test_result_requirements_validates_arguments_before_calling_tool() -> None:
+    executor = ToolExecutor(_registry_with(StrictRequirementsTool()))
+    call = ToolCall(id="call-1", name="strict_requirements", arguments={})
+
+    requirements = executor.result_requirements(call)
+    result = asyncio.run(
+        executor.execute_with_result_budget(
+            call,
+            result_budget=ToolResultBudget(
+                max_bytes=requirements.min_bytes,
+                max_nodes=requirements.min_nodes,
+                max_depth=requirements.min_depth,
+            ),
+        )
+    )
+
+    assert result.error is not None
+    assert result.error.code is ToolErrorCode.INVALID_ARGUMENTS
+
+
+def test_unbudgeted_side_effect_tool_is_not_invoked() -> None:
+    tool = UnbudgetedWriteTool()
+    executor = ToolExecutor(_registry_with(tool))
+
+    result = asyncio.run(
+        executor.execute_with_result_budget(
+            ToolCall(id="call-1", name="unbudgeted_write", arguments={}),
+            result_budget=ToolResultBudget(max_bytes=1024, max_nodes=20, max_depth=5),
+        )
+    )
+
+    assert result.error is not None
+    assert result.error.code is ToolErrorCode.EXECUTION_FAILED
+    assert tool.calls == 0
+
+
+def test_unbudgeted_unspecified_tool_is_not_invoked() -> None:
+    tool = UnbudgetedUnspecifiedTool()
+    executor = ToolExecutor(_registry_with(tool))
+
+    result = asyncio.run(
+        executor.execute_with_result_budget(
+            ToolCall(id="call-1", name="unbudgeted_unspecified", arguments={}),
+            result_budget=ToolResultBudget(max_bytes=1024, max_nodes=20, max_depth=5),
+        )
+    )
+
+    assert result.error is not None
+    assert result.error.code is ToolErrorCode.EXECUTION_FAILED
+    assert tool.calls == 0
+
+
+def test_custom_success_requirements_include_standard_errors() -> None:
+    executor = ToolExecutor(_registry_with(StrictRequirementsTool()))
+
+    requirements = executor.result_requirements(
+        ToolCall(id="call-1", name="strict_requirements", arguments={"text": ""})
+    )
+
+    assert requirements.min_bytes > 40
+    assert requirements.min_nodes >= 6
+    assert requirements.min_depth >= 2
 
 
 def test_executor_converts_ordinary_exception_to_failed_result() -> None:

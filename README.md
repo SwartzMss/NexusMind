@@ -109,6 +109,24 @@ nexusmind chat `
 
 覆盖写入使用同目录临时文件和原子替换，并保留目标文件的基础权限位；不承诺复制 owner/group、ACL、扩展属性或平台安全标签。
 
+### Workspace 命令 Profile
+
+`--workspace-exec` 是高风险能力。它会向模型暴露 `run_command`，但模型只能选择 Host 在 `--command-config` 中预先声明的固定 Profile，不能提供 shell 字符串、额外 argv、cwd、env 或 timeout：
+
+```powershell
+nexusmind chat `
+  --workspace ./project `
+  --workspace-exec `
+  --command-config ./examples/commands/python-ci.json `
+  "运行测试并解释失败"
+```
+
+命令 Profile 配置等价于授权 NexusMind 以当前 OS 用户权限执行固定本地程序。该能力不是容器、虚拟机、OS 沙箱、cgroup scope 或 Windows 安全边界；cwd 被限制在 Workspace 内也不代表进程无法访问 Workspace 外文件，也不提供网络隔离。
+
+每次 `run_command` 默认仍需要用户批准。审批摘要会显示 Profile、Workspace 相对 cwd、固定 argv 摘要和超时。命令输出会作为 ToolResult 发送给模型 Provider，程序主动打印的本地路径或敏感内容不会被 NexusMind 自动清除。
+
+第一版仅支持 Windows 和 Linux。NexusMind 会尽力在 timeout、取消和正常结束时回收进程组或 Job Object，但在 Linux 上如果被执行代码杀死 supervisor 或主动脱离执行单元，后台后代清理是 best-effort，不是内核级 containment 保证。第一版不支持任意 Shell、交互式终端、stdin、后台任务、模型自定义环境变量或密钥注入。
+
 ## MCP Stdio 工具
 
 MCP server 配置从 JSON 文件读取。如果配置文件包含环境变量或密钥，请把它当作敏感文件处理。

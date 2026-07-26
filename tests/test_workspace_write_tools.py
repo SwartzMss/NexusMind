@@ -5,7 +5,17 @@ import hashlib
 import os
 from pathlib import Path
 
-from nexusmind.tools import ToolCall, ToolErrorCode, ToolExecutor, ToolRegistry, ToolRiskLevel
+import pytest
+
+from nexusmind.tools import (
+    ToolCall,
+    ToolErrorCode,
+    ToolExecutor,
+    ToolRegistry,
+    ToolResultBudget,
+    ToolResultBudgetError,
+    ToolRiskLevel,
+)
 from nexusmind.tools.builtin import ReadFileTool, ReplaceTextTool, WriteFileTool
 from nexusmind.tools.builtin.workspace import WorkspaceWriteBudget, WorkspaceWriteLimits
 from nexusmind.workspace import Workspace
@@ -27,6 +37,44 @@ def test_write_tools_are_local_write(tmp_path: Path) -> None:
 
     assert registry.definition("write_file").risk_level is ToolRiskLevel.LOCAL_WRITE
     assert registry.definition("replace_text").risk_level is ToolRiskLevel.LOCAL_WRITE
+
+
+def test_write_file_rejects_small_result_budget_before_create(tmp_path: Path) -> None:
+    executor = ToolExecutor(_registry(Workspace(tmp_path)))
+    call = ToolCall(
+        id="1",
+        name="write_file",
+        arguments={"path": "new.txt", "mode": "create", "content": "content"},
+    )
+    requirements = executor.result_requirements(call)
+
+    with pytest.raises(ToolResultBudgetError, match="budget is too small"):
+        asyncio.run(
+            executor.execute_with_result_budget(
+                call,
+                result_budget=ToolResultBudget(
+                    max_bytes=requirements.min_bytes - 1,
+                    max_nodes=requirements.min_nodes,
+                    max_depth=requirements.min_depth,
+                ),
+            )
+        )
+
+    assert not (tmp_path / "new.txt").exists()
+
+
+def test_write_file_requirements_use_actual_normalized_path(tmp_path: Path) -> None:
+    executor = ToolExecutor(_registry(Workspace(tmp_path)))
+
+    requirements = executor.result_requirements(
+        ToolCall(
+            id="1",
+            name="write_file",
+            arguments={"path": "./a.txt", "mode": "create", "content": "content"},
+        )
+    )
+
+    assert requirements.min_bytes < 1024
 
 
 def test_read_file_returns_full_file_sha_and_size(tmp_path: Path) -> None:

@@ -9,7 +9,14 @@ from nexusmind.config import ConfigError, ModelConfig
 from nexusmind.mcp import MCPConfigError, MCPRemoteTool, MCPStdioServerConfig, mcp_tool_local_name
 from nexusmind.runtime.events import RuntimeEvent, RuntimeEventType
 from nexusmind.runtime.policy import ApprovalDecision, ApprovalRequest
-from nexusmind.tools import ToolCall, ToolDefinition, ToolRegistry, ToolRiskLevel
+from nexusmind.tools import (
+    ToolCall,
+    ToolDefinition,
+    ToolRegistry,
+    ToolResultBudget,
+    ToolResultRequirements,
+    ToolRiskLevel,
+)
 
 
 def test_cli_outputs_streaming_text(monkeypatch, capsys) -> None:
@@ -130,6 +137,12 @@ class _RecordingWriteTool:
     async def invoke(self, arguments):
         self.calls.append(arguments)
         return {"written": True}
+
+    def result_requirements(self, arguments):
+        return ToolResultRequirements(min_bytes=37, min_nodes=4, min_depth=2)
+
+    async def invoke_with_result_budget(self, arguments, *, result_budget: ToolResultBudget):
+        return await self.invoke(arguments)
 
 
 class _ToolCallThenStopModel:
@@ -386,7 +399,9 @@ def test_cli_chat_mcp_allow_executes_once_and_closes_client(monkeypatch, capsys)
     assert fake_client.called_name == "remote_echo"
     assert fake_client.called_arguments == {"text": "hello"}
     assert fake_client.exited is True
-    assert model.messages_by_turn[1][-1].content == '{"ok":true,"output":{"structured_content":{"text":"ok"},"content":[]}}'
+    assert model.messages_by_turn[1][-1].content == (
+        '{"ok":true,"output":{"structured_content":{"text":"ok"},"content":[],"truncated":false}}'
+    )
     assert "Risk: unspecified" in captured.err
     assert captured.out == "done\n"
 
