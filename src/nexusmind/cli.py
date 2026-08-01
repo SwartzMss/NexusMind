@@ -273,26 +273,25 @@ async def _run_chat(
     stream_kwargs = {"tools": tools}
     if system_prompt is not None:
         stream_kwargs["system_prompt"] = system_prompt
-    async for event in runtime.stream_user_message(message, **stream_kwargs):
-        if store and run_id:
-            try:
-                payload = {"text_bytes": len((event.text or '').encode()), "error": _safe_cli_field(event.error or '', max_length=1024)}
-                await store.append_event(run_id, RunTraceEvent(event.type.value, datetime.now(timezone.utc), payload))
-            except (StateStoreError, Exception):
-                await store.finish_run(run_id, RunStatus.FAILED, error_code="trace_persist_failed", error_message="Run trace could not be persisted")
-                store.close(); return 1
-        if event.type == RuntimeEventType.TEXT_DELTA and event.text:
-            print(event.text, end="", flush=True)
-        elif event.type == RuntimeEventType.RUN_FAILED:
-            failed = True
-            print(f"\nModel error: {event.error}", file=sys.stderr)
-
-    if not failed:
-        print()
-    if store and run_id:
-        await store.finish_run(run_id, RunStatus.FAILED if failed else RunStatus.COMPLETED)
-        store.close()
-    return 1 if failed else 0
+    try:
+        async for event in runtime.stream_user_message(message, **stream_kwargs):
+            if store and run_id:
+                try: await store.append_event(run_id, RunTraceEvent(event.type.value, datetime.now(timezone.utc), project_runtime_event(event)))
+                except Exception:
+                    await store.finish_run(run_id, RunStatus.FAILED, error_code="trace_persist_failed", error_message="Run trace could not be persisted"); return 1
+            if event.type == RuntimeEventType.TEXT_DELTA and event.text: print(event.text, end="", flush=True)
+            elif event.type == RuntimeEventType.RUN_FAILED: failed = True; print(f"\nModel error: {event.error}", file=sys.stderr)
+        if not failed: print()
+        if store and run_id: await store.finish_run(run_id, RunStatus.FAILED if failed else RunStatus.COMPLETED)
+        return 1 if failed else 0
+    except asyncio.CancelledError:
+        if store and run_id: await asyncio.shield(store.finish_run(run_id, RunStatus.CANCELLED, error_code="cancelled"))
+        raise
+    except Exception:
+        if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="runtime_error", error_message="Runtime execution failed")
+        raise
+    finally:
+        if store: store.close()
 
 
 async def _tools(args: argparse.Namespace) -> int:
@@ -325,6 +324,17 @@ def _open_store(path: str):
     except StateStoreError:
         print("State error: Run store could not be initialized", file=sys.stderr); return None
 
+def project_runtime_event(event) -> dict:
+    payload = {"text_bytes": len((event.text or '').encode()), "error": _safe_cli_field(event.error or '', max_length=1024)}
+    if event.finish_reason: payload["finish_reason"] = event.finish_reason
+    if event.tool_call is not None:
+        call = event.tool_call; payload.update(call_id=call.id, tool_name=call.name, argument_bytes=len(json.dumps(call.arguments, ensure_ascii=False).encode()))
+    if event.tool_approval is not None:
+        approval = event.tool_approval; payload.update(call_id=approval.call_id, tool_name=approval.tool_name, decision=getattr(approval.decision, 'value', approval.decision), summary=_safe_cli_field(approval.summary, max_length=512))
+    if event.tool_result is not None:
+        result = event.tool_result; payload.update(call_id=result.call_id, tool_name=result.tool_name, ok=result.error is None, result_bytes=len(json.dumps(result.output, ensure_ascii=False, default=str).encode()), error_code=getattr(result.error.code, 'value', None) if result.error else None)
+    return payload
+
 def _runs(args: argparse.Namespace) -> int:
     store=_open_store(args.state_db)
     if store is None:return 2
@@ -336,11 +346,14 @@ def _runs(args: argparse.Namespace) -> int:
         if args.runs_command == "show":
             item=store.show_run(args.run_id)
             if item is None: print("Run error: run not found",file=sys.stderr); return 2
-            if args.json: print(json.dumps({"run":item["run"],"events":item["events"]},default=str,ensure_ascii=False)); return 0
-            print("Run ID\t"+str(item["run"][0])); print("Status\t"+str(item["run"][4])); print("Events\t"+str(len(item["events"])))
-            for e in item["events"]: print(f"{e[0]}\t{e[1]}\t{e[2]}")
+            if args.json: print(json.dumps(item,default=str,ensure_ascii=False)); return 0
+            print("Run ID\t"+str(item["run"]["id"])); print("Status\t"+str(item["run"]["status"])); print("Events\t"+str(len(item["events"])))
+            for e in item["events"]: print(f"{e['sequence']}\t{e['event_type']}\t{e['occurred_at']}")
             return 0
-        if args.runs_command == "prune": print(f"Deleted {store.prune(args.older_than_days)} run(s)"); return 0
+        if args.runs_command == "prune":
+            try: count=store.prune(args.older_than_days)
+            except ValueError as exc: print(f"State error: {exc}", file=sys.stderr); return 2
+            print(f"Deleted {count} run(s)"); return 0
     finally: store.close()
     return 2
 

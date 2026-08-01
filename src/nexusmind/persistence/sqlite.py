@@ -8,12 +8,13 @@ MAX_EVENT_BYTES=64*1024; MAX_EVENTS=10000; MAX_FINAL_TEXT=1024*1024
 class StateStoreError(RuntimeError): pass
 def _now(): return datetime.now(timezone.utc).isoformat()
 class SQLiteRunStore:
-    def __init__(self, path: str | Path, *, execution_id: str | None = None):
+    def __init__(self, path: str | Path, *, execution_id: str | None = None, recover_abandoned: bool = False):
         self.path=Path(path); self.execution_id=execution_id or uuid.uuid4().hex
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.db=sqlite3.connect(self.path); self.db.execute("PRAGMA foreign_keys=ON")
-            self._schema(); self._abandon_previous()
+            self._schema()
+            if recover_abandoned: self.recover_abandoned()
         except (OSError, sqlite3.Error) as exc: raise StateStoreError("Run store could not be initialized") from exc
     def _schema(self):
         self.db.executescript('''CREATE TABLE IF NOT EXISTS schema_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -23,12 +24,14 @@ CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC); CREATE 
         row=self.db.execute("SELECT value FROM schema_metadata WHERE key='version'").fetchone()
         if row and int(row[0])>1: raise StateStoreError("Unsupported state database schema version")
         self.db.execute("INSERT OR REPLACE INTO schema_metadata VALUES('version','1')"); self.db.commit()
-    def _abandon_previous(self):
+    def recover_abandoned(self):
         now=_now(); rows=self.db.execute("SELECT id FROM runs WHERE status='running' AND execution_id<>?",(self.execution_id,)).fetchall()
         for (run_id,) in rows:
             self.db.execute("UPDATE runs SET status='abandoned',updated_at=?,finished_at=?,error_message=? WHERE id=?",(now,now,"Previous NexusMind process ended before the run reached a terminal state",run_id))
             seq=self.db.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM run_events WHERE run_id=?",(run_id,)).fetchone()[0]
-            self.db.execute("INSERT INTO run_events VALUES(?,?,?,?,?,?)",(run_id,seq,"run_abandoned",now,json.dumps({"reason":"previous_process"}),20))
+            payload=json.dumps({"reason":"previous_process"})
+            self.db.execute("INSERT INTO run_events VALUES(?,?,?,?,?,?)",(run_id,seq,"run_abandoned",now,payload,len(payload)))
+            self.db.execute("UPDATE runs SET event_count=? WHERE id=?",(seq,run_id))
         self.db.commit()
     async def start_run(self, context: RunStartContext):
         run_id=uuid.uuid4().hex; now=_now(); digest=hashlib.sha256((context.input_text or '').encode()).hexdigest()
@@ -49,10 +52,12 @@ CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC); CREATE 
         if filters:q+=" WHERE "+" AND ".join(filters)
         return self.db.execute(q+" ORDER BY started_at DESC LIMIT ?",(*vals,limit)).fetchall()
     def show_run(self, run_id):
-        row=self.db.execute("SELECT * FROM runs WHERE id=?",(run_id,)).fetchone()
+        cur=self.db.execute("SELECT * FROM runs WHERE id=?",(run_id,)); row=cur.fetchone()
         if not row:return None
-        events=self.db.execute("SELECT sequence,event_type,occurred_at,payload_json FROM run_events WHERE run_id=? ORDER BY sequence",(run_id,)).fetchall(); return {"run":row,"events":events}
+        run=dict(zip([d[0] for d in cur.description], row)); cur=self.db.execute("SELECT sequence,event_type,occurred_at,payload_json FROM run_events WHERE run_id=? ORDER BY sequence",(run_id,))
+        events=[{"sequence":r[0],"event_type":r[1],"occurred_at":r[2],"payload":json.loads(r[3])} for r in cur.fetchall()]; return {"run":run,"events":events}
     def prune(self, older_than_days):
+        if int(older_than_days) < 0: raise ValueError("older-than-days must be non-negative")
         cutoff=datetime.now(timezone.utc).timestamp()-int(older_than_days)*86400
         rows=self.db.execute("SELECT id FROM runs WHERE status<>'running' AND strftime('%s',started_at)<?",(int(cutoff),)).fetchall(); self.db.executemany("DELETE FROM runs WHERE id=?",rows); self.db.commit(); return len(rows)
     def close(self): self.db.close()
