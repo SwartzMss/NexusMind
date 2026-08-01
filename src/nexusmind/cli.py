@@ -174,10 +174,13 @@ async def _chat(
         return 2
 
     if state_db:
+        preflight = None
         try:
             preflight = SQLiteRunStore(state_db); preflight.close()
         except StateStoreError:
-            _best_effort_close(store); print("State error: Run store could not be initialized", file=sys.stderr); return 2
+            print("State error: Run store could not be initialized", file=sys.stderr); return 2
+        finally:
+            _best_effort_close(preflight)
 
     try:
         workspace = _build_workspace(workspace_path)
@@ -324,6 +327,7 @@ async def _run_chat(
             store = SQLiteRunStore(state_db)
             run_id = await store.start_run(RunStartContext(run_kind, skill_name=skill_name, model_name=getattr(model_config, "model", None), input_text=message, record_content=record_content))
         except StateStoreError:
+            _best_effort_close(store)
             print("State error: Run store could not be initialized", file=sys.stderr); return 2
     runtime = ChatRuntime(
         OpenAICompatibleChatModel(model_config),
