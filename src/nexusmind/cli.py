@@ -339,7 +339,10 @@ def project_runtime_event(event) -> dict:
     if event.tool_approval is not None:
         approval = event.tool_approval; payload.update(call_id=approval.call_id, tool_name=approval.tool_name, decision=getattr(approval.decision, 'value', approval.decision), summary=_safe_cli_field(approval.summary, max_length=512))
     if event.tool_result is not None:
-        result = event.tool_result; payload.update(call_id=result.call_id, tool_name=result.name, ok=result.error is None, result_bytes=len(json.dumps(result.output, ensure_ascii=False, default=str).encode()), error_code=getattr(result.error.code, 'value', None) if result.error else None)
+        result = event.tool_result; output = result.output
+        payload.update(call_id=result.call_id, tool_name=result.name, ok=result.error is None, result_bytes=len(json.dumps(output, ensure_ascii=False, default=str).encode()), error_code=getattr(result.error.code, 'value', None) if result.error else None)
+        if result.name == "run_command" and isinstance(output, dict):
+            payload.update(profile=output.get("profile"), cwd=output.get("cwd"), exit_code=output.get("exit_code"), timed_out=output.get("timed_out"), duration_ms=output.get("duration_ms"), stdout_bytes=len(str(output.get("stdout", "")).encode()), stderr_bytes=len(str(output.get("stderr", "")).encode()), stdout_truncated=output.get("stdout_truncated"), stderr_truncated=output.get("stderr_truncated"))
     return payload
 
 def _runs(args: argparse.Namespace) -> int:

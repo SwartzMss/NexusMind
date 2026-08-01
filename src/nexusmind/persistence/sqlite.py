@@ -22,8 +22,11 @@ CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY,schema_version INTEGER NOT N
 CREATE TABLE IF NOT EXISTS run_events(run_id TEXT NOT NULL,sequence INTEGER NOT NULL,event_type TEXT NOT NULL,occurred_at TEXT NOT NULL,payload_json TEXT NOT NULL,payload_bytes INTEGER NOT NULL,PRIMARY KEY(run_id,sequence),FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE);
 CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC); CREATE INDEX IF NOT EXISTS idx_runs_status_started ON runs(status,started_at DESC);''')
         row=self.db.execute("SELECT value FROM schema_metadata WHERE key='version'").fetchone()
-        if row and int(row[0])>1: raise StateStoreError("Unsupported state database schema version")
-        self.db.execute("INSERT OR REPLACE INTO schema_metadata VALUES('version','1')"); self.db.commit()
+        if row is None:
+            self.db.execute("INSERT INTO schema_metadata VALUES('version','1')")
+        elif row[0] != "1":
+            raise StateStoreError("Unsupported state database schema version")
+        self.db.commit()
     def recover_abandoned(self):
         now=_now(); rows=self.db.execute("SELECT id FROM runs WHERE status='running' AND execution_id<>?",(self.execution_id,)).fetchall()
         for (run_id,) in rows:

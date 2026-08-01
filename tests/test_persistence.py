@@ -3,8 +3,10 @@ import json
 from datetime import datetime, timezone
 
 import pytest
+import sqlite3
 
 from nexusmind.persistence import SQLiteRunStore, RunKind, RunStartContext, RunStatus, RunTraceEvent
+from nexusmind.persistence.sqlite import StateStoreError
 
 
 def run(coro):
@@ -47,3 +49,9 @@ def test_prune_rejects_negative_days(tmp_path):
     store = SQLiteRunStore(tmp_path / "state.db")
     with pytest.raises(ValueError): store.prune(-1)
     store.close()
+
+@pytest.mark.parametrize("version", ["0", "-1", "abc", "2"])
+def test_schema_rejects_unsupported_version(tmp_path, version):
+    path = tmp_path / "state.db"
+    db = sqlite3.connect(path); db.execute("CREATE TABLE schema_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)"); db.execute("INSERT INTO schema_metadata VALUES('version', ?)", (version,)); db.commit(); db.close()
+    with pytest.raises(StateStoreError): SQLiteRunStore(path)
