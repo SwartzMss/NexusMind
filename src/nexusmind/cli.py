@@ -323,7 +323,9 @@ async def _run_chat(
             if event.type == RuntimeEventType.TEXT_DELTA and event.text: print(event.text, end="", flush=True)
             elif event.type == RuntimeEventType.RUN_FAILED: failed = True; print(f"\nModel error: {event.error}", file=sys.stderr)
         if not failed: print()
-        if store and run_id and owns_store: await store.finish_run(run_id, RunStatus.FAILED if failed else RunStatus.COMPLETED)
+        if store and run_id and owns_store:
+            try: await store.finish_run(run_id, RunStatus.FAILED if failed else RunStatus.COMPLETED)
+            except StateStoreError: return 1
         return 1 if failed else 0
     except asyncio.CancelledError:
         await _best_effort_cancel(store, run_id)

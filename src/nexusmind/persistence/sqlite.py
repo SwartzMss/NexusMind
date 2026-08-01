@@ -1,11 +1,30 @@
 from __future__ import annotations
 import hashlib, json, sqlite3, uuid
+from functools import wraps
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from .contracts import RunKind, RunStartContext, RunStatus, RunTraceEvent
 
 MAX_EVENT_BYTES=64*1024; MAX_EVENTS=10000; MAX_FINAL_TEXT=1024*1024
 class StateStoreError(RuntimeError): pass
+def _async_db_error(fn):
+    @wraps(fn)
+    async def wrapped(self, *args, **kwargs):
+        try: return await fn(self, *args, **kwargs)
+        except sqlite3.Error as exc:
+            try: self.db.rollback()
+            except sqlite3.Error: pass
+            raise StateStoreError("Run store operation failed") from exc
+    return wrapped
+def _sync_db_error(fn):
+    @wraps(fn)
+    def wrapped(self, *args, **kwargs):
+        try: return fn(self, *args, **kwargs)
+        except sqlite3.Error as exc:
+            try: self.db.rollback()
+            except sqlite3.Error: pass
+            raise StateStoreError("Run store operation failed") from exc
+    return wrapped
 def _now(): return datetime.now(timezone.utc).isoformat()
 class SQLiteRunStore:
     def __init__(self, path: str | Path, *, execution_id: str | None = None, recover_abandoned: bool = False):
@@ -27,7 +46,7 @@ CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC); CREATE 
         elif row[0] != "1":
             raise StateStoreError("Unsupported state database schema version")
         self.db.commit()
-    def recover_abandoned(self):
+    def _recover_abandoned(self):
         now=_now(); rows=self.db.execute("SELECT id FROM runs WHERE status='running' AND execution_id<>?",(self.execution_id,)).fetchall()
         for (run_id,) in rows:
             self.db.execute("UPDATE runs SET status='abandoned',updated_at=?,finished_at=?,error_message=? WHERE id=?",(now,now,"Previous NexusMind process ended before the run reached a terminal state",run_id))
@@ -36,31 +55,41 @@ CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC); CREATE 
             self.db.execute("INSERT INTO run_events VALUES(?,?,?,?,?,?)",(run_id,seq,"run_abandoned",now,payload,len(payload)))
             self.db.execute("UPDATE runs SET event_count=? WHERE id=?",(seq,run_id))
         self.db.commit()
+    @_async_db_error
     async def start_run(self, context: RunStartContext):
         run_id=uuid.uuid4().hex; now=_now(); digest=hashlib.sha256((context.input_text or '').encode()).hexdigest()
         preview=(context.input_text or '')[:512] if context.record_content else None
         self.db.execute("INSERT INTO runs(id,schema_version,execution_id,kind,status,skill_name,model_name,input_preview,input_sha256,started_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(run_id,1,self.execution_id,context.kind.value,'running',context.skill_name,context.model_name,preview,digest,now,now)); self.db.commit(); return run_id
+    @_async_db_error
     async def append_event(self, run_id, event: RunTraceEvent):
         raw=json.dumps(event.payload,ensure_ascii=False,allow_nan=False,separators=(',',':')).encode()
         if len(raw)>MAX_EVENT_BYTES: raise StateStoreError("Run event payload exceeds limit")
         row=self.db.execute("SELECT event_count FROM runs WHERE id=?",(run_id,)).fetchone()
         if not row or row[0]>=MAX_EVENTS: raise StateStoreError("Run event limit exceeded")
         seq=row[0]+1; self.db.execute("INSERT INTO run_events VALUES(?,?,?,?,?,?)",(run_id,seq,event.event_type,event.occurred_at.isoformat(),raw.decode(),len(raw))); self.db.execute("UPDATE runs SET event_count=?,updated_at=? WHERE id=?",(seq,_now(),run_id)); self.db.commit()
+    @_async_db_error
     async def finish_run(self, run_id, status, *, error_code=None, error_message=None, trace_complete=None):
         now=_now(); self.db.execute("UPDATE runs SET status=?,error_code=?,error_message=?,trace_complete=COALESCE(?,trace_complete),updated_at=?,finished_at=? WHERE id=? AND status='running'",(status.value,error_code,(error_message or '')[:1024] or None, None if trace_complete is None else int(trace_complete),now,now,run_id)); self.db.commit()
+    @_sync_db_error
     def list_runs(self, *, limit=20, status=None, kind=None, skill=None):
         limit=max(1,min(int(limit),200)); q="SELECT id,status,kind,started_at,skill_name FROM runs"; vals=[]; filters=[]
         for col,val in (("status",status),("kind",kind),("skill_name",skill)):
             if val: filters.append(col+"=?"); vals.append(val)
         if filters:q+=" WHERE "+" AND ".join(filters)
         return self.db.execute(q+" ORDER BY started_at DESC LIMIT ?",(*vals,limit)).fetchall()
+    @_sync_db_error
     def show_run(self, run_id):
         cur=self.db.execute("SELECT * FROM runs WHERE id=?",(run_id,)); row=cur.fetchone()
         if not row:return None
         run=dict(zip([d[0] for d in cur.description], row)); cur=self.db.execute("SELECT sequence,event_type,occurred_at,payload_json FROM run_events WHERE run_id=? ORDER BY sequence",(run_id,))
         events=[{"sequence":r[0],"event_type":r[1],"occurred_at":r[2],"payload":json.loads(r[3])} for r in cur.fetchall()]; return {"run":run,"events":events}
+    @_sync_db_error
     def prune(self, older_than_days):
         if int(older_than_days) < 0: raise ValueError("older-than-days must be non-negative")
         cutoff=(datetime.now(timezone.utc)-timedelta(days=int(older_than_days))).isoformat()
         rows=self.db.execute("SELECT id FROM runs WHERE status<>'running' AND started_at<?",(cutoff,)).fetchall(); self.db.executemany("DELETE FROM runs WHERE id=?",rows); self.db.commit(); return len(rows)
+    @_sync_db_error
+    def recover_abandoned(self):
+        self._recover_abandoned()
+    @_sync_db_error
     def close(self): self.db.close()
