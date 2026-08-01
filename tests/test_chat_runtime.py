@@ -7,7 +7,16 @@ from nexusmind.runtime.events import RuntimeEvent, RuntimeEventType
 from nexusmind.runtime.messages import Message, MessageRole
 from nexusmind.runtime.policy import ApprovalDecision, ApprovalRequest, ToolApproval, ToolPolicyDecision
 from nexusmind.tools.builtin import EchoTool
-from nexusmind.tools.contracts import ToolCall, ToolDefinition, ToolError, ToolErrorCode, ToolResult, ToolRiskLevel
+from nexusmind.tools.contracts import (
+    ToolCall,
+    ToolDefinition,
+    ToolError,
+    ToolErrorCode,
+    ToolResult,
+    ToolResultBudget,
+    ToolResultRequirements,
+    ToolRiskLevel,
+)
 from nexusmind.tools.executor import ToolExecutor
 from nexusmind.tools.registry import ToolRegistry
 
@@ -31,6 +40,17 @@ class _ReadOnlyDefinitionExecutor:
         if name == "send_email":
             return ToolDefinition(name=name, risk_level=ToolRiskLevel.EXTERNAL_WRITE)
         return ToolDefinition(name=name, risk_level=ToolRiskLevel.READ_ONLY)
+
+    def result_requirements(self, call: ToolCall) -> ToolResultRequirements:
+        return ToolResultRequirements(min_bytes=22, min_nodes=3, min_depth=1)
+
+    async def execute_with_result_budget(
+        self,
+        call: ToolCall,
+        *,
+        result_budget: ToolResultBudget,
+    ) -> ToolResult:
+        return await self.execute(call)
 
 
 def test_runtime_streams_model_events_in_order() -> None:
@@ -648,6 +668,37 @@ def test_runtime_fails_before_model_turn_when_executor_has_no_definition_protoco
 
     async def collect(model):
         runtime = ChatRuntime(model, tool_executor=LegacyExecutor())
+        return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
+
+    model = ToolModel()
+    events = asyncio.run(collect(model))
+
+    assert model.started is False
+    assert [event.type for event in events] == [
+        RuntimeEventType.RUN_STARTED,
+        RuntimeEventType.RUN_FAILED,
+    ]
+
+
+def test_runtime_fails_before_model_turn_when_executor_has_no_result_budget_protocol() -> None:
+    class UnbudgetedExecutor:
+        def definition(self, name):
+            return _echo_definition() if name == "echo" else None
+
+        async def execute(self, call):
+            return ToolResult(call_id=call.id, name=call.name, output={})
+
+    class ToolModel:
+        def __init__(self) -> None:
+            self.started = False
+
+        async def stream(self, messages, tools=None):
+            self.started = True
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="stop")
+
+    async def collect(model):
+        runtime = ChatRuntime(model, tool_executor=UnbudgetedExecutor())
         return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
     model = ToolModel()
@@ -2176,7 +2227,7 @@ def test_runtime_does_not_start_next_tool_when_result_budget_is_exhausted() -> N
         runtime = ChatRuntime(
             TwoToolModel(),
             tool_executor=executor,
-            limits=AgentLoopLimits(max_tool_result_bytes_total=23),
+            limits=AgentLoopLimits(max_tool_result_bytes_total=105),
         )
         return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 
@@ -2209,7 +2260,7 @@ def test_runtime_json_budget_accepts_short_control_character_escape() -> None:
         runtime = ChatRuntime(
             model,
             tool_executor=NewlineExecutor(),
-            limits=AgentLoopLimits(max_tool_result_bytes_per_call=31),
+            limits=AgentLoopLimits(max_tool_result_bytes_per_call=105),
         )
         return [event async for event in runtime.stream_user_message("hello", tools=[_echo_definition()])]
 

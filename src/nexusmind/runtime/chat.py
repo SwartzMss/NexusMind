@@ -24,8 +24,17 @@ from nexusmind.runtime.policy import (
     ToolPolicyDecision,
     new_approval_request_id,
 )
-from nexusmind.tools.contracts import ToolCall, ToolDefinition, ToolError, ToolErrorCode, ToolResult, ToolRiskLevel
-from nexusmind.tools.executor import ToolExecutorProtocol
+from nexusmind.tools.contracts import (
+    ToolCall,
+    ToolDefinition,
+    ToolError,
+    ToolErrorCode,
+    ToolResult,
+    ToolResultBudget,
+    ToolResultRequirements,
+    ToolRiskLevel,
+)
+from nexusmind.tools.executor import ToolExecutorProtocol, ToolResultBudgetError
 
 _MODEL_EXECUTION_ERROR = "Model execution failed"
 _FINISH_REASONS = {
@@ -40,6 +49,13 @@ _RUNTIME_ERROR = "Runtime state machine failed"
 _LIMIT_ERROR = "Agent loop limit exceeded"
 _MIN_TOOL_RESULT_ENVELOPE_BYTES = len('{"ok":true,"output":0}'.encode("utf-8"))
 _MIN_TOOL_RESULT_ENVELOPE_NODES = 3
+_PERMISSION_DENIED_REQUIREMENTS = ToolResultRequirements(
+    min_bytes=len(
+        b'{"ok":false,"error":{"code":"PERMISSION_DENIED","message":"Tool execution was denied","retryable":false}}'
+    ),
+    min_nodes=6,
+    min_depth=2,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,7 +233,8 @@ class ChatRuntime:
                 )
                 for call in turn.tool_calls:
                     remaining_result_bytes = self._limits.max_tool_result_bytes_total - tool_result_bytes_total
-                    if not _can_fit_minimal_tool_result(self._limits, remaining_result_bytes):
+                    result_budget = _result_budget(self._limits, remaining_result_bytes)
+                    if not result_budget.satisfies(_PERMISSION_DENIED_REQUIREMENTS):
                         yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
                         return
                     definition = tool_definitions[call.name]
@@ -275,7 +292,6 @@ class ChatRuntime:
                                     or call.id in executed_tool_call_ids
                                     or call.name not in allowed_tool_names
                                     or call.name not in tool_definitions
-                                    or not _can_fit_minimal_tool_result(self._limits, remaining_result_bytes)
                                     or not _tool_call_matches_snapshot(call, approval_call_snapshot)
                                 ):
                                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
@@ -292,14 +308,33 @@ class ChatRuntime:
                                 if post_approval_decision == ToolPolicyDecision.DENY:
                                     result = _permission_denied_result(call)
                                 else:
+                                    try:
+                                        result_budget = _result_budget_for_call(
+                                            self._tool_executor,
+                                            call,
+                                            self._limits,
+                                            remaining_result_bytes,
+                                        )
+                                    except RuntimeError:
+                                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                                        return
+                                    if result_budget is None:
+                                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
+                                        return
                                     if not _executor_definition_matches(self._tool_executor, call.name, definition):
                                         yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                                         return
                                     started_tool_call_ids.add(call.id)
                                     try:
-                                        result = await self._tool_executor.execute(call)
+                                        result = await self._tool_executor.execute_with_result_budget(
+                                            call,
+                                            result_budget=result_budget,
+                                        )
                                     except asyncio.CancelledError:
                                         raise
+                                    except ToolResultBudgetError:
+                                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
+                                        return
                                     except Exception:
                                         yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                                         return
@@ -310,11 +345,30 @@ class ChatRuntime:
                             if not _executor_definition_matches(self._tool_executor, call.name, definition):
                                 yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                                 return
+                            try:
+                                result_budget = _result_budget_for_call(
+                                    self._tool_executor,
+                                    call,
+                                    self._limits,
+                                    remaining_result_bytes,
+                                )
+                            except RuntimeError:
+                                yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                                return
+                            if result_budget is None:
+                                yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
+                                return
                             started_tool_call_ids.add(call.id)
                             try:
-                                result = await self._tool_executor.execute(call)
+                                result = await self._tool_executor.execute_with_result_budget(
+                                    call,
+                                    result_budget=result_budget,
+                                )
                             except asyncio.CancelledError:
                                 raise
+                            except ToolResultBudgetError:
+                                yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
+                                return
                             except Exception:
                                 yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                                 return
@@ -563,11 +617,38 @@ def _tool_call_matches_snapshot(call: ToolCall, snapshot: ToolCall) -> bool:
         return False
 
 
-def _can_fit_minimal_tool_result(limits: AgentLoopLimits, remaining_result_bytes: int) -> bool:
-    return (
-        remaining_result_bytes >= _MIN_TOOL_RESULT_ENVELOPE_BYTES
-        and limits.max_tool_result_bytes_per_call >= _MIN_TOOL_RESULT_ENVELOPE_BYTES
-        and limits.max_json_nodes_per_payload >= _MIN_TOOL_RESULT_ENVELOPE_NODES
+def _result_budget_for_call(
+    executor: ToolExecutorProtocol,
+    call: ToolCall,
+    limits: AgentLoopLimits,
+    remaining_result_bytes: int,
+) -> ToolResultBudget | None:
+    requirements = executor.result_requirements(call)
+    if (
+        type(requirements) is not ToolResultRequirements
+        or type(requirements.min_bytes) is not int
+        or type(requirements.min_nodes) is not int
+        or type(requirements.min_depth) is not int
+        or requirements.min_bytes <= 0
+        or requirements.min_nodes <= 0
+        or requirements.min_depth < 0
+    ):
+        raise RuntimeError("Tool executor returned invalid result requirements")
+    budget = _result_budget(limits, remaining_result_bytes)
+    if (
+        budget.max_bytes < requirements.min_bytes
+        or budget.max_nodes < requirements.min_nodes
+        or budget.max_depth < requirements.min_depth
+    ):
+        return None
+    return budget
+
+
+def _result_budget(limits: AgentLoopLimits, remaining_result_bytes: int) -> ToolResultBudget:
+    return ToolResultBudget(
+        max_bytes=min(limits.max_tool_result_bytes_per_call, remaining_result_bytes),
+        max_nodes=limits.max_json_nodes_per_payload,
+        max_depth=limits.max_json_depth,
     )
 
 

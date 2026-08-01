@@ -16,6 +16,11 @@ from nexusmind.tools.contracts import ToolDefinition, ToolErrorCode
 
 _MAX_TOOL_LIST_PAGES = 100
 _MAX_DISCOVERED_TOOLS = 1000
+_MAX_RESULT_CONTENT_BLOCKS = 1000
+_MAX_RESULT_TEXT_CHARS = 256 * 1024
+_MAX_STRUCTURED_NODES = 10000
+_MAX_STRUCTURED_DEPTH = 32
+_MAX_STRUCTURED_ITEMS = 1000
 
 
 class MCPClient:
@@ -108,12 +113,18 @@ def _mcp_tool_to_remote_tool(remote_tool: Any) -> MCPRemoteTool:
 
 
 def normalize_call_tool_result(result: Any) -> dict[str, Any]:
+    state = _NormalizationState()
     structured = getattr(result, "structuredContent", None)
     if structured is None:
         structured = getattr(result, "structured_content", None)
+    content = list(getattr(result, "content", []))
+    if len(content) > _MAX_RESULT_CONTENT_BLOCKS:
+        content = content[:_MAX_RESULT_CONTENT_BLOCKS]
+        state.truncated = True
     return {
-        "structured_content": _json_safe(structured),
-        "content": [_normalize_content_block(block) for block in getattr(result, "content", [])],
+        "structured_content": _json_safe(structured, state=state),
+        "content": [_normalize_content_block(block, state=state) for block in content],
+        "truncated": state.truncated,
     }
 
 
@@ -133,10 +144,14 @@ async def _call_list_tools(session: Any, cursor: str | None) -> Any:
     return await method()
 
 
-def _normalize_content_block(block: Any) -> dict[str, Any]:
+def _normalize_content_block(block: Any, *, state: _NormalizationState) -> dict[str, Any]:
     block_type = getattr(block, "type", "unknown")
     if block_type == "text":
-        return {"type": "text", "text": str(getattr(block, "text", ""))}
+        text = str(getattr(block, "text", ""))
+        if len(text) > _MAX_RESULT_TEXT_CHARS:
+            text = text[:_MAX_RESULT_TEXT_CHARS]
+            state.truncated = True
+        return {"type": "text", "text": text}
     if block_type == "image":
         data = getattr(block, "data", "") or ""
         return {"type": "image", "mime_type": str(getattr(block, "mimeType", "")), "size": len(data)}
@@ -153,15 +168,37 @@ def _normalize_content_block(block: Any) -> dict[str, Any]:
     return {"type": str(block_type)}
 
 
-def _json_safe(value: Any) -> Any:
+class _NormalizationState:
+    def __init__(self) -> None:
+        self.nodes = 0
+        self.truncated = False
+
+
+def _json_safe(value: Any, *, state: _NormalizationState, depth: int = 0) -> Any:
+    state.nodes += 1
+    if state.nodes > _MAX_STRUCTURED_NODES or depth > _MAX_STRUCTURED_DEPTH:
+        state.truncated = True
+        return None
     if isinstance(value, float) and not math.isfinite(value):
         return None
+    if isinstance(value, str) and len(value) > _MAX_RESULT_TEXT_CHARS:
+        state.truncated = True
+        return value[:_MAX_RESULT_TEXT_CHARS]
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, list):
-        return [_json_safe(item) for item in value]
+        items = value[:_MAX_STRUCTURED_ITEMS]
+        if len(items) < len(value):
+            state.truncated = True
+        return [_json_safe(item, state=state, depth=depth + 1) for item in items]
     if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
+        items = list(value.items())[:_MAX_STRUCTURED_ITEMS]
+        if len(items) < len(value):
+            state.truncated = True
+        return {
+            str(key): _json_safe(item, state=state, depth=depth + 1)
+            for key, item in items
+        }
     if hasattr(value, "model_dump"):
-        return _json_safe(value.model_dump())
+        return _json_safe(value.model_dump(), state=state, depth=depth)
     return str(type(value).__name__)

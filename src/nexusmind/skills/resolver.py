@@ -23,7 +23,8 @@ WORKSPACE_WRITE_TOOL_REFERENCES = frozenset(
         "builtin:replace_text",
     }
 )
-WORKSPACE_TOOL_REFERENCES = WORKSPACE_READ_TOOL_REFERENCES | WORKSPACE_WRITE_TOOL_REFERENCES
+WORKSPACE_EXEC_TOOL_REFERENCES = frozenset({"builtin:run_command"})
+WORKSPACE_TOOL_REFERENCES = WORKSPACE_READ_TOOL_REFERENCES | WORKSPACE_WRITE_TOOL_REFERENCES | WORKSPACE_EXEC_TOOL_REFERENCES
 
 
 def resolve_skill_tool_references(skill: SkillDefinition, registry: ToolRegistry) -> list[ToolDefinition]:
@@ -79,6 +80,10 @@ def skill_requires_workspace(skill: SkillDefinition) -> bool:
 
 def skill_requires_workspace_write(skill: SkillDefinition) -> bool:
     return any(reference in WORKSPACE_WRITE_TOOL_REFERENCES for reference in skill.allowed_tools)
+
+
+def skill_requires_workspace_exec(skill: SkillDefinition) -> bool:
+    return any(reference in WORKSPACE_EXEC_TOOL_REFERENCES for reference in skill.allowed_tools)
 
 
 def skill_mcp_server_ids(skill: SkillDefinition) -> tuple[str, ...]:

@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import sys
 
+from nexusmind.commands import CommandConfig, CommandConfigError, RunCommandTool, command_profile_summary, load_command_config
 from nexusmind.config import ConfigError, ModelConfig, load_model_config_from_env
 from nexusmind.mcp import MCPClientGroup, MCPError, MCPStdioClient, load_mcp_server_config, load_mcp_server_configs, register_mcp_tools
 from nexusmind.models.openai_compatible import OpenAICompatibleChatModel
@@ -20,6 +21,7 @@ from nexusmind.skills.resolver import (
     skill_mcp_server_ids,
     skill_requires_mcp,
     skill_requires_workspace,
+    skill_requires_workspace_exec,
     skill_requires_workspace_write,
     validate_builtin_skill_tool_references,
 )
@@ -38,6 +40,8 @@ def main(argv: list[str] | None = None) -> int:
     chat_parser.add_argument("--mcp-server")
     chat_parser.add_argument("--workspace")
     chat_parser.add_argument("--workspace-write", action="store_true")
+    chat_parser.add_argument("--workspace-exec", action="store_true")
+    chat_parser.add_argument("--command-config")
     chat_parser.add_argument("message", nargs="?")
     tools_parser = subparsers.add_parser("tools")
     tools_subparsers = tools_parser.add_subparsers(dest="tools_command", required=True)
@@ -68,6 +72,8 @@ def main(argv: list[str] | None = None) -> int:
     skill_run_parser.add_argument("--mcp-config")
     skill_run_parser.add_argument("--workspace")
     skill_run_parser.add_argument("--workspace-write", action="store_true")
+    skill_run_parser.add_argument("--workspace-exec", action="store_true")
+    skill_run_parser.add_argument("--command-config")
     skill_run_parser.add_argument("message", nargs="*")
 
     parse_argv, separator_message = _split_skill_run_separator_message(argv)
@@ -90,6 +96,8 @@ def main(argv: list[str] | None = None) -> int:
                 mcp_server=args.mcp_server,
                 workspace_path=args.workspace,
                 enable_workspace_write=args.workspace_write,
+                enable_workspace_exec=args.workspace_exec,
+                command_config_path=args.command_config,
             )
         )
     if args.command == "tools":
@@ -108,6 +116,8 @@ async def _chat(
     mcp_server: str | None = None,
     workspace_path: str | None = None,
     enable_workspace_write: bool = False,
+    enable_workspace_exec: bool = False,
+    command_config_path: str | None = None,
 ) -> int:
     if not message:
         message = input("> ").strip()
@@ -118,11 +128,11 @@ async def _chat(
     if enable_workspace_write and workspace_path is None:
         print("Workspace error: --workspace-write requires --workspace", file=sys.stderr)
         return 2
-
-    try:
-        model_config = load_model_config_from_env()
-    except ConfigError as exc:
-        print(f"Configuration error: {exc}", file=sys.stderr)
+    if enable_workspace_exec and workspace_path is None:
+        print("Command error: --workspace-exec requires --workspace", file=sys.stderr)
+        return 2
+    if enable_workspace_exec and not command_config_path:
+        print("Command error: --workspace-exec requires --command-config", file=sys.stderr)
         return 2
 
     try:
@@ -130,11 +140,26 @@ async def _chat(
     except WorkspaceError as exc:
         print(f"Workspace error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
         return 2
+    try:
+        command_config = _build_command_config(command_config_path, workspace) if enable_workspace_exec else None
+    except CommandConfigError as exc:
+        print(f"Command error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
+        return 2
+
+    try:
+        model_config = load_model_config_from_env()
+    except ConfigError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        return 2
 
     registry = (
         _build_builtin_tool_registry()
         if workspace is None
-        else build_builtin_tool_registry(workspace=workspace, enable_workspace_write=enable_workspace_write)
+        else build_builtin_tool_registry(
+            workspace=workspace,
+            enable_workspace_write=enable_workspace_write,
+            command_config=command_config,
+        )
     )
     if mcp_config is None:
         return await _run_chat(message, registry, model_config=model_config, workspace=workspace)
@@ -214,7 +239,7 @@ async def _run_chat(
         OpenAICompatibleChatModel(model_config),
         tool_executor=ToolExecutor(registry, timeout=executor_timeout),
         approval_provider=CLIApprovalProvider(),
-        approval_summarizer=CLIApprovalSummarizer(workspace=workspace),
+        approval_summarizer=CLIApprovalSummarizer(workspace=workspace, command_config=_registry_command_config(registry)),
         limits=limits,
     )
     tools = registry.list_definitions() if tools is None else tools
@@ -260,9 +285,16 @@ async def _tools(args: argparse.Namespace) -> int:
     return 2
 
 
-def build_builtin_tool_registry(*, workspace: Workspace | None = None, enable_workspace_write: bool = False) -> ToolRegistry:
+def build_builtin_tool_registry(
+    *,
+    workspace: Workspace | None = None,
+    enable_workspace_write: bool = False,
+    command_config: CommandConfig | None = None,
+) -> ToolRegistry:
     if enable_workspace_write and workspace is None:
         raise WorkspaceError("--workspace-write requires --workspace")
+    if command_config is not None and workspace is None:
+        raise WorkspaceError("--workspace-exec requires --workspace")
     registry = ToolRegistry()
     tools = [ApprovalDemoTool(), EchoTool()]
     if workspace is not None:
@@ -270,6 +302,8 @@ def build_builtin_tool_registry(*, workspace: Workspace | None = None, enable_wo
         if enable_workspace_write:
             budget = WorkspaceWriteBudget()
             tools.extend([WriteFileTool(workspace, budget), ReplaceTextTool(workspace, budget)])
+        if command_config is not None:
+            tools.append(RunCommandTool(command_config))
     registry.register_many(tools)
     return registry
 
@@ -302,9 +336,16 @@ class CLIApprovalProvider:
 
 
 class CLIApprovalSummarizer(DefaultToolApprovalSummarizer):
-    def __init__(self, max_length: int = 160, *, workspace: Workspace | None = None) -> None:
+    def __init__(
+        self,
+        max_length: int = 160,
+        *,
+        workspace: Workspace | None = None,
+        command_config: CommandConfig | None = None,
+    ) -> None:
         super().__init__(max_length=max_length)
         self._workspace = workspace
+        self._command_config = command_config
 
     def summarize(self, call: ToolCall, definition: ToolDefinition) -> str:
         if definition.name == "write_file":
@@ -327,6 +368,11 @@ class CLIApprovalSummarizer(DefaultToolApprovalSummarizer):
                 f"Workspace replace_text {path}; old_bytes={old_size}; new_bytes={new_size}; "
                 f"expected_sha256={sha[:12]}; expected_occurrences={occurrences}"
             )
+        if definition.name == "run_command":
+            profile_id = call.arguments.get("profile")
+            if self._command_config is not None and isinstance(profile_id, str) and profile_id in self._command_config.profiles:
+                return command_profile_summary(self._command_config.profiles[profile_id], max_length=160)
+            return f"Run command profile={_safe_cli_field(str(profile_id), max_length=80)}"
         return super().summarize(call, definition)
 
 
@@ -423,6 +469,15 @@ async def _skill_run(args: argparse.Namespace) -> int:
     if skill_requires_workspace_write(skill) and not args.workspace_write:
         print("Skill error: workspace write tool references require --workspace-write", file=sys.stderr)
         return 2
+    if args.workspace_exec and not args.workspace:
+        print("Command error: --workspace-exec requires --workspace", file=sys.stderr)
+        return 2
+    if args.workspace_exec and not args.command_config:
+        print("Command error: --workspace-exec requires --command-config", file=sys.stderr)
+        return 2
+    if skill_requires_workspace_exec(skill) and not args.workspace_exec:
+        print("Skill error: command tool references require --workspace-exec", file=sys.stderr)
+        return 2
     message = " ".join(args.message).strip()
     if not message:
         message = input("> ").strip()
@@ -440,8 +495,17 @@ async def _skill_run(args: argparse.Namespace) -> int:
     except WorkspaceError as exc:
         print(f"Workspace error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
         return 2
+    try:
+        command_config = _build_command_config(args.command_config, workspace) if args.workspace_exec else None
+    except CommandConfigError as exc:
+        print(f"Command error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
+        return 2
 
-    registry = build_builtin_tool_registry(workspace=workspace, enable_workspace_write=args.workspace_write)
+    registry = build_builtin_tool_registry(
+        workspace=workspace,
+        enable_workspace_write=args.workspace_write,
+        command_config=command_config,
+    )
     try:
         validate_builtin_skill_tool_references(skill, registry)
     except SkillError as exc:
@@ -545,12 +609,28 @@ def _build_workspace(path: str | None) -> Workspace | None:
     return Workspace(Path(path))
 
 
+def _build_command_config(path: str | None, workspace: Workspace | None) -> CommandConfig:
+    if path is None:
+        raise CommandConfigError("--workspace-exec requires --command-config")
+    if workspace is None:
+        raise CommandConfigError("--workspace-exec requires --workspace")
+    return load_command_config(path, workspace)
+
+
 def _registry_workspace(registry: ToolRegistry) -> Workspace | None:
     for name in ("write_file", "replace_text", "read_file", "list_files", "search_text"):
         if registry.contains(name):
             workspace = getattr(registry.get(name), "_workspace", None)
             if isinstance(workspace, Workspace):
                 return workspace
+    return None
+
+
+def _registry_command_config(registry: ToolRegistry) -> CommandConfig | None:
+    if registry.contains("run_command"):
+        config = getattr(registry.get("run_command"), "_config", None)
+        if isinstance(config, CommandConfig):
+            return config
     return None
 
 
