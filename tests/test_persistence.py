@@ -20,7 +20,7 @@ def test_store_lifecycle_and_stable_show(tmp_path):
     run(store.finish_run(run_id, RunStatus.COMPLETED))
     shown = store.show_run(run_id)
     assert shown["run"]["status"] == "completed"
-    assert shown["events"][0]["payload"] == {"ok": True}
+    assert shown["events"][1]["payload"] == {"ok": True}
     store.close()
 
 

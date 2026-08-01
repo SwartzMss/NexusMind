@@ -233,7 +233,7 @@ async def _run_chat_with_mcp(
     store = None; run_id = None
     try:
         if state_db:
-            store = SQLiteRunStore(state_db)
+            store = SQLiteRunStore(state_db, recover_abandoned=True)
             run_id = await store.start_run(RunStartContext(RunKind.CHAT, model_name=getattr(model_config, "model", None), input_text=message, record_content=record_content))
     except StateStoreError:
         _best_effort_close(store)
@@ -324,7 +324,7 @@ async def _run_chat(
     store = external_store; run_id = external_run_id; owns_store = store is None
     if state_db and store is None:
         try:
-            store = SQLiteRunStore(state_db)
+            store = SQLiteRunStore(state_db, recover_abandoned=True)
             run_id = await store.start_run(RunStartContext(run_kind, skill_name=skill_name, model_name=getattr(model_config, "model", None), input_text=message, record_content=record_content))
         except StateStoreError:
             _best_effort_close(store)
@@ -343,7 +343,7 @@ async def _run_chat(
         stream_kwargs["system_prompt"] = system_prompt
     try:
         async for event in runtime.stream_user_message(message, **stream_kwargs):
-            if store and run_id:
+            if store and run_id and event.type not in {RuntimeEventType.RUN_STARTED, RuntimeEventType.RUN_COMPLETED, RuntimeEventType.RUN_FAILED}:
                 try: await store.append_event(run_id, RunTraceEvent(event.type.value, datetime.now(timezone.utc), project_runtime_event(event)))
                 except StateStoreError:
                     try: await store.finish_run(run_id, RunStatus.FAILED, error_code="trace_persist_failed", error_message="Run trace could not be persisted", trace_complete=False)
@@ -712,7 +712,7 @@ async def _run_skill_with_mcp(
     store = None; run_id = None
     try:
         if state_db:
-            store = SQLiteRunStore(state_db)
+            store = SQLiteRunStore(state_db, recover_abandoned=True)
             run_id = await store.start_run(RunStartContext(RunKind.SKILL, skill_name=skill.name, model_name=getattr(model_config, "model", None), input_text=message, record_content=record_content))
     except StateStoreError:
         if store:

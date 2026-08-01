@@ -59,7 +59,8 @@ CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC); CREATE 
     async def start_run(self, context: RunStartContext):
         run_id=uuid.uuid4().hex; now=_now(); digest=hashlib.sha256((context.input_text or '').encode()).hexdigest()
         preview=(context.input_text or '')[:512] if context.record_content else None
-        self.db.execute("INSERT INTO runs(id,schema_version,execution_id,kind,status,skill_name,model_name,input_preview,input_sha256,started_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(run_id,1,self.execution_id,context.kind.value,'running',context.skill_name,context.model_name,preview,digest,now,now)); self.db.commit(); return run_id
+        self.db.execute("INSERT INTO runs(id,schema_version,execution_id,kind,status,skill_name,model_name,input_preview,input_sha256,started_at,updated_at,event_count) VALUES(?,?,?,?,?,?,?,?,?,?,?,1)",(run_id,1,self.execution_id,context.kind.value,'running',context.skill_name,context.model_name,preview,digest,now,now))
+        payload=json.dumps({"kind":context.kind.value},separators=(',',':')); self.db.execute("INSERT INTO run_events VALUES(?,?,?,?,?,?)",(run_id,1,"run_started",now,payload,len(payload))); self.db.commit(); return run_id
     @_async_db_error
     async def append_event(self, run_id, event: RunTraceEvent):
         raw=json.dumps(event.payload,ensure_ascii=False,allow_nan=False,separators=(',',':')).encode()
@@ -69,7 +70,12 @@ CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC); CREATE 
         seq=row[0]+1; self.db.execute("INSERT INTO run_events VALUES(?,?,?,?,?,?)",(run_id,seq,event.event_type,event.occurred_at.isoformat(),raw.decode(),len(raw))); self.db.execute("UPDATE runs SET event_count=?,updated_at=? WHERE id=?",(seq,_now(),run_id)); self.db.commit()
     @_async_db_error
     async def finish_run(self, run_id, status, *, error_code=None, error_message=None, trace_complete=None):
-        now=_now(); self.db.execute("UPDATE runs SET status=?,error_code=?,error_message=?,trace_complete=COALESCE(?,trace_complete),updated_at=?,finished_at=? WHERE id=? AND status='running'",(status.value,error_code,(error_message or '')[:1024] or None, None if trace_complete is None else int(trace_complete),now,now,run_id)); self.db.commit()
+        now=_now(); cur=self.db.execute("UPDATE runs SET status=?,error_code=?,error_message=?,trace_complete=COALESCE(?,trace_complete),updated_at=?,finished_at=? WHERE id=? AND status='running'",(status.value,error_code,(error_message or '')[:1024] or None, None if trace_complete is None else int(trace_complete),now,now,run_id))
+        if cur.rowcount: 
+            seq=self.db.execute("SELECT event_count FROM runs WHERE id=?",(run_id,)).fetchone()[0]+1; event_type={RunStatus.COMPLETED:"run_completed",RunStatus.FAILED:"run_failed",RunStatus.CANCELLED:"run_cancelled",RunStatus.ABANDONED:"run_abandoned"}.get(status)
+            if event_type:
+                payload=json.dumps({"error_code":error_code} if error_code else {},separators=(',',':')); self.db.execute("INSERT INTO run_events VALUES(?,?,?,?,?,?)",(run_id,seq,event_type,now,payload,len(payload))); self.db.execute("UPDATE runs SET event_count=? WHERE id=?",(seq,run_id))
+        self.db.commit()
     @_sync_db_error
     def list_runs(self, *, limit=20, status=None, kind=None, skill=None):
         limit=max(1,min(int(limit),200)); q="SELECT id,status,kind,started_at,skill_name FROM runs"; vals=[]; filters=[]
