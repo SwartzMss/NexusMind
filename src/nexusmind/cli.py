@@ -216,8 +216,16 @@ async def _run_chat_with_mcp(
     model_config: ModelConfig,
     state_db: str | None = None, record_content: bool = False,
 ) -> int:
-    store = SQLiteRunStore(state_db) if state_db else None
-    run_id = await store.start_run(RunStartContext(RunKind.CHAT, model_name=getattr(model_config, "model", None), input_text=message, record_content=record_content)) if store else None
+    store = None; run_id = None
+    try:
+        if state_db:
+            store = SQLiteRunStore(state_db)
+            run_id = await store.start_run(RunStartContext(RunKind.CHAT, model_name=getattr(model_config, "model", None), input_text=message, record_content=record_content))
+    except StateStoreError:
+        if store:
+            try: store.close()
+            except Exception: pass
+        print("State error: Run store could not be initialized", file=sys.stderr); return 2
     client = MCPStdioClient(config)
     try:
         await client.__aenter__()
@@ -226,12 +234,16 @@ async def _run_chat_with_mcp(
         raise
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
-        if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_start_failed", error_message="MCP server failed to start")
+        if store and run_id:
+            try: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_start_failed", error_message="MCP server failed to start")
+            except StateStoreError: pass
         if store: store.close()
         return 1
     except Exception:
         print("MCP error: MCP chat tool setup failed", file=sys.stderr)
-        if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_start_failed", error_message="MCP server setup failed")
+        if store and run_id:
+            try: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_start_failed", error_message="MCP server setup failed")
+            except StateStoreError: pass
         if store: store.close()
         return 1
 
@@ -277,7 +289,9 @@ async def _run_chat_with_mcp(
         if store: store.close()
         return 1
     if store and run_id:
-        await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED); store.close()
+        try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED)
+        except StateStoreError: return_code = 1
+        store.close()
     return return_code
 
 
@@ -318,8 +332,10 @@ async def _run_chat(
         async for event in runtime.stream_user_message(message, **stream_kwargs):
             if store and run_id:
                 try: await store.append_event(run_id, RunTraceEvent(event.type.value, datetime.now(timezone.utc), project_runtime_event(event)))
-                except Exception:
-                    await store.finish_run(run_id, RunStatus.FAILED, error_code="trace_persist_failed", error_message="Run trace could not be persisted", trace_complete=False); return 1
+                except StateStoreError:
+                    try: await store.finish_run(run_id, RunStatus.FAILED, error_code="trace_persist_failed", error_message="Run trace could not be persisted", trace_complete=False)
+                    except StateStoreError: pass
+                    return 1
             if event.type == RuntimeEventType.TEXT_DELTA and event.text: print(event.text, end="", flush=True)
             elif event.type == RuntimeEventType.RUN_FAILED: failed = True; print(f"\nModel error: {event.error}", file=sys.stderr)
         if not failed: print()
@@ -678,8 +694,16 @@ async def _run_skill_with_mcp(
     limits: AgentLoopLimits,
     state_db: str | None = None, record_content: bool = False,
 ) -> int:
-    store = SQLiteRunStore(state_db) if state_db else None
-    run_id = await store.start_run(RunStartContext(RunKind.SKILL, skill_name=skill.name, model_name=getattr(model_config, "model", None), input_text=message, record_content=record_content)) if store else None
+    store = None; run_id = None
+    try:
+        if state_db:
+            store = SQLiteRunStore(state_db)
+            run_id = await store.start_run(RunStartContext(RunKind.SKILL, skill_name=skill.name, model_name=getattr(model_config, "model", None), input_text=message, record_content=record_content))
+    except StateStoreError:
+        if store:
+            try: store.close()
+            except Exception: pass
+        print("State error: Run store could not be initialized", file=sys.stderr); return 2
     group = MCPClientGroup(configs)
     try:
         await group.__aenter__()
@@ -746,7 +770,9 @@ async def _run_skill_with_mcp(
         if store: store.close()
         return 1
     if store and run_id:
-        await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED); store.close()
+        try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED)
+        except StateStoreError: return_code = 1
+        store.close()
     return return_code
 
 
