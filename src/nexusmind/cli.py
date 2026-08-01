@@ -58,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     runs_list = runs_sub.add_parser("list"); runs_list.add_argument("--state-db", required=True); runs_list.add_argument("--limit", type=int, default=20); runs_list.add_argument("--status"); runs_list.add_argument("--kind"); runs_list.add_argument("--skill")
     runs_show = runs_sub.add_parser("show"); runs_show.add_argument("run_id"); runs_show.add_argument("--state-db", required=True); runs_show.add_argument("--json", action="store_true")
     runs_prune = runs_sub.add_parser("prune"); runs_prune.add_argument("--state-db", required=True); runs_prune.add_argument("--older-than-days", type=int, required=True)
+    runs_recover = runs_sub.add_parser("recover"); runs_recover.add_argument("--state-db", required=True)
     mcp_parser = subparsers.add_parser("mcp")
     mcp_subparsers = mcp_parser.add_subparsers(dest="mcp_command", required=True)
     mcp_tools_parser = mcp_subparsers.add_parser("tools")
@@ -149,6 +150,12 @@ async def _chat(
     if enable_workspace_exec and not command_config_path:
         print("Command error: --workspace-exec requires --command-config", file=sys.stderr)
         return 2
+
+    if state_db:
+        try:
+            preflight = SQLiteRunStore(state_db); preflight.close()
+        except StateStoreError:
+            print("State error: Run store could not be initialized", file=sys.stderr); return 2
 
     try:
         workspace = _build_workspace(workspace_path)
@@ -332,7 +339,7 @@ def project_runtime_event(event) -> dict:
     if event.tool_approval is not None:
         approval = event.tool_approval; payload.update(call_id=approval.call_id, tool_name=approval.tool_name, decision=getattr(approval.decision, 'value', approval.decision), summary=_safe_cli_field(approval.summary, max_length=512))
     if event.tool_result is not None:
-        result = event.tool_result; payload.update(call_id=result.call_id, tool_name=result.tool_name, ok=result.error is None, result_bytes=len(json.dumps(result.output, ensure_ascii=False, default=str).encode()), error_code=getattr(result.error.code, 'value', None) if result.error else None)
+        result = event.tool_result; payload.update(call_id=result.call_id, tool_name=result.name, ok=result.error is None, result_bytes=len(json.dumps(result.output, ensure_ascii=False, default=str).encode()), error_code=getattr(result.error.code, 'value', None) if result.error else None)
     return payload
 
 def _runs(args: argparse.Namespace) -> int:
@@ -350,6 +357,8 @@ def _runs(args: argparse.Namespace) -> int:
             print("Run ID\t"+str(item["run"]["id"])); print("Status\t"+str(item["run"]["status"])); print("Events\t"+str(len(item["events"])))
             for e in item["events"]: print(f"{e['sequence']}\t{e['event_type']}\t{e['occurred_at']}")
             return 0
+        if args.runs_command == "recover":
+            store.recover_abandoned(); print("Recovered abandoned runs"); return 0
         if args.runs_command == "prune":
             try: count=store.prune(args.older_than_days)
             except ValueError as exc: print(f"State error: {exc}", file=sys.stderr); return 2
@@ -568,6 +577,11 @@ async def _skill_run(args: argparse.Namespace) -> int:
     except WorkspaceError as exc:
         print(f"Workspace error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
         return 2
+    if args.state_db:
+        try:
+            preflight = SQLiteRunStore(args.state_db); preflight.close()
+        except StateStoreError:
+            print("State error: Run store could not be initialized", file=sys.stderr); return 2
     try:
         command_config = _build_command_config(args.command_config, workspace) if args.workspace_exec else None
     except CommandConfigError as exc:

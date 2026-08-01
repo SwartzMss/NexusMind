@@ -206,9 +206,10 @@ nexusmind chat --state-db ./.nexusmind/state.db "分析这个项目"
 nexusmind runs list --state-db ./.nexusmind/state.db
 nexusmind runs show <run_id> --state-db ./.nexusmind/state.db --json
 nexusmind runs prune --state-db ./.nexusmind/state.db --older-than-days 30
+nexusmind runs recover --state-db ./.nexusmind/state.db
 ```
 
-未提供 `--state-db` 时不会创建数据库。默认只记录执行元数据；`--record-content` 才会保存有界的输入预览。数据库可能包含任务、模型和工具执行元数据，应按敏感数据保护。它只记录历史，不支持恢复、重放或自动重新执行工具；异常中断的 Run 会标记为 `abandoned`。
+未提供 `--state-db` 时不会创建数据库。默认只记录执行元数据；`--record-content` 才会保存有界的输入预览。数据库可能包含任务、模型和工具执行元数据，应按敏感数据保护。它只记录历史，不支持恢复、重放或自动重新执行工具。确认旧进程已停止后，可显式使用 `runs recover` 将遗留的 `running` Run 标记为 `abandoned`。
 
 工具定义的默认风险级别是 `UNSPECIFIED`，默认策略会要求审批；确认只读工具时应显式设置 `ToolRiskLevel.READ_ONLY`。
 
