@@ -30,6 +30,8 @@ from nexusmind.tools.contracts import ToolDefinition
 from nexusmind.tools.builtin import ApprovalDemoTool, EchoTool, ListFilesTool, ReadFileTool, ReplaceTextTool, SearchTextTool, WriteFileTool
 from nexusmind.tools.builtin.workspace import WorkspaceWriteBudget
 from nexusmind.workspace import Workspace, WorkspaceError, resolve_workspace_create_target, resolve_workspace_path, workspace_relative_path
+from nexusmind.persistence import SQLiteRunStore, StateStoreError, RunKind, RunStartContext, RunStatus, RunTraceEvent
+from datetime import datetime, timezone
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -42,6 +44,8 @@ def main(argv: list[str] | None = None) -> int:
     chat_parser.add_argument("--workspace-write", action="store_true")
     chat_parser.add_argument("--workspace-exec", action="store_true")
     chat_parser.add_argument("--command-config")
+    chat_parser.add_argument("--state-db")
+    chat_parser.add_argument("--record-content", action="store_true")
     chat_parser.add_argument("message", nargs="?")
     tools_parser = subparsers.add_parser("tools")
     tools_subparsers = tools_parser.add_subparsers(dest="tools_command", required=True)
@@ -49,6 +53,11 @@ def main(argv: list[str] | None = None) -> int:
     tools_call_parser = tools_subparsers.add_parser("call")
     tools_call_parser.add_argument("name")
     tools_call_parser.add_argument("arguments")
+    runs_parser = subparsers.add_parser("runs")
+    runs_sub = runs_parser.add_subparsers(dest="runs_command", required=True)
+    runs_list = runs_sub.add_parser("list"); runs_list.add_argument("--state-db", required=True); runs_list.add_argument("--limit", type=int, default=20); runs_list.add_argument("--status"); runs_list.add_argument("--kind"); runs_list.add_argument("--skill")
+    runs_show = runs_sub.add_parser("show"); runs_show.add_argument("run_id"); runs_show.add_argument("--state-db", required=True); runs_show.add_argument("--json", action="store_true")
+    runs_prune = runs_sub.add_parser("prune"); runs_prune.add_argument("--state-db", required=True); runs_prune.add_argument("--older-than-days", type=int, required=True)
     mcp_parser = subparsers.add_parser("mcp")
     mcp_subparsers = mcp_parser.add_subparsers(dest="mcp_command", required=True)
     mcp_tools_parser = mcp_subparsers.add_parser("tools")
@@ -74,6 +83,8 @@ def main(argv: list[str] | None = None) -> int:
     skill_run_parser.add_argument("--workspace-write", action="store_true")
     skill_run_parser.add_argument("--workspace-exec", action="store_true")
     skill_run_parser.add_argument("--command-config")
+    skill_run_parser.add_argument("--state-db")
+    skill_run_parser.add_argument("--record-content", action="store_true")
     skill_run_parser.add_argument("message", nargs="*")
 
     parse_argv, separator_message = _split_skill_run_separator_message(argv)
@@ -98,10 +109,13 @@ def main(argv: list[str] | None = None) -> int:
                 enable_workspace_write=args.workspace_write,
                 enable_workspace_exec=args.workspace_exec,
                 command_config_path=args.command_config,
+                state_db=args.state_db, record_content=args.record_content,
             )
         )
     if args.command == "tools":
         return asyncio.run(_tools(args))
+    if args.command == "runs":
+        return _runs(args)
     if args.command == "mcp":
         return asyncio.run(_mcp(args))
     if args.command == "skill":
@@ -118,6 +132,7 @@ async def _chat(
     enable_workspace_write: bool = False,
     enable_workspace_exec: bool = False,
     command_config_path: str | None = None,
+    state_db: str | None = None, record_content: bool = False,
 ) -> int:
     if not message:
         message = input("> ").strip()
@@ -162,7 +177,7 @@ async def _chat(
         )
     )
     if mcp_config is None:
-        return await _run_chat(message, registry, model_config=model_config, workspace=workspace)
+        return await _run_chat(message, registry, model_config=model_config, workspace=workspace, state_db=state_db, record_content=record_content)
 
     try:
         config = load_mcp_server_config(mcp_config, mcp_server)
@@ -172,7 +187,7 @@ async def _chat(
     except Exception:
         print("MCP error: MCP chat tool setup failed", file=sys.stderr)
         return 1
-    return await _run_chat_with_mcp(message, registry, config=config, model_config=model_config)
+    return await _run_chat_with_mcp(message, registry, config=config, model_config=model_config, state_db=state_db, record_content=record_content)
 
 
 async def _run_chat_with_mcp(
@@ -181,6 +196,7 @@ async def _run_chat_with_mcp(
     *,
     config,
     model_config: ModelConfig,
+    state_db: str | None = None, record_content: bool = False,
 ) -> int:
     client = MCPStdioClient(config)
     try:
@@ -208,6 +224,7 @@ async def _run_chat_with_mcp(
                 model_config=model_config,
                 executor_timeout=config.request_timeout,
                 workspace=_registry_workspace(registry),
+                state_db=state_db, record_content=record_content,
             )
     except BaseException as exc:
         try:
@@ -234,7 +251,16 @@ async def _run_chat(
     tools: list[ToolDefinition] | None = None,
     limits: AgentLoopLimits | None = None,
     workspace: Workspace | None = None,
+    state_db: str | None = None, record_content: bool = False, run_kind: RunKind = RunKind.CHAT,
+    skill_name: str | None = None,
 ) -> int:
+    store = None; run_id = None
+    if state_db:
+        try:
+            store = SQLiteRunStore(state_db)
+            run_id = await store.start_run(RunStartContext(run_kind, skill_name=skill_name, model_name=getattr(model_config, "model", None), input_text=message, record_content=record_content))
+        except StateStoreError:
+            print("State error: Run store could not be initialized", file=sys.stderr); return 2
     runtime = ChatRuntime(
         OpenAICompatibleChatModel(model_config),
         tool_executor=ToolExecutor(registry, timeout=executor_timeout),
@@ -248,6 +274,13 @@ async def _run_chat(
     if system_prompt is not None:
         stream_kwargs["system_prompt"] = system_prompt
     async for event in runtime.stream_user_message(message, **stream_kwargs):
+        if store and run_id:
+            try:
+                payload = {"text_bytes": len((event.text or '').encode()), "error": _safe_cli_field(event.error or '', max_length=1024)}
+                await store.append_event(run_id, RunTraceEvent(event.type.value, datetime.now(timezone.utc), payload))
+            except (StateStoreError, Exception):
+                await store.finish_run(run_id, RunStatus.FAILED, error_code="trace_persist_failed", error_message="Run trace could not be persisted")
+                store.close(); return 1
         if event.type == RuntimeEventType.TEXT_DELTA and event.text:
             print(event.text, end="", flush=True)
         elif event.type == RuntimeEventType.RUN_FAILED:
@@ -256,6 +289,9 @@ async def _run_chat(
 
     if not failed:
         print()
+    if store and run_id:
+        await store.finish_run(run_id, RunStatus.FAILED if failed else RunStatus.COMPLETED)
+        store.close()
     return 1 if failed else 0
 
 
@@ -282,6 +318,30 @@ async def _tools(args: argparse.Namespace) -> int:
             return 2 if result.error.code in {ToolErrorCode.TOOL_NOT_FOUND, ToolErrorCode.INVALID_ARGUMENTS} else 1
         print(json.dumps(result.output, ensure_ascii=True, sort_keys=True))
         return 0
+    return 2
+
+def _open_store(path: str):
+    try: return SQLiteRunStore(path)
+    except StateStoreError:
+        print("State error: Run store could not be initialized", file=sys.stderr); return None
+
+def _runs(args: argparse.Namespace) -> int:
+    store=_open_store(args.state_db)
+    if store is None:return 2
+    try:
+        if args.runs_command == "list":
+            print("RUN_ID\tSTATUS\tKIND\tSTARTED_AT\tSKILL")
+            for row in store.list_runs(limit=args.limit,status=args.status,kind=args.kind,skill=args.skill): print("\t".join(str(x or "-") for x in row))
+            return 0
+        if args.runs_command == "show":
+            item=store.show_run(args.run_id)
+            if item is None: print("Run error: run not found",file=sys.stderr); return 2
+            if args.json: print(json.dumps({"run":item["run"],"events":item["events"]},default=str,ensure_ascii=False)); return 0
+            print("Run ID\t"+str(item["run"][0])); print("Status\t"+str(item["run"][4])); print("Events\t"+str(len(item["events"])))
+            for e in item["events"]: print(f"{e[0]}\t{e[1]}\t{e[2]}")
+            return 0
+        if args.runs_command == "prune": print(f"Deleted {store.prune(args.older_than_days)} run(s)"); return 0
+    finally: store.close()
     return 2
 
 
@@ -525,6 +585,7 @@ async def _skill_run(args: argparse.Namespace) -> int:
             tools=tools,
             limits=limits,
             workspace=workspace,
+            state_db=args.state_db, record_content=args.record_content, run_kind=RunKind.SKILL, skill_name=skill.name,
         )
     try:
         required_server_ids = skill_mcp_server_ids(skill)
@@ -538,7 +599,7 @@ async def _skill_run(args: argparse.Namespace) -> int:
     except Exception:
         print("MCP error: MCP skill tool setup failed", file=sys.stderr)
         return 1
-    return await _run_skill_with_mcp(message, skill, registry, configs=configs, model_config=model_config, limits=limits)
+    return await _run_skill_with_mcp(message, skill, registry, configs=configs, model_config=model_config, limits=limits, state_db=args.state_db, record_content=args.record_content)
 
 
 async def _run_skill_with_mcp(
@@ -549,6 +610,7 @@ async def _run_skill_with_mcp(
     configs,
     model_config: ModelConfig,
     limits: AgentLoopLimits,
+    state_db: str | None = None, record_content: bool = False,
 ) -> int:
     group = MCPClientGroup(configs)
     try:
@@ -581,6 +643,7 @@ async def _run_skill_with_mcp(
                 tools=tools,
                 limits=limits,
                 workspace=_registry_workspace(registry),
+                state_db=state_db, record_content=record_content, run_kind=RunKind.SKILL, skill_name=skill.name,
             )
     except BaseException as exc:
         try:

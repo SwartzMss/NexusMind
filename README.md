@@ -197,6 +197,19 @@ nexusmind skill run multi-mcp-review `
 
 NexusMind 可以把已注册的 `ToolDefinition` 传给 OpenAI-compatible chat model，把流式 `tool_calls` 解析成与服务商无关的事件，通过 `ToolExecutor` 执行模型请求的工具，并把结构化 `role=tool` 结果回填到下一轮模型调用。运行时使用有界的单 Agent 循环限制，避免模型轮次或工具结果无限增长。
 
+### Run History（可选）
+
+可以显式启用本地 SQLite Run Store：
+
+```bash
+nexusmind chat --state-db ./.nexusmind/state.db "分析这个项目"
+nexusmind runs list --state-db ./.nexusmind/state.db
+nexusmind runs show <run_id> --state-db ./.nexusmind/state.db --json
+nexusmind runs prune --state-db ./.nexusmind/state.db --older-than-days 30
+```
+
+未提供 `--state-db` 时不会创建数据库。默认只记录执行元数据；`--record-content` 才会保存有界的输入预览。数据库可能包含任务、模型和工具执行元数据，应按敏感数据保护。它只记录历史，不支持恢复、重放或自动重新执行工具；异常中断的 Run 会标记为 `abandoned`。
+
 工具定义的默认风险级别是 `UNSPECIFIED`，默认策略会要求审批；确认只读工具时应显式设置 `ToolRiskLevel.READ_ONLY`。
 
 ## 开发验证
