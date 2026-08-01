@@ -205,14 +205,20 @@ async def _run_chat_with_mcp(
     model_config: ModelConfig,
     state_db: str | None = None, record_content: bool = False,
 ) -> int:
+    store = SQLiteRunStore(state_db) if state_db else None
+    run_id = await store.start_run(RunStartContext(RunKind.CHAT, model_name=getattr(model_config, "model", None), input_text=message, record_content=record_content)) if store else None
     client = MCPStdioClient(config)
     try:
         await client.__aenter__()
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
+        if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_start_failed", error_message="MCP server failed to start")
+        if store: store.close()
         return 1
     except Exception:
         print("MCP error: MCP chat tool setup failed", file=sys.stderr)
+        if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_start_failed", error_message="MCP server setup failed")
+        if store: store.close()
         return 1
 
     try:
@@ -220,9 +226,11 @@ async def _run_chat_with_mcp(
             await register_mcp_tools(client, config.server_id, registry)
         except MCPError as exc:
             print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
+            if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_register_failed", error_message="MCP tool registration failed")
             return_code = 1
         except Exception:
             print("MCP error: MCP chat tool setup failed", file=sys.stderr)
+            if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_register_failed", error_message="MCP tool registration failed")
             return_code = 1
         else:
             return_code = await _run_chat(
@@ -232,6 +240,7 @@ async def _run_chat_with_mcp(
                 executor_timeout=config.request_timeout,
                 workspace=_registry_workspace(registry),
                 state_db=state_db, record_content=record_content,
+                external_store=store, external_run_id=run_id,
             )
     except BaseException as exc:
         try:
@@ -244,7 +253,11 @@ async def _run_chat_with_mcp(
         await client.__aexit__(None, None, None)
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
+        if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_cleanup_failed", error_message="MCP server cleanup failed")
+        if store: store.close()
         return 1
+    if store and run_id:
+        await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED); store.close()
     return return_code
 
 
@@ -260,9 +273,10 @@ async def _run_chat(
     workspace: Workspace | None = None,
     state_db: str | None = None, record_content: bool = False, run_kind: RunKind = RunKind.CHAT,
     skill_name: str | None = None,
+    external_store=None, external_run_id: str | None = None,
 ) -> int:
-    store = None; run_id = None
-    if state_db:
+    store = external_store; run_id = external_run_id; owns_store = store is None
+    if state_db and store is None:
         try:
             store = SQLiteRunStore(state_db)
             run_id = await store.start_run(RunStartContext(run_kind, skill_name=skill_name, model_name=getattr(model_config, "model", None), input_text=message, record_content=record_content))
@@ -289,7 +303,7 @@ async def _run_chat(
             if event.type == RuntimeEventType.TEXT_DELTA and event.text: print(event.text, end="", flush=True)
             elif event.type == RuntimeEventType.RUN_FAILED: failed = True; print(f"\nModel error: {event.error}", file=sys.stderr)
         if not failed: print()
-        if store and run_id: await store.finish_run(run_id, RunStatus.FAILED if failed else RunStatus.COMPLETED)
+        if store and run_id and owns_store: await store.finish_run(run_id, RunStatus.FAILED if failed else RunStatus.COMPLETED)
         return 1 if failed else 0
     except asyncio.CancelledError:
         if store and run_id: await asyncio.shield(store.finish_run(run_id, RunStatus.CANCELLED, error_code="cancelled"))
@@ -298,7 +312,7 @@ async def _run_chat(
         if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="runtime_error", error_message="Runtime execution failed")
         raise
     finally:
-        if store: store.close()
+        if store and owns_store: store.close()
 
 
 async def _tools(args: argparse.Namespace) -> int:
