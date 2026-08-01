@@ -177,7 +177,7 @@ async def _chat(
         try:
             preflight = SQLiteRunStore(state_db); preflight.close()
         except StateStoreError:
-            print("State error: Run store could not be initialized", file=sys.stderr); return 2
+            _best_effort_close(store); print("State error: Run store could not be initialized", file=sys.stderr); return 2
 
     try:
         workspace = _build_workspace(workspace_path)
@@ -233,9 +233,7 @@ async def _run_chat_with_mcp(
             store = SQLiteRunStore(state_db)
             run_id = await store.start_run(RunStartContext(RunKind.CHAT, model_name=getattr(model_config, "model", None), input_text=message, record_content=record_content))
     except StateStoreError:
-        if store:
-            try: store.close()
-            except Exception: pass
+        _best_effort_close(store)
         print("State error: Run store could not be initialized", file=sys.stderr); return 2
     client = MCPStdioClient(config)
     try:
@@ -248,14 +246,14 @@ async def _run_chat_with_mcp(
         if store and run_id:
             try: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_start_failed", error_message="MCP server failed to start")
             except StateStoreError: pass
-        if store: store.close()
+        _best_effort_close(store)
         return 1
     except Exception:
         print("MCP error: MCP chat tool setup failed", file=sys.stderr)
         if store and run_id:
             try: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_start_failed", error_message="MCP server setup failed")
             except StateStoreError: pass
-        if store: store.close()
+        _best_effort_close(store)
         return 1
 
     try:
@@ -286,7 +284,7 @@ async def _run_chat_with_mcp(
             pass
         if isinstance(exc, asyncio.CancelledError) and store and run_id:
             await _best_effort_cancel(store, run_id)
-        if store: store.close()
+        _best_effort_close(store)
         raise
 
     try:
@@ -297,12 +295,12 @@ async def _run_chat_with_mcp(
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
         await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_cleanup_failed", error_message="MCP server cleanup failed")
-        if store: store.close()
+        _best_effort_close(store)
         return 1
     if store and run_id:
         try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED)
         except StateStoreError: return_code = 1
-        store.close()
+        _best_effort_close(store)
     return return_code
 
 
@@ -358,10 +356,10 @@ async def _run_chat(
         await _best_effort_cancel(store, run_id)
         raise
     except Exception:
-        if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="runtime_error", error_message="Runtime execution failed")
+        await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="runtime_error", error_message="Runtime execution failed")
         raise
     finally:
-        if store and owns_store: store.close()
+        if owns_store: _best_effort_close(store)
 
 
 async def _tools(args: argparse.Namespace) -> int:
@@ -726,12 +724,12 @@ async def _run_skill_with_mcp(
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
         await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_start_failed", error_message="MCP server failed to start")
-        if store: store.close()
+        _best_effort_close(store)
         return 1
     except Exception:
         print("MCP error: MCP skill tool setup failed", file=sys.stderr)
         await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_start_failed", error_message="MCP server setup failed")
-        if store: store.close()
+        _best_effort_close(store)
         return 1
     try:
         try:
@@ -769,8 +767,8 @@ async def _run_skill_with_mcp(
         if isinstance(exc, asyncio.CancelledError) and store and run_id:
             await _best_effort_cancel(store, run_id)
         elif store and run_id:
-            await store.finish_run(run_id, RunStatus.FAILED, error_code="runtime_error", error_message="Skill execution failed")
-        if store: store.close()
+            await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="runtime_error", error_message="Skill execution failed")
+        _best_effort_close(store)
         raise
     try:
         await group.__aexit__(None, None, None)
@@ -780,12 +778,12 @@ async def _run_skill_with_mcp(
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
         await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_cleanup_failed", error_message="MCP server cleanup failed")
-        if store: store.close()
+        _best_effort_close(store)
         return 1
     if store and run_id:
         try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED)
         except StateStoreError: return_code = 1
-        store.close()
+        _best_effort_close(store)
     return return_code
 
 
