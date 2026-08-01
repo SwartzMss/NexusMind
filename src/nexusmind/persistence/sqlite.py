@@ -46,8 +46,8 @@ CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC); CREATE 
         row=self.db.execute("SELECT event_count FROM runs WHERE id=?",(run_id,)).fetchone()
         if not row or row[0]>=MAX_EVENTS: raise StateStoreError("Run event limit exceeded")
         seq=row[0]+1; self.db.execute("INSERT INTO run_events VALUES(?,?,?,?,?,?)",(run_id,seq,event.event_type,event.occurred_at.isoformat(),raw.decode(),len(raw))); self.db.execute("UPDATE runs SET event_count=?,updated_at=? WHERE id=?",(seq,_now(),run_id)); self.db.commit()
-    async def finish_run(self, run_id, status, *, error_code=None, error_message=None):
-        now=_now(); self.db.execute("UPDATE runs SET status=?,error_code=?,error_message=?,updated_at=?,finished_at=? WHERE id=? AND status='running'",(status.value,error_code,(error_message or '')[:1024] or None,now,now,run_id)); self.db.commit()
+    async def finish_run(self, run_id, status, *, error_code=None, error_message=None, trace_complete=None):
+        now=_now(); self.db.execute("UPDATE runs SET status=?,error_code=?,error_message=?,trace_complete=COALESCE(?,trace_complete),updated_at=?,finished_at=? WHERE id=? AND status='running'",(status.value,error_code,(error_message or '')[:1024] or None, None if trace_complete is None else int(trace_complete),now,now,run_id)); self.db.commit()
     def list_runs(self, *, limit=20, status=None, kind=None, skill=None):
         limit=max(1,min(int(limit),200)); q="SELECT id,status,kind,started_at,skill_name FROM runs"; vals=[]; filters=[]
         for col,val in (("status",status),("kind",kind),("skill_name",skill)):

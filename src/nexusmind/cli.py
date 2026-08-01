@@ -285,7 +285,7 @@ async def _run_chat(
             if store and run_id:
                 try: await store.append_event(run_id, RunTraceEvent(event.type.value, datetime.now(timezone.utc), project_runtime_event(event)))
                 except Exception:
-                    await store.finish_run(run_id, RunStatus.FAILED, error_code="trace_persist_failed", error_message="Run trace could not be persisted"); return 1
+                    await store.finish_run(run_id, RunStatus.FAILED, error_code="trace_persist_failed", error_message="Run trace could not be persisted", trace_complete=False); return 1
             if event.type == RuntimeEventType.TEXT_DELTA and event.text: print(event.text, end="", flush=True)
             elif event.type == RuntimeEventType.RUN_FAILED: failed = True; print(f"\nModel error: {event.error}", file=sys.stderr)
         if not failed: print()

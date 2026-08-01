@@ -55,3 +55,10 @@ def test_schema_rejects_unsupported_version(tmp_path, version):
     path = tmp_path / "state.db"
     db = sqlite3.connect(path); db.execute("CREATE TABLE schema_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)"); db.execute("INSERT INTO schema_metadata VALUES('version', ?)", (version,)); db.commit(); db.close()
     with pytest.raises(StateStoreError): SQLiteRunStore(path)
+
+def test_trace_failure_marks_trace_incomplete(tmp_path):
+    store = SQLiteRunStore(tmp_path / "state.db")
+    run_id = run(store.start_run(RunStartContext(RunKind.CHAT)))
+    run(store.finish_run(run_id, RunStatus.FAILED, error_code="trace_persist_failed", trace_complete=False))
+    assert store.show_run(run_id)["run"]["trace_complete"] == 0
+    store.close()
