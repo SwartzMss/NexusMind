@@ -210,6 +210,10 @@ async def _run_chat_with_mcp(
     client = MCPStdioClient(config)
     try:
         await client.__aenter__()
+    except asyncio.CancelledError:
+        if store and run_id: await asyncio.shield(store.finish_run(run_id, RunStatus.CANCELLED, error_code="cancelled"))
+        if store: store.close()
+        raise
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
         if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_start_failed", error_message="MCP server failed to start")
@@ -254,6 +258,10 @@ async def _run_chat_with_mcp(
 
     try:
         await client.__aexit__(None, None, None)
+    except asyncio.CancelledError:
+        if store and run_id: await asyncio.shield(store.finish_run(run_id, RunStatus.CANCELLED, error_code="cancelled"))
+        if store: store.close()
+        raise
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
         if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_cleanup_failed", error_message="MCP server cleanup failed")
@@ -664,6 +672,10 @@ async def _run_skill_with_mcp(
     group = MCPClientGroup(configs)
     try:
         await group.__aenter__()
+    except asyncio.CancelledError:
+        if store and run_id: await asyncio.shield(store.finish_run(run_id, RunStatus.CANCELLED, error_code="cancelled"))
+        if store: store.close()
+        raise
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
         if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_start_failed", error_message="MCP server failed to start")
@@ -715,6 +727,10 @@ async def _run_skill_with_mcp(
         raise
     try:
         await group.__aexit__(None, None, None)
+    except asyncio.CancelledError:
+        if store and run_id: await asyncio.shield(store.finish_run(run_id, RunStatus.CANCELLED, error_code="cancelled"))
+        if store: store.close()
+        raise
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
         if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_cleanup_failed", error_message="MCP server cleanup failed")
