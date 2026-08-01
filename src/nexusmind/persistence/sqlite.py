@@ -1,6 +1,6 @@
 from __future__ import annotations
 import hashlib, json, sqlite3, uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from .contracts import RunKind, RunStartContext, RunStatus, RunTraceEvent
 
@@ -61,6 +61,6 @@ CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC); CREATE 
         events=[{"sequence":r[0],"event_type":r[1],"occurred_at":r[2],"payload":json.loads(r[3])} for r in cur.fetchall()]; return {"run":run,"events":events}
     def prune(self, older_than_days):
         if int(older_than_days) < 0: raise ValueError("older-than-days must be non-negative")
-        cutoff=datetime.now(timezone.utc).timestamp()-int(older_than_days)*86400
-        rows=self.db.execute("SELECT id FROM runs WHERE status<>'running' AND strftime('%s',started_at)<?",(int(cutoff),)).fetchall(); self.db.executemany("DELETE FROM runs WHERE id=?",rows); self.db.commit(); return len(rows)
+        cutoff=(datetime.now(timezone.utc)-timedelta(days=int(older_than_days))).isoformat()
+        rows=self.db.execute("SELECT id FROM runs WHERE status<>'running' AND started_at<?",(cutoff,)).fetchall(); self.db.executemany("DELETE FROM runs WHERE id=?",rows); self.db.commit(); return len(rows)
     def close(self): self.db.close()

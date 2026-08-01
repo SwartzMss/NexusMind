@@ -62,3 +62,14 @@ def test_trace_failure_marks_trace_incomplete(tmp_path):
     run(store.finish_run(run_id, RunStatus.FAILED, error_code="trace_persist_failed", trace_complete=False))
     assert store.show_run(run_id)["run"]["trace_complete"] == 0
     store.close()
+
+def test_prune_deletes_old_terminal_runs_but_keeps_running(tmp_path):
+    store = SQLiteRunStore(tmp_path / "state.db")
+    old_id = run(store.start_run(RunStartContext(RunKind.CHAT)))
+    run(store.finish_run(old_id, RunStatus.COMPLETED))
+    running_id = run(store.start_run(RunStartContext(RunKind.CHAT)))
+    store.db.execute("UPDATE runs SET started_at='2020-01-01T00:00:00+00:00' WHERE id IN (?, ?)", (old_id, running_id)); store.db.commit()
+    assert store.prune(30) == 1
+    assert store.show_run(old_id) is None
+    assert store.show_run(running_id) is not None
+    store.close()
