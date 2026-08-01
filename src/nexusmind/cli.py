@@ -247,6 +247,9 @@ async def _run_chat_with_mcp(
             await client.__aexit__(type(exc), exc, exc.__traceback__)
         except BaseException:
             pass
+        if isinstance(exc, asyncio.CancelledError) and store and run_id:
+            await asyncio.shield(store.finish_run(run_id, RunStatus.CANCELLED, error_code="cancelled"))
+        if store: store.close()
         raise
 
     try:
@@ -656,14 +659,20 @@ async def _run_skill_with_mcp(
     limits: AgentLoopLimits,
     state_db: str | None = None, record_content: bool = False,
 ) -> int:
+    store = SQLiteRunStore(state_db) if state_db else None
+    run_id = await store.start_run(RunStartContext(RunKind.SKILL, skill_name=skill.name, model_name=getattr(model_config, "model", None), input_text=message, record_content=record_content)) if store else None
     group = MCPClientGroup(configs)
     try:
         await group.__aenter__()
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
+        if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_start_failed", error_message="MCP server failed to start")
+        if store: store.close()
         return 1
     except Exception:
         print("MCP error: MCP skill tool setup failed", file=sys.stderr)
+        if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_start_failed", error_message="MCP server setup failed")
+        if store: store.close()
         return 1
     try:
         try:
@@ -671,12 +680,15 @@ async def _run_skill_with_mcp(
             tools = resolve_skill_tool_references(skill, registry)
         except SkillError as exc:
             print(_safe_cli_field(str(exc), max_length=240), file=sys.stderr)
+            if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_register_failed", error_message="Skill tool setup failed")
             return_code = 2
         except MCPError as exc:
             print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
+            if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_register_failed", error_message="MCP tool registration failed")
             return_code = 1
         except Exception:
             print("MCP error: MCP chat tool setup failed", file=sys.stderr)
+            if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_register_failed", error_message="MCP tool registration failed")
             return_code = 1
         else:
             return_code = await _run_chat(
@@ -688,18 +700,28 @@ async def _run_skill_with_mcp(
                 limits=limits,
                 workspace=_registry_workspace(registry),
                 state_db=state_db, record_content=record_content, run_kind=RunKind.SKILL, skill_name=skill.name,
+                external_store=store, external_run_id=run_id,
             )
     except BaseException as exc:
         try:
             await group.__aexit__(type(exc), exc, exc.__traceback__)
         except BaseException:
             pass
+        if isinstance(exc, asyncio.CancelledError) and store and run_id:
+            await asyncio.shield(store.finish_run(run_id, RunStatus.CANCELLED, error_code="cancelled"))
+        elif store and run_id:
+            await store.finish_run(run_id, RunStatus.FAILED, error_code="runtime_error", error_message="Skill execution failed")
+        if store: store.close()
         raise
     try:
         await group.__aexit__(None, None, None)
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
+        if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_cleanup_failed", error_message="MCP server cleanup failed")
+        if store: store.close()
         return 1
+    if store and run_id:
+        await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED); store.close()
     return return_code
 
 
