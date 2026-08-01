@@ -33,6 +33,17 @@ from nexusmind.workspace import Workspace, WorkspaceError, resolve_workspace_cre
 from nexusmind.persistence import SQLiteRunStore, StateStoreError, RunKind, RunStartContext, RunStatus, RunTraceEvent
 from datetime import datetime, timezone
 
+async def _best_effort_cancel(store, run_id) -> None:
+    try:
+        if store and run_id:
+            await asyncio.shield(store.finish_run(run_id, RunStatus.CANCELLED, error_code="cancelled"))
+    except BaseException:
+        pass
+    finally:
+        if store:
+            try: store.close()
+            except Exception: pass
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="nexusmind")
@@ -211,8 +222,7 @@ async def _run_chat_with_mcp(
     try:
         await client.__aenter__()
     except asyncio.CancelledError:
-        if store and run_id: await asyncio.shield(store.finish_run(run_id, RunStatus.CANCELLED, error_code="cancelled"))
-        if store: store.close()
+        await _best_effort_cancel(store, run_id)
         raise
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
@@ -252,15 +262,14 @@ async def _run_chat_with_mcp(
         except BaseException:
             pass
         if isinstance(exc, asyncio.CancelledError) and store and run_id:
-            await asyncio.shield(store.finish_run(run_id, RunStatus.CANCELLED, error_code="cancelled"))
+            await _best_effort_cancel(store, run_id)
         if store: store.close()
         raise
 
     try:
         await client.__aexit__(None, None, None)
     except asyncio.CancelledError:
-        if store and run_id: await asyncio.shield(store.finish_run(run_id, RunStatus.CANCELLED, error_code="cancelled"))
-        if store: store.close()
+        await _best_effort_cancel(store, run_id)
         raise
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
@@ -317,7 +326,7 @@ async def _run_chat(
         if store and run_id and owns_store: await store.finish_run(run_id, RunStatus.FAILED if failed else RunStatus.COMPLETED)
         return 1 if failed else 0
     except asyncio.CancelledError:
-        if store and run_id: await asyncio.shield(store.finish_run(run_id, RunStatus.CANCELLED, error_code="cancelled"))
+        await _best_effort_cancel(store, run_id)
         raise
     except Exception:
         if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="runtime_error", error_message="Runtime execution failed")
@@ -673,8 +682,7 @@ async def _run_skill_with_mcp(
     try:
         await group.__aenter__()
     except asyncio.CancelledError:
-        if store and run_id: await asyncio.shield(store.finish_run(run_id, RunStatus.CANCELLED, error_code="cancelled"))
-        if store: store.close()
+        await _best_effort_cancel(store, run_id)
         raise
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
@@ -720,7 +728,7 @@ async def _run_skill_with_mcp(
         except BaseException:
             pass
         if isinstance(exc, asyncio.CancelledError) and store and run_id:
-            await asyncio.shield(store.finish_run(run_id, RunStatus.CANCELLED, error_code="cancelled"))
+            await _best_effort_cancel(store, run_id)
         elif store and run_id:
             await store.finish_run(run_id, RunStatus.FAILED, error_code="runtime_error", error_message="Skill execution failed")
         if store: store.close()
@@ -728,8 +736,7 @@ async def _run_skill_with_mcp(
     try:
         await group.__aexit__(None, None, None)
     except asyncio.CancelledError:
-        if store and run_id: await asyncio.shield(store.finish_run(run_id, RunStatus.CANCELLED, error_code="cancelled"))
-        if store: store.close()
+        await _best_effort_cancel(store, run_id)
         raise
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
