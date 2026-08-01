@@ -44,6 +44,17 @@ async def _best_effort_cancel(store, run_id) -> None:
             try: store.close()
             except Exception: pass
 
+async def _best_effort_finish(store, run_id, status, **kwargs) -> bool:
+    try:
+        if store and run_id: await store.finish_run(run_id, status, **kwargs)
+        return True
+    except StateStoreError: return False
+
+def _best_effort_close(store) -> None:
+    if store:
+        try: store.close()
+        except StateStoreError: pass
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="nexusmind")
@@ -252,11 +263,11 @@ async def _run_chat_with_mcp(
             await register_mcp_tools(client, config.server_id, registry)
         except MCPError as exc:
             print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
-            if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_register_failed", error_message="MCP tool registration failed")
+            await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_register_failed", error_message="MCP tool registration failed")
             return_code = 1
         except Exception:
             print("MCP error: MCP chat tool setup failed", file=sys.stderr)
-            if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_register_failed", error_message="MCP tool registration failed")
+            await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_register_failed", error_message="MCP tool registration failed")
             return_code = 1
         else:
             return_code = await _run_chat(
@@ -285,7 +296,7 @@ async def _run_chat_with_mcp(
         raise
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
-        if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_cleanup_failed", error_message="MCP server cleanup failed")
+        await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_cleanup_failed", error_message="MCP server cleanup failed")
         if store: store.close()
         return 1
     if store and run_id:
@@ -418,7 +429,9 @@ def _runs(args: argparse.Namespace) -> int:
             try: count=store.prune(args.older_than_days)
             except ValueError as exc: print(f"State error: {exc}", file=sys.stderr); return 2
             print(f"Deleted {count} run(s)"); return 0
-    finally: store.close()
+    except StateStoreError:
+        print("State error: Run store operation failed", file=sys.stderr); return 2
+    finally: _best_effort_close(store)
     return 2
 
 
@@ -712,12 +725,12 @@ async def _run_skill_with_mcp(
         raise
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
-        if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_start_failed", error_message="MCP server failed to start")
+        await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_start_failed", error_message="MCP server failed to start")
         if store: store.close()
         return 1
     except Exception:
         print("MCP error: MCP skill tool setup failed", file=sys.stderr)
-        if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_start_failed", error_message="MCP server setup failed")
+        await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_start_failed", error_message="MCP server setup failed")
         if store: store.close()
         return 1
     try:
@@ -726,15 +739,15 @@ async def _run_skill_with_mcp(
             tools = resolve_skill_tool_references(skill, registry)
         except SkillError as exc:
             print(_safe_cli_field(str(exc), max_length=240), file=sys.stderr)
-            if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_register_failed", error_message="Skill tool setup failed")
+            await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_register_failed", error_message="Skill tool setup failed")
             return_code = 2
         except MCPError as exc:
             print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
-            if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_register_failed", error_message="MCP tool registration failed")
+            await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_register_failed", error_message="MCP tool registration failed")
             return_code = 1
         except Exception:
             print("MCP error: MCP chat tool setup failed", file=sys.stderr)
-            if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_register_failed", error_message="MCP tool registration failed")
+            await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_register_failed", error_message="MCP tool registration failed")
             return_code = 1
         else:
             return_code = await _run_chat(
@@ -766,7 +779,7 @@ async def _run_skill_with_mcp(
         raise
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
-        if store and run_id: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_cleanup_failed", error_message="MCP server cleanup failed")
+        await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_cleanup_failed", error_message="MCP server cleanup failed")
         if store: store.close()
         return 1
     if store and run_id:
