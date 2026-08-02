@@ -1,5 +1,6 @@
 import asyncio
 import sqlite3
+import json
 
 from nexusmind.runtime.harness import (
     CheckpointBoundary,
@@ -9,7 +10,10 @@ from nexusmind.runtime.harness import (
     HarnessStatus,
     SQLiteCheckpointStore,
     StopReason,
+    HarnessRequest,
+    HarnessRunner,
 )
+from nexusmind.models.fake import FakeChatModel
 from nexusmind.runtime.messages import Message, MessageRole
 
 
@@ -130,4 +134,51 @@ def test_sqlite_checkpoint_rejects_envelope_mismatch(tmp_path) -> None:
         else:
             raise AssertionError("envelope mismatch must be rejected")
 
+    asyncio.run(run())
+
+
+def test_sqlite_store_rejects_unknown_database_schema(tmp_path) -> None:
+    path = tmp_path / "unknown.db"
+    with sqlite3.connect(path) as db:
+        db.execute("PRAGMA user_version = 99")
+    async def run():
+        try:
+            await SQLiteCheckpointStore(path).initialize()
+        except Exception as exc:
+            assert "schema" in str(exc)
+        else:
+            raise AssertionError("unknown database schema must be rejected")
+    asyncio.run(run())
+
+
+def test_sqlite_store_rejects_unknown_checkpoint_schema(tmp_path) -> None:
+    async def run():
+        path = tmp_path / "schema.db"
+        store = SQLiteCheckpointStore(path)
+        await store.initialize()
+        await store.save(_checkpoint(0))
+        with sqlite3.connect(path) as db:
+            db.execute("UPDATE harness_checkpoints SET payload_json = ?", (json.dumps({"schema_version": 99}),))
+            db.execute("UPDATE harness_checkpoints SET payload_sha256 = ?", (__import__("hashlib").sha256(json.dumps({"schema_version": 99}).encode()).hexdigest(),))
+            db.commit()
+        try:
+            await store.load_latest("run-1")
+        except Exception:
+            pass
+        else:
+            raise AssertionError("unknown checkpoint schema must be rejected")
+    asyncio.run(run())
+
+
+def test_real_harness_execution_checkpoint_round_trip(tmp_path) -> None:
+    async def run():
+        execution = HarnessRunner(FakeChatModel(["done"])).create_execution(
+            HarnessRequest(messages=(Message(role=MessageRole.USER, content="hello"),))
+        )
+        [event async for event in execution.stream()]
+        checkpoint = execution.create_checkpoint("real-run", 0)
+        store = SQLiteCheckpointStore(tmp_path / "real.db")
+        await store.initialize()
+        await store.save(checkpoint)
+        assert (await store.load_latest("real-run")).state.status is HarnessStatus.COMPLETED
     asyncio.run(run())

@@ -14,10 +14,15 @@ class SQLiteCheckpointStore:
     def __init__(self, db_path: str | Path) -> None:
         self._path = str(db_path)
         self._initialized = False
+        self._closed = False
 
     async def initialize(self) -> None:
         await asyncio.to_thread(self._initialize)
         self._initialized = True
+        self._closed = False
+
+    async def close(self) -> None:
+        self._closed = True
 
     def _connect(self):
         connection = sqlite3.connect(self._path, timeout=10, isolation_level=None)
@@ -38,7 +43,7 @@ class SQLiteCheckpointStore:
             db.execute("PRAGMA user_version = 1")
 
     def _require(self):
-        if not self._initialized:
+        if not self._initialized or self._closed:
             raise CheckpointStoreError("Checkpoint store is not initialized")
 
     async def save(self, checkpoint: HarnessCheckpoint) -> None:
