@@ -66,11 +66,11 @@ CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC); CREATE 
         raw=json.dumps(event.payload,ensure_ascii=False,allow_nan=False,separators=(',',':')).encode()
         if len(raw)>MAX_EVENT_BYTES: raise StateStoreError("Run event payload exceeds limit")
         row=self.db.execute("SELECT event_count FROM runs WHERE id=?",(run_id,)).fetchone()
-        if not row or row[0]>=MAX_EVENTS: raise StateStoreError("Run event limit exceeded")
+        if not row or row[0]>=MAX_EVENTS-1: raise StateStoreError("Run event limit exceeded")
         seq=row[0]+1; self.db.execute("INSERT INTO run_events VALUES(?,?,?,?,?,?)",(run_id,seq,event.event_type,event.occurred_at.isoformat(),raw.decode(),len(raw))); self.db.execute("UPDATE runs SET event_count=?,updated_at=? WHERE id=?",(seq,_now(),run_id)); self.db.commit()
     @_async_db_error
-    async def finish_run(self, run_id, status, *, error_code=None, error_message=None, trace_complete=None):
-        now=_now(); cur=self.db.execute("UPDATE runs SET status=?,error_code=?,error_message=?,trace_complete=COALESCE(?,trace_complete),updated_at=?,finished_at=? WHERE id=? AND status='running'",(status.value,error_code,(error_message or '')[:1024] or None, None if trace_complete is None else int(trace_complete),now,now,run_id))
+    async def finish_run(self, run_id, status, *, error_code=None, error_message=None, trace_complete=None, final_text=None):
+        now=_now(); cur=self.db.execute("UPDATE runs SET status=?,error_code=?,error_message=?,trace_complete=COALESCE(?,trace_complete),final_text=COALESCE(?,final_text),updated_at=?,finished_at=? WHERE id=? AND status='running'",(status.value,error_code,(error_message or '')[:1024] or None, None if trace_complete is None else int(trace_complete), (final_text or '')[:MAX_FINAL_TEXT] or None,now,now,run_id))
         if cur.rowcount: 
             seq=self.db.execute("SELECT event_count FROM runs WHERE id=?",(run_id,)).fetchone()[0]+1; event_type={RunStatus.COMPLETED:"run_completed",RunStatus.FAILED:"run_failed",RunStatus.CANCELLED:"run_cancelled",RunStatus.ABANDONED:"run_abandoned"}.get(status)
             if event_type:

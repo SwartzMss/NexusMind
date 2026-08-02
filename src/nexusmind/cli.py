@@ -233,7 +233,7 @@ async def _run_chat_with_mcp(
     store = None; run_id = None
     try:
         if state_db:
-            store = SQLiteRunStore(state_db, recover_abandoned=True)
+            store = SQLiteRunStore(state_db)
             run_id = await store.start_run(RunStartContext(RunKind.CHAT, model_name=getattr(model_config, "model", None), input_text=message, record_content=record_content))
     except StateStoreError:
         _best_effort_close(store)
@@ -324,7 +324,7 @@ async def _run_chat(
     store = external_store; run_id = external_run_id; owns_store = store is None
     if state_db and store is None:
         try:
-            store = SQLiteRunStore(state_db, recover_abandoned=True)
+            store = SQLiteRunStore(state_db)
             run_id = await store.start_run(RunStartContext(run_kind, skill_name=skill_name, model_name=getattr(model_config, "model", None), input_text=message, record_content=record_content))
         except StateStoreError:
             _best_effort_close(store)
@@ -337,7 +337,7 @@ async def _run_chat(
         limits=limits,
     )
     tools = registry.list_definitions() if tools is None else tools
-    failed = False
+    failed = False; final_text = []
     stream_kwargs = {"tools": tools}
     if system_prompt is not None:
         stream_kwargs["system_prompt"] = system_prompt
@@ -349,11 +349,12 @@ async def _run_chat(
                     try: await store.finish_run(run_id, RunStatus.FAILED, error_code="trace_persist_failed", error_message="Run trace could not be persisted", trace_complete=False)
                     except StateStoreError: pass
                     return 1
-            if event.type == RuntimeEventType.TEXT_DELTA and event.text: print(event.text, end="", flush=True)
+            if event.type == RuntimeEventType.TEXT_DELTA and event.text:
+                final_text.append(event.text); print(event.text, end="", flush=True)
             elif event.type == RuntimeEventType.RUN_FAILED: failed = True; print(f"\nModel error: {event.error}", file=sys.stderr)
         if not failed: print()
         if store and run_id and owns_store:
-            try: await store.finish_run(run_id, RunStatus.FAILED if failed else RunStatus.COMPLETED)
+            try: await store.finish_run(run_id, RunStatus.FAILED if failed else RunStatus.COMPLETED, final_text=''.join(final_text) if record_content else None)
             except StateStoreError: return 1
         return 1 if failed else 0
     except asyncio.CancelledError:
@@ -712,7 +713,7 @@ async def _run_skill_with_mcp(
     store = None; run_id = None
     try:
         if state_db:
-            store = SQLiteRunStore(state_db, recover_abandoned=True)
+            store = SQLiteRunStore(state_db)
             run_id = await store.start_run(RunStartContext(RunKind.SKILL, skill_name=skill.name, model_name=getattr(model_config, "model", None), input_text=message, record_content=record_content))
     except StateStoreError:
         if store:
