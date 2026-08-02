@@ -149,6 +149,10 @@ class ToolExecutor:
                 await asyncio.wait_for(asyncio.shield(invoke_task), timeout=TOOL_CANCEL_GRACE_SECONDS)
             except asyncio.TimeoutError:
                 raise cancellation
+            except asyncio.CancelledError:
+                raise cancellation
+            except Exception as exc:
+                return _return_with_budget(_failure(call, ToolErrorCode.EXECUTION_FAILED, str(exc) or "Tool execution failed"), result_budget)
             while not invoke_task.done():
                 try:
                     await asyncio.shield(invoke_task)
