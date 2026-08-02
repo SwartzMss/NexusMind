@@ -312,6 +312,8 @@ async def _run_chat_with_mcp(
         except StateStoreError:
             print("State error: Run final status could not be persisted", file=sys.stderr); return_code = 1
         _best_effort_close(store)
+    elif store:
+        _best_effort_close(store)
     return return_code
 
 
@@ -464,6 +466,9 @@ def _runs(args: argparse.Namespace) -> int:
             if item is None: print("Run error: run not found",file=sys.stderr); return 2
             if args.json: print(json.dumps(item,default=str,ensure_ascii=False)); return 0
             print("Run ID\t"+str(item["run"]["id"])); print("Status\t"+str(item["run"]["status"])); print("Events\t"+str(len(item["events"])))
+            print("Trace complete\t"+str(bool(item["run"].get("trace_complete"))))
+            if item["run"].get("error_code"): print("Error code\t"+str(item["run"]["error_code"]))
+            if item["run"].get("error_message"): print("Error message\t"+str(item["run"]["error_message"]))
             for e in item["events"]:
                 p=e["payload"]; summary=" ".join(f"{k}={p[k]}" for k in ("tool_name","risk_level","decision","path","committed","exit_code","server_id","remote_tool_name") if k in p)
                 print(f"{e['sequence']}\t{e['event_type']}\t{e['occurred_at']}" + (f"\t{summary}" if summary else ""))
@@ -831,6 +836,8 @@ async def _run_skill_with_mcp(
         try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED, error_code=failure_sink.get("error_code"), error_message=failure_sink.get("message"), trace_complete=failure_sink.get("trace_complete"), final_text=''.join(text_sink) if record_content else None)
         except StateStoreError:
             print("State error: Run final status could not be persisted", file=sys.stderr); return_code = 1
+        _best_effort_close(store)
+    elif store:
         _best_effort_close(store)
     return return_code
 
