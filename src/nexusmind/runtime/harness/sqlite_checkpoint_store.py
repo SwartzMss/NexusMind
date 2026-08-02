@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import sqlite3
+from contextlib import closing
 from copy import deepcopy
 from pathlib import Path
 from .checkpoint import HarnessCheckpoint
@@ -31,7 +32,7 @@ class SQLiteCheckpointStore:
 
     def _initialize(self):
         try:
-            with self._connect() as db:
+            with closing(self._connect()) as db:
                 db.execute("BEGIN IMMEDIATE")
                 version = db.execute("PRAGMA user_version").fetchone()[0]
                 if version not in (0, 1):
@@ -46,25 +47,28 @@ class SQLiteCheckpointStore:
                     db.execute("PRAGMA user_version = 1")
                 elif not table_exists:
                     raise CheckpointStoreError("Checkpoint schema is missing")
-            expected = {"checkpoint_id": ("TEXT", 0, 1), "run_id": ("TEXT", 1, 0), "sequence": ("INTEGER", 1, 0), "checkpoint_schema_version": ("INTEGER", 1, 0), "boundary": ("TEXT", 1, 0), "created_at": ("TEXT", 1, 0), "payload_json": ("TEXT", 1, 0), "payload_sha256": ("TEXT", 1, 0)}
-            actual = {row[1]: (row[2].upper(), row[3], row[5]) for row in db.execute("PRAGMA table_info(harness_checkpoints)")}
-            if actual != expected:
-                raise CheckpointStoreError("Checkpoint database schema is incomplete or incompatible")
-            table_sql = (db.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'harness_checkpoints'").fetchone() or ("",))[0] or ""
-            if "UNIQUE(run_id,sequence)" not in table_sql.replace(" ", ""):
-                raise CheckpointStoreError("Checkpoint database is missing the run sequence uniqueness constraint")
-                index = db.execute("PRAGMA index_list(harness_checkpoints)").fetchall()
-                index_name = next((row[1] for row in index if row[1] == "idx_harness_checkpoints_run_sequence"), None)
-                if index_name is None:
-                    raise CheckpointStoreError("Checkpoint sequence index is missing")
-                columns = [row[2] for row in db.execute(f"PRAGMA index_info({index_name})")]
-                if columns != ["run_id", "sequence"]:
-                    raise CheckpointStoreError("Checkpoint sequence index is invalid")
+                self._validate_v1_schema(db)
                 db.commit()
         except CheckpointStoreError:
             raise
         except sqlite3.Error as exc:
             raise CheckpointStoreError("SQLite checkpoint initialization failed") from exc
+
+    @staticmethod
+    def _validate_v1_schema(db) -> None:
+        expected = {"checkpoint_id": ("TEXT", 0, 1), "run_id": ("TEXT", 1, 0), "sequence": ("INTEGER", 1, 0), "checkpoint_schema_version": ("INTEGER", 1, 0), "boundary": ("TEXT", 1, 0), "created_at": ("TEXT", 1, 0), "payload_json": ("TEXT", 1, 0), "payload_sha256": ("TEXT", 1, 0)}
+        actual = {row[1]: (row[2].upper(), row[3], row[5]) for row in db.execute("PRAGMA table_info(harness_checkpoints)")}
+        if actual != expected:
+            raise CheckpointStoreError("Checkpoint database schema is incomplete or incompatible")
+        table_sql = (db.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'harness_checkpoints'").fetchone() or ("",))[0] or ""
+        if "UNIQUE(run_id,sequence)" not in table_sql.replace(" ", ""):
+            raise CheckpointStoreError("Checkpoint database is missing the run sequence uniqueness constraint")
+        indexes = db.execute("PRAGMA index_list(harness_checkpoints)").fetchall()
+        index_name = next((row[1] for row in indexes if row[1] == "idx_harness_checkpoints_run_sequence"), None)
+        if index_name is None:
+            raise CheckpointStoreError("Checkpoint sequence index is missing")
+        if [row[2] for row in db.execute(f"PRAGMA index_info({index_name})")] != ["run_id", "sequence"]:
+            raise CheckpointStoreError("Checkpoint sequence index is invalid")
 
     def _require(self):
         if not self._initialized or self._closed:
@@ -76,7 +80,7 @@ class SQLiteCheckpointStore:
     def _save(self, checkpoint):
         checkpoint.validate(); payload = checkpoint_to_json(checkpoint); digest = hashlib.sha256(payload.encode()).hexdigest()
         try:
-            with self._connect() as db:
+            with closing(self._connect()) as db:
                 db.execute("BEGIN IMMEDIATE")
                 latest = db.execute("SELECT checkpoint_id, run_id, sequence, checkpoint_schema_version, boundary, created_at, payload_json, payload_sha256 FROM harness_checkpoints WHERE run_id = ? ORDER BY sequence DESC LIMIT 1", (checkpoint.run_id,)).fetchone()
                 if latest is not None:
@@ -99,7 +103,7 @@ class SQLiteCheckpointStore:
 
     def _load_latest(self, run_id):
         try:
-            with self._connect() as db:
+            with closing(self._connect()) as db:
                 row = db.execute("SELECT checkpoint_id, run_id, sequence, checkpoint_schema_version, boundary, created_at, payload_json, payload_sha256 FROM harness_checkpoints WHERE run_id = ? ORDER BY sequence DESC LIMIT 1", (run_id,)).fetchone()
             return self._decode_row(row) if row else None
         except CheckpointStoreError:
@@ -112,7 +116,7 @@ class SQLiteCheckpointStore:
 
     def _list(self, run_id):
         try:
-            with self._connect() as db:
+            with closing(self._connect()) as db:
                 rows = db.execute("SELECT checkpoint_id, run_id, sequence, checkpoint_schema_version, boundary, created_at, payload_json, payload_sha256 FROM harness_checkpoints WHERE run_id = ? ORDER BY sequence ASC", (run_id,)).fetchall()
             return tuple(self._decode_row(row) for row in rows)
         except CheckpointStoreError:
