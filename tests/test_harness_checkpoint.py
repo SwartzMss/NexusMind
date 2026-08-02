@@ -34,7 +34,7 @@ def test_checkpoint_rejects_non_finite_numbers() -> None:
 def test_checkpoint_store_enforces_sequence_and_latest() -> None:
     async def run():
         store = InMemoryCheckpointStore()
-        state = HarnessState(messages=[])
+        state = HarnessState(messages=[Message(role=MessageRole.USER, content="hello")])
         first = HarnessCheckpoint.create(state, "run-1", 0, CheckpointBoundary.BEFORE_MODEL)
         state.status = HarnessStatus.COMPLETED
         state.stop_reason = StopReason.MODEL_COMPLETED
