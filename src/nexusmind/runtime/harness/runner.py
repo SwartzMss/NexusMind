@@ -31,10 +31,11 @@ class _ResumeToolBatchModel:
                 yield event
             return
         self._first = False
-        yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+        internal = {"resume_internal": True}
+        yield RuntimeEvent(RuntimeEventType.MODEL_STARTED, metadata=internal)
         for call in self._calls:
-            yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=deepcopy(call))
-        yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+            yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=deepcopy(call), metadata=internal)
+        yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls", metadata=internal)
 
 class HarnessExecution:
     def __init__(self, runner: "HarnessRunner", request: HarnessRequest) -> None:
@@ -281,6 +282,8 @@ class HarnessRunner:
                 _skip_assistant_message=bool(request.metadata.get("resume_existing_assistant")),
                 _resume_tool_batch=bool(request.metadata.get("resume_tool_batch")),
             ):
+                if event.metadata.get("resume_internal"):
+                    continue
                 if event.type is RuntimeEventType.RUN_STARTED and request.metadata.get("resumed"):
                     event = replace(
                         event,
