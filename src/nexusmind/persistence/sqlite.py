@@ -53,6 +53,15 @@ class SQLiteRunStore:
             if recover_abandoned: self.recover_abandoned()
         except (OSError, sqlite3.Error) as exc: raise StateStoreError("Run store could not be initialized") from exc
     def _schema(self):
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            self._schema_transaction()
+            self.db.commit()
+        except BaseException:
+            try: self.db.rollback()
+            except BaseException: pass
+            raise
+    def _schema_transaction(self):
         metadata_exists=self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_metadata'").fetchone()
         if metadata_exists:
             row=self.db.execute("SELECT value FROM schema_metadata WHERE key='version'").fetchone()
@@ -60,12 +69,11 @@ class SQLiteRunStore:
             return
         existing=self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table'").fetchone()
         if existing: raise StateStoreError("Unsupported state database schema version")
-        self.db.executescript('''CREATE TABLE IF NOT EXISTS schema_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY,schema_version INTEGER NOT NULL,execution_id TEXT NOT NULL,kind TEXT NOT NULL,status TEXT NOT NULL,skill_name TEXT,model_name TEXT,input_preview TEXT,input_sha256 TEXT,final_text TEXT,error_code TEXT,error_message TEXT,trace_complete INTEGER NOT NULL DEFAULT 1,event_count INTEGER NOT NULL DEFAULT 0,started_at TEXT NOT NULL,updated_at TEXT NOT NULL,finished_at TEXT);
-CREATE TABLE IF NOT EXISTS run_events(run_id TEXT NOT NULL,sequence INTEGER NOT NULL,event_type TEXT NOT NULL,occurred_at TEXT NOT NULL,payload_json TEXT NOT NULL,payload_bytes INTEGER NOT NULL,PRIMARY KEY(run_id,sequence),FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE);
-CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC); CREATE INDEX IF NOT EXISTS idx_runs_status_started ON runs(status,started_at DESC);''')
+        self.db.execute("CREATE TABLE schema_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+        self.db.execute("CREATE TABLE runs(id TEXT PRIMARY KEY,schema_version INTEGER NOT NULL,execution_id TEXT NOT NULL,kind TEXT NOT NULL,status TEXT NOT NULL,skill_name TEXT,model_name TEXT,input_preview TEXT,input_sha256 TEXT,final_text TEXT,error_code TEXT,error_message TEXT,trace_complete INTEGER NOT NULL DEFAULT 1,event_count INTEGER NOT NULL DEFAULT 0,started_at TEXT NOT NULL,updated_at TEXT NOT NULL,finished_at TEXT)")
+        self.db.execute("CREATE TABLE run_events(run_id TEXT NOT NULL,sequence INTEGER NOT NULL,event_type TEXT NOT NULL,occurred_at TEXT NOT NULL,payload_json TEXT NOT NULL,payload_bytes INTEGER NOT NULL,PRIMARY KEY(run_id,sequence),FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE)")
+        self.db.execute("CREATE INDEX idx_runs_started_at ON runs(started_at DESC)"); self.db.execute("CREATE INDEX idx_runs_status_started ON runs(status,started_at DESC)")
         self.db.execute("INSERT INTO schema_metadata VALUES('version','1')")
-        self.db.commit()
     def _recover_abandoned(self):
         now=_now(); rows=self.db.execute("SELECT id FROM runs WHERE status='running' AND execution_id<>?",(self.execution_id,)).fetchall()
         for (run_id,) in rows:
@@ -97,6 +105,7 @@ CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC); CREATE 
         if status is RunStatus.RUNNING: raise StateStoreError("Run finish status must be terminal")
         bounded=(final_text or '').encode('utf-8')[:MAX_FINAL_TEXT].decode('utf-8','ignore') or None
         now=_now(); cur=self.db.execute("UPDATE runs SET status=?,error_code=?,error_message=?,trace_complete=COALESCE(?,trace_complete),final_text=COALESCE(?,final_text),updated_at=?,finished_at=? WHERE id=? AND status='running'",(status.value,error_code,(error_message or '')[:1024] or None, None if trace_complete is None else int(trace_complete), bounded,now,now,run_id))
+        if cur.rowcount == 0: raise StateStoreError("Run does not exist or is already terminal")
         if cur.rowcount: 
             seq=self.db.execute("SELECT event_count FROM runs WHERE id=?",(run_id,)).fetchone()[0]+1; event_type={RunStatus.COMPLETED:"run_completed",RunStatus.FAILED:"run_failed",RunStatus.CANCELLED:"run_cancelled",RunStatus.ABANDONED:"run_abandoned"}.get(status)
             if event_type:
