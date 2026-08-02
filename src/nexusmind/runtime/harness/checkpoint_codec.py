@@ -61,7 +61,7 @@ def checkpoint_from_json(payload: str) -> HarnessCheckpoint:
         for item in raw["messages"]:
             if not isinstance(item, dict) or set(item) != {"role", "content", "name", "tool_call_id", "tool_calls", "metadata"}:
                 raise CheckpointDecodeError("Invalid message fields")
-            if type(item["tool_calls"]) is not list or type(item["metadata"]) is not dict:
+            if type(item["tool_calls"]) is not list or not isinstance(item["metadata"], dict):
                 raise CheckpointDecodeError("Invalid message value types")
             if item["content"] is not None and type(item["content"]) is not str:
                 raise CheckpointDecodeError("Invalid message content type")

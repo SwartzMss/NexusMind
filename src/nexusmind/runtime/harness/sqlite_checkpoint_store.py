@@ -14,6 +14,8 @@ class CheckpointStoreError(RuntimeError):
 class SQLiteCheckpointStore:
     def __init__(self, db_path: str | Path) -> None:
         self._path = str(db_path)
+        if self._path in {"", ":memory:"}:
+            raise ValueError("SQLiteCheckpointStore requires a persistent database path")
         self._initialized = False
         self._closed = False
 
@@ -60,15 +62,21 @@ class SQLiteCheckpointStore:
         actual = {row[1]: (row[2].upper(), row[3], row[5]) for row in db.execute("PRAGMA table_info(harness_checkpoints)")}
         if actual != expected:
             raise CheckpointStoreError("Checkpoint database schema is incomplete or incompatible")
-        table_sql = (db.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'harness_checkpoints'").fetchone() or ("",))[0] or ""
-        if "UNIQUE(run_id,sequence)" not in table_sql.replace(" ", ""):
-            raise CheckpointStoreError("Checkpoint database is missing the run sequence uniqueness constraint")
         indexes = db.execute("PRAGMA index_list(harness_checkpoints)").fetchall()
-        index_name = next((row[1] for row in indexes if row[1] == "idx_harness_checkpoints_run_sequence"), None)
-        if index_name is None:
-            raise CheckpointStoreError("Checkpoint sequence index is missing")
-        if [row[2] for row in db.execute(f"PRAGMA index_info({index_name})")] != ["run_id", "sequence"]:
-            raise CheckpointStoreError("Checkpoint sequence index is invalid")
+        unique_run_sequence = False
+        query_index = False
+        for row in indexes:
+            index_name, is_unique, is_partial = row[1], row[2], row[4]
+            safe_index_name = index_name.replace('"', '""')
+            columns = [item[2] for item in db.execute(f'PRAGMA index_info("{safe_index_name}")')]
+            if is_unique == 1 and is_partial == 0 and columns == ["run_id", "sequence"]:
+                unique_run_sequence = True
+            if index_name == "idx_harness_checkpoints_run_sequence" and columns == ["run_id", "sequence"]:
+                query_index = True
+        if not unique_run_sequence:
+            raise CheckpointStoreError("Checkpoint database is missing the run sequence uniqueness constraint")
+        if not query_index:
+            raise CheckpointStoreError("Checkpoint sequence index is missing or invalid")
 
     def _require(self):
         if not self._initialized or self._closed:
