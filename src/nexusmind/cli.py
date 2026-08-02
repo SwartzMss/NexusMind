@@ -34,11 +34,13 @@ from nexusmind.persistence import SQLiteRunStore, StateStoreError, RunKind, RunS
 from datetime import datetime, timezone
 
 async def _best_effort_cancel(store, run_id) -> None:
+    task = None
     try:
         if store and run_id:
-            await asyncio.shield(store.finish_run(run_id, RunStatus.CANCELLED, error_code="cancelled"))
+            task = asyncio.create_task(store.finish_run(run_id, RunStatus.CANCELLED, error_code="cancelled"))
+            await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
     except BaseException:
-        pass
+        if task is not None and not task.done(): task.cancel()
     finally:
         if store:
             try: store.close()
@@ -340,23 +342,31 @@ async def _run_chat(
         limits=limits,
     )
     tools = registry.list_definitions() if tools is None else tools
-    failed = False; final_text = []
+    failed = False; final_text = []; current_text = []; current_text_bytes = 0
     stream_kwargs = {"tools": tools}
     if system_prompt is not None:
         stream_kwargs["system_prompt"] = system_prompt
     try:
         async for event in runtime.stream_user_message(message, **stream_kwargs):
+            if event.type == RuntimeEventType.MODEL_STARTED:
+                current_text.clear(); current_text_bytes = 0
             if store and run_id and event.type not in {RuntimeEventType.RUN_STARTED, RuntimeEventType.RUN_COMPLETED, RuntimeEventType.RUN_FAILED, RuntimeEventType.TEXT_DELTA, RuntimeEventType.TOOL_CALL_DELTA}:
-                try: await store.append_event(run_id, RunTraceEvent(event.type.value, datetime.now(timezone.utc), project_runtime_event(event)))
+                try:
+                    projected = project_runtime_event(event)
+                    if event.type == RuntimeEventType.MODEL_TURN_COMPLETED: projected["text_bytes"] = current_text_bytes
+                    await store.append_event(run_id, RunTraceEvent(event.type.value, datetime.now(timezone.utc), projected))
                 except StateStoreError:
                     try: await store.finish_run(run_id, RunStatus.FAILED, error_code="trace_persist_failed", error_message="Run trace could not be persisted", trace_complete=False)
                     except StateStoreError: pass
-                    return 1
+                    message = "Run trace could not be persisted after tool execution" if event.type == RuntimeEventType.TOOL_RESULT else "Run trace could not be persisted"
+                    print(message, file=sys.stderr); return 1
             if event.type == RuntimeEventType.TEXT_DELTA and event.text:
-                if record_content and store and run_id:
-                    current=_truncate_utf8(''.join(final_text)+event.text, 1024*1024); final_text.clear(); final_text.append(current)
-                    if final_text_sink is not None: final_text_sink.clear(); final_text_sink.append(current)
+                current_text.append(event.text); current_text_bytes += len(event.text.encode())
                 print(event.text, end="", flush=True)
+            elif event.type == RuntimeEventType.MODEL_TURN_COMPLETED and event.finish_reason != "tool_calls":
+                if record_content and store and run_id:
+                    current=_truncate_utf8(''.join(current_text), 1024*1024); final_text.clear(); final_text.append(current)
+                    if final_text_sink is not None: final_text_sink.clear(); final_text_sink.append(current)
             elif event.type == RuntimeEventType.RUN_FAILED: failed = True; print(f"\nModel error: {event.error}", file=sys.stderr)
         if not failed: print()
         if store and run_id and owns_store:
