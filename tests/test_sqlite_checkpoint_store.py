@@ -95,3 +95,39 @@ def test_sqlite_checkpoint_rejects_duplicate_checkpoint_id(tmp_path) -> None:
             raise AssertionError("duplicate checkpoint id must be rejected")
 
     asyncio.run(run())
+
+
+def test_two_sqlite_stores_allow_only_one_same_sequence(tmp_path) -> None:
+    async def run():
+        path = tmp_path / "checkpoints.db"
+        first_store = SQLiteCheckpointStore(path)
+        second_store = SQLiteCheckpointStore(path)
+        await first_store.initialize()
+        await second_store.initialize()
+        results = await asyncio.gather(
+            first_store.save(_checkpoint(0)),
+            second_store.save(_checkpoint(0)),
+            return_exceptions=True,
+        )
+        assert sum(result is None for result in results) == 1
+
+    asyncio.run(run())
+
+
+def test_sqlite_checkpoint_rejects_envelope_mismatch(tmp_path) -> None:
+    async def run():
+        path = tmp_path / "checkpoints.db"
+        store = SQLiteCheckpointStore(path)
+        await store.initialize()
+        await store.save(_checkpoint(0))
+        with sqlite3.connect(path) as db:
+            db.execute("UPDATE harness_checkpoints SET boundary = 'after_model'")
+            db.commit()
+        try:
+            await store.load_latest("run-1")
+        except Exception as exc:
+            assert "envelope" in str(exc)
+        else:
+            raise AssertionError("envelope mismatch must be rejected")
+
+    asyncio.run(run())
