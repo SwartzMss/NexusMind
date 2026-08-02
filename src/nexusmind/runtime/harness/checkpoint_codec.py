@@ -24,9 +24,15 @@ def checkpoint_to_json(checkpoint: HarnessCheckpoint) -> str:
 
 def checkpoint_from_json(payload: str) -> HarnessCheckpoint:
     try:
+        if type(payload) is not str:
+            raise CheckpointDecodeError("Checkpoint payload must be text")
         data = json.loads(payload)
         if type(data) is not dict or set(data) != {"schema_version", "checkpoint_id", "run_id", "sequence", "boundary", "created_at", "state"}:
             raise CheckpointDecodeError("Invalid checkpoint fields")
+        if type(data["schema_version"]) is not int or data["schema_version"] != 1:
+            raise CheckpointDecodeError("Unsupported checkpoint schema version")
+        if type(data["sequence"]) is not int or data["sequence"] < 0:
+            raise CheckpointDecodeError("Invalid checkpoint sequence")
         raw = data["state"]
         required = {"messages", "model_turns", "tool_calls_total", "tool_argument_bytes_total", "tool_result_bytes_total", "started_tool_call_ids", "executed_tool_call_ids", "status", "stop_reason", "phase"}
         if type(raw) is not dict or set(raw) != required:
@@ -35,6 +41,8 @@ def checkpoint_from_json(payload: str) -> HarnessCheckpoint:
         for item in raw["messages"]:
             if type(item) is not dict or set(item) != {"role", "content", "name", "tool_call_id", "tool_calls", "metadata"}:
                 raise CheckpointDecodeError("Invalid message fields")
+            if type(item["tool_calls"]) is not list or type(item["metadata"]) is not dict:
+                raise CheckpointDecodeError("Invalid message value types")
             calls = tuple(ToolCall(id=c["id"], name=c["name"], arguments=c["arguments"]) for c in item["tool_calls"])
             messages.append(Message(role=MessageRole(item["role"]), content=item["content"], name=item["name"], tool_call_id=item["tool_call_id"], tool_calls=calls, metadata=item["metadata"]))
         from nexusmind.runtime.harness.checkpoint import HarnessStateSnapshot
