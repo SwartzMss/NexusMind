@@ -43,6 +43,7 @@ class HarnessExecution:
         self.stop_reason: StopReason | None = None
         self._resume_complete = False
         self._resume_source = None
+        self._resume_limit_exceeded = False
 
     def create_checkpoint(self, run_id: str, sequence: int, boundary: CheckpointBoundary | None = None) -> HarnessCheckpoint:
         if self._resume_source is not None:
@@ -66,6 +67,14 @@ class HarnessExecution:
             self.state.phase = HarnessPhase.TERMINAL
             self.stop_reason = StopReason.MODEL_COMPLETED
             yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
+            return
+        if self._resume_limit_exceeded:
+            yield RuntimeEvent(RuntimeEventType.RUN_STARTED, metadata={"resumed": True, "checkpoint_id": self._resume_source.checkpoint_id, "checkpoint_sequence": self._resume_source.sequence, "checkpoint_boundary": self._resume_source.boundary.value})
+            self.state.status = HarnessStatus.FAILED
+            self.state.stop_reason = StopReason.LIMIT_EXCEEDED
+            self.state.phase = HarnessPhase.TERMINAL
+            self.stop_reason = StopReason.LIMIT_EXCEEDED
+            yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error="Agent loop limit exceeded", metadata={"stop_reason": StopReason.LIMIT_EXCEEDED.value})
             return
         try:
           async for event in self._runner._stream(self._request, self.state):
@@ -133,11 +142,15 @@ class HarnessRunner:
         checkpoint = request.checkpoint
         state = state_from_checkpoint(checkpoint) if checkpoint.state.phase is HarnessPhase.BEFORE_MODEL else None
         if checkpoint.state.phase in {HarnessPhase.AFTER_MODEL, HarnessPhase.BEFORE_TOOL, HarnessPhase.AFTER_TOOL}:
-            assistants = [message for message in checkpoint.state.messages if message.role.value == "assistant"]
+            messages = checkpoint.state.messages
+            assistants = [message for message in messages if message.role.value == "assistant"]
             if not assistants:
                 raise HarnessResumeStateError("Checkpoint has no resumable Assistant Tool Call batch")
-            if checkpoint.state.phase is HarnessPhase.AFTER_MODEL and assistants[-1] is not checkpoint.state.messages[-1]:
+            last = messages[-1]
+            if checkpoint.state.phase is HarnessPhase.AFTER_MODEL and last is not assistants[-1]:
                 raise HarnessResumeStateError("AFTER_MODEL checkpoint has trailing transcript entries")
+            if checkpoint.state.phase in {HarnessPhase.BEFORE_TOOL, HarnessPhase.AFTER_TOOL} and last is not assistants[-1]:
+                raise HarnessResumeStateError("Tool checkpoint has trailing transcript entries")
             pending = tuple(call for call in assistants[-1].tool_calls if call.id not in checkpoint.state.executed_tool_call_ids)
             if checkpoint.state.phase is HarnessPhase.AFTER_MODEL and not assistants[-1].tool_calls:
                 state = HarnessState(messages=deepcopy(list(checkpoint.state.messages)), model_turns=checkpoint.state.model_turns, tool_calls_total=checkpoint.state.tool_calls_total, tool_argument_bytes_total=checkpoint.state.tool_argument_bytes_total, tool_result_bytes_total=checkpoint.state.tool_result_bytes_total, started_tool_call_ids=set(checkpoint.state.started_tool_call_ids), executed_tool_call_ids=set(checkpoint.state.executed_tool_call_ids), status=checkpoint.state.status, phase=checkpoint.state.phase)
@@ -165,17 +178,26 @@ class HarnessRunner:
         limits = request.limits or self._default_limits
         if state.model_turns > limits.max_model_turns or state.tool_calls_total > limits.max_tool_calls_total or state.tool_argument_bytes_total > limits.max_tool_arguments_bytes_total or state.tool_result_bytes_total > limits.max_tool_result_bytes_total:
             raise HarnessResumeCompatibilityError("Checkpoint consumption exceeds selected limits")
+        needs_model = checkpoint.state.phase is HarnessPhase.BEFORE_MODEL or bool(
+            checkpoint.state.phase in {HarnessPhase.BEFORE_TOOL, HarnessPhase.AFTER_TOOL}
+            and state.phase is HarnessPhase.BEFORE_MODEL
+        )
+        if needs_model and state.model_turns >= limits.max_model_turns:
+            execution_limit_exceeded = True
+        else:
+            execution_limit_exceeded = False
         harness_request = HarnessRequest(
             messages=tuple(state.messages),
             tools=tuple(deepcopy(request.tools)),
             limits=limits,
-            metadata={"resumed": True, "checkpoint_id": request.checkpoint.checkpoint_id, "checkpoint_sequence": request.checkpoint.sequence},
+            metadata={"resumed": True, "checkpoint_id": request.checkpoint.checkpoint_id, "checkpoint_sequence": request.checkpoint.sequence, "checkpoint_boundary": request.checkpoint.boundary.value},
         )
         if checkpoint.state.phase in {HarnessPhase.BEFORE_TOOL, HarnessPhase.AFTER_TOOL}:
             harness_request = HarnessRequest(messages=harness_request.messages, tools=harness_request.tools, limits=harness_request.limits, metadata={**harness_request.metadata, "resume_existing_assistant": True})
         execution = HarnessExecution(resume_runner, harness_request)
         execution.state = state
         execution._resume_source = checkpoint
+        execution._resume_limit_exceeded = execution_limit_exceeded
         execution._resume_complete = checkpoint.state.phase is HarnessPhase.AFTER_MODEL and not assistants[-1].tool_calls if checkpoint.state.phase is HarnessPhase.AFTER_MODEL else False
         return execution
 

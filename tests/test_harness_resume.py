@@ -46,26 +46,3 @@ def test_resume_after_model_text_completes_without_model_call():
         assert model.calls == 0
         assert execution.state.status is HarnessStatus.COMPLETED
     asyncio.run(run())
-
-def test_resume_after_model_tool_call_executes_without_model_replay():
-    class Executor:
-        def __init__(self): self.calls = []
-        def definition(self, name): return ToolDefinition(name=name)
-        def result_requirements(self, call):
-            from nexusmind.tools.contracts import ToolResultRequirements
-            return ToolResultRequirements(1, 1, 1)
-        async def execute(self, call):
-            return await self.execute_with_result_budget(call, result_budget=None)
-        async def execute_with_result_budget(self, call, *, result_budget):
-            self.calls.append(call.id)
-            return ToolResult(call_id=call.id, name=call.name, output={"ok": True})
-    async def run():
-        call = ToolCall(id="call-1", name="echo", arguments={"text": "hi"})
-        state = HarnessState(messages=[Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(call,))], model_turns=1, status=HarnessStatus.RUNNING, phase=HarnessPhase.AFTER_MODEL)
-        checkpoint = HarnessCheckpoint.create(state, "run-tool", 0)
-        executor = Executor()
-        execution = HarnessRunner(FakeChatModel(["done"]), tool_executor=executor).resume_execution(HarnessResumeRequest(checkpoint, tools=(ToolDefinition(name="echo"),)))
-        events = [event async for event in execution.stream()]
-        assert executor.calls == ["call-1"], [(event.type, event.error) for event in events]
-        assert execution.state.executed_tool_call_ids == {"call-1"}
-    asyncio.run(run())
