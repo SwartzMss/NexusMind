@@ -170,6 +170,15 @@ class HarnessRunner:
                 if last.tool_call_id not in checkpoint.state.executed_tool_call_ids:
                     raise HarnessResumeStateError("AFTER_TOOL result is not recorded as executed")
             pending = tuple(call for call in assistants[-1].tool_calls if call.id not in checkpoint.state.executed_tool_call_ids)
+            if pending:
+                requested_tool_names = [tool.name for tool in request.tools]
+                if len(set(requested_tool_names)) != len(requested_tool_names):
+                    raise HarnessResumeCompatibilityError("Resume request contains duplicate tool definitions")
+                missing_tools = {call.name for call in pending} - set(requested_tool_names)
+                if missing_tools:
+                    raise HarnessResumeCompatibilityError(
+                        "Resume request is missing tools required by the checkpoint"
+                    )
             if checkpoint.state.phase is HarnessPhase.AFTER_MODEL and not assistants[-1].tool_calls:
                 state = HarnessState(messages=deepcopy(list(checkpoint.state.messages)), model_turns=checkpoint.state.model_turns, tool_calls_total=checkpoint.state.tool_calls_total, tool_argument_bytes_total=checkpoint.state.tool_argument_bytes_total, tool_result_bytes_total=checkpoint.state.tool_result_bytes_total, started_tool_call_ids=set(checkpoint.state.started_tool_call_ids), executed_tool_call_ids=set(checkpoint.state.executed_tool_call_ids), status=checkpoint.state.status, phase=checkpoint.state.phase)
                 resume_runner = self
