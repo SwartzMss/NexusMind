@@ -30,3 +30,19 @@ def test_checkpoint_store_enforces_sequence_and_latest() -> None:
         assert len(await store.list("run-1")) == 2
 
     asyncio.run(run())
+
+
+def test_checkpoint_rejects_secret_like_metadata() -> None:
+    state = HarnessState(messages=[Message(role=MessageRole.USER, content="hello", metadata={"api_key": "hidden"})])
+    try:
+        HarnessStateSnapshot.from_state(state)
+    except ValueError as exc:
+        assert "secret" in str(exc)
+    else:
+        raise AssertionError("secret-like metadata must not be checkpointed")
+
+
+def test_terminal_checkpoint_contains_stop_reason() -> None:
+    state = HarnessState(messages=[], status=__import__("nexusmind.runtime.harness.state", fromlist=["HarnessStatus"]).HarnessStatus.COMPLETED)
+    checkpoint = HarnessCheckpoint.create(state, "run-terminal", 0, CheckpointBoundary.RUN_TERMINAL)
+    assert checkpoint.state.status.value == "completed"

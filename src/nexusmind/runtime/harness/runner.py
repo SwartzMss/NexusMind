@@ -37,8 +37,10 @@ class HarnessExecution:
           async for event in self._runner._stream(self._request, self.state):
             if event.type.value == "run_completed":
                 self.stop_reason = StopReason.MODEL_COMPLETED
+                self.state.stop_reason = self.stop_reason
             elif event.type.value == "model_failed" and self.stop_reason is None:
                 self.stop_reason = StopReason.MODEL_FAILED
+                self.state.stop_reason = self.stop_reason
             elif event.type.value == "run_failed" and self.stop_reason is None:
                 reason = event.metadata.get("stop_reason")
                 if reason in StopReason._value2member_map_:
@@ -49,11 +51,13 @@ class HarnessExecution:
                     self.stop_reason = StopReason.TOOL_FAILED
                 else:
                     self.stop_reason = StopReason.RUNTIME_ERROR
+                self.state.stop_reason = self.stop_reason
                 self.state.status = HarnessStatus.FAILED
             yield event
         except asyncio.CancelledError:
             self.state.status = HarnessStatus.CANCELLED
             self.stop_reason = StopReason.CANCELLED
+            self.state.stop_reason = self.stop_reason
             raise
 
 

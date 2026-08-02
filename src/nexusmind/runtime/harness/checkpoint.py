@@ -44,7 +44,7 @@ class HarnessStateSnapshot:
             started_tool_call_ids=tuple(sorted(state.started_tool_call_ids)),
             executed_tool_call_ids=tuple(sorted(state.executed_tool_call_ids)),
             status=state.status,
-            stop_reason=stop_reason,
+            stop_reason=stop_reason if stop_reason is not None else state.stop_reason,
         )
         _ensure_json_size(snapshot)
         return snapshot
@@ -72,6 +72,10 @@ class HarnessCheckpoint:
 
     @classmethod
     def create(cls, state: HarnessState, run_id: str, sequence: int, boundary: CheckpointBoundary) -> "HarnessCheckpoint":
+        if boundary is CheckpointBoundary.BEFORE_TOOL and state.started_tool_call_ids:
+            raise ValueError("Cannot checkpoint before a tool while a tool may be running")
+        if boundary is CheckpointBoundary.AFTER_TOOL and state.started_tool_call_ids != state.executed_tool_call_ids:
+            raise ValueError("Cannot checkpoint after a tool with an incomplete tool call")
         return cls(1, uuid4().hex, run_id, sequence, boundary, HarnessStateSnapshot.from_state(state), datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
 
 def _jsonable(value: Any) -> Any:
@@ -84,5 +88,18 @@ def _jsonable(value: Any) -> Any:
     raise ValueError("Checkpoint contains unsupported value")
 
 def _ensure_json_size(value: Any) -> None:
-    if len(json.dumps(_jsonable(value), ensure_ascii=False, separators=(",", ":")).encode()) > MAX_CHECKPOINT_BYTES:
+    payload = _jsonable(value)
+    _reject_secrets(payload)
+    if len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()) > MAX_CHECKPOINT_BYTES:
         raise ValueError("Checkpoint exceeds maximum size")
+
+def _reject_secrets(value: Any) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if any(marker in lowered for marker in ("secret", "token", "api_key", "apikey", "password")):
+                raise ValueError("Checkpoint contains a secret-like field")
+            _reject_secrets(item)
+    elif isinstance(value, list):
+        for item in value:
+            _reject_secrets(item)
