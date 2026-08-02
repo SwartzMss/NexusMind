@@ -44,6 +44,8 @@ class ToolExecutorProtocol(Protocol):
 class ToolResultBudgetError(RuntimeError):
     pass
 
+TOOL_CANCEL_GRACE_SECONDS = 1.0
+
 
 class ToolExecutor:
     def __init__(self, registry: ToolRegistry, timeout: float = 30.0) -> None:
@@ -143,6 +145,10 @@ class ToolExecutor:
             if callable(uncancel):
                 while current_task is not None and current_task.cancelling():
                     uncancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(invoke_task), timeout=TOOL_CANCEL_GRACE_SECONDS)
+            except asyncio.TimeoutError:
+                raise cancellation
             while not invoke_task.done():
                 try:
                     await asyncio.shield(invoke_task)

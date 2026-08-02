@@ -51,7 +51,12 @@ class SQLiteRunStore:
             self.db=sqlite3.connect(self.path, timeout=0.5); self.db.execute("PRAGMA busy_timeout=500"); self.db.execute("PRAGMA foreign_keys=ON")
             self._schema()
             if recover_abandoned: self.recover_abandoned()
-        except (OSError, sqlite3.Error) as exc: raise StateStoreError("Run store could not be initialized") from exc
+        except BaseException as exc:
+            try: self.db.close()
+            except BaseException: pass
+            if isinstance(exc, StateStoreError): raise
+            if isinstance(exc, (OSError, sqlite3.Error)): raise StateStoreError("Run store could not be initialized") from exc
+            raise
     def _schema(self):
         self.db.execute("BEGIN IMMEDIATE")
         try:
@@ -78,7 +83,7 @@ class SQLiteRunStore:
 
     def _validate_v1_schema(self):
         required = {
-            "runs": {"id", "schema_version", "execution_id", "kind", "status", "trace_complete", "event_count", "started_at"},
+            "runs": {"id", "schema_version", "execution_id", "kind", "status", "skill_name", "model_name", "input_preview", "input_sha256", "final_text", "error_code", "error_message", "trace_complete", "event_count", "started_at", "updated_at", "finished_at"},
             "run_events": {"run_id", "sequence", "event_type", "occurred_at", "payload_json", "payload_bytes"},
         }
         for table, columns in required.items():

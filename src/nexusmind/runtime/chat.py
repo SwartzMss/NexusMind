@@ -402,10 +402,10 @@ class ChatRuntime:
                             max_depth=self._limits.max_json_depth,
                         )
                     except _JsonLimitExceeded:
-                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
+                        yield _tool_failure_after_start(call, _LIMIT_ERROR)
                         return
                     except RuntimeError:
-                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                        yield _tool_failure_after_start(call, _RUNTIME_ERROR)
                         return
                     tool_result_bytes_total += size
                     tool_calls_total += 1
