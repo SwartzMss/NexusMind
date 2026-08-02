@@ -2,7 +2,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from nexusmind.models.base import ChatModel
-from nexusmind.runtime.chat import AgentLoopLimits, _LegacyHarnessRuntime
+from nexusmind.runtime.harness.limits import HarnessLimits
+from nexusmind.runtime.harness.runner_impl import _LegacyHarnessRuntime
 from nexusmind.runtime.events import RuntimeEvent
 from nexusmind.runtime.harness.context import HarnessRequest
 from nexusmind.runtime.harness.state import HarnessState, HarnessStatus
@@ -13,12 +14,12 @@ from nexusmind.tools.executor import ToolExecutorProtocol
 class HarnessRunner:
     """Bounded, provider-neutral execution boundary."""
     def __init__(self, model: ChatModel, tool_executor: ToolExecutorProtocol | None = None,
-                 limits: AgentLoopLimits | None = None, tool_policy: ToolPolicy | None = None,
+                 limits: HarnessLimits | None = None, tool_policy: ToolPolicy | None = None,
                  approval_provider: ApprovalProvider | None = None,
                  approval_summarizer: ToolApprovalSummarizer | None = None) -> None:
         self._model = model
         self._tool_executor = tool_executor
-        self._default_limits = limits or AgentLoopLimits()
+        self._default_limits = limits or HarnessLimits()
         self._tool_policy = tool_policy
         self._approval_provider = approval_provider
         self._approval_summarizer = approval_summarizer
@@ -26,7 +27,7 @@ class HarnessRunner:
         self.stop_reason: StopReason | None = None
 
     @property
-    def limits(self) -> AgentLoopLimits:
+    def limits(self) -> HarnessLimits:
         return self._default_limits
 
     async def stream(self, request: HarnessRequest) -> AsyncIterator[RuntimeEvent]:
