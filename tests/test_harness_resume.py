@@ -152,6 +152,17 @@ def test_resume_pending_tool_at_model_limit_executes_before_next_model():
         assert execution.state.executed_tool_call_ids == {"call-limit"}
     asyncio.run(run())
 
+def test_resume_rejects_checkpoint_before_pending_cursor_advances():
+    call = ToolCall(id="call-pending", name="echo", arguments={"text": "hi"})
+    state = HarnessState(messages=[Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(call,))],
+        model_turns=1, phase=HarnessPhase.AFTER_MODEL)
+    checkpoint = HarnessCheckpoint.create(state, "run-cursor", 0)
+    execution = HarnessRunner(FakeChatModel(["done"])).resume_execution(
+        HarnessResumeRequest(checkpoint, tools=(EchoTool().definition,))
+    )
+    with pytest.raises(HarnessResumeStateError, match="resume cursor"):
+        execution.create_checkpoint(sequence=1)
+
 def test_resume_rejects_missing_pending_tool_before_execution():
     call = ToolCall(id="call-1", name="echo", arguments={"text": "hi"})
     state = HarnessState(messages=[Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(call,))],
