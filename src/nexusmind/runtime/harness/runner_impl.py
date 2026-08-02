@@ -119,6 +119,7 @@ class _LegacyHarnessRuntime:
         tools: list[ToolDefinition] | None = None,
         _initial_messages: list[Message] | None = None,
         _state: HarnessState | None = None,
+        _skip_assistant_message: bool = False,
     ) -> AsyncIterator[RuntimeEvent]:
         messages: list[Message] = list(_initial_messages or [])
         if _initial_messages is None:
@@ -221,7 +222,7 @@ class _LegacyHarnessRuntime:
                     return
                 completed_event = cast(RuntimeEvent, turn.completed_event)
                 assistant_content = "".join(turn.text_parts) or None
-                if assistant_content is not None or turn.tool_calls:
+                if not _skip_assistant_message and (assistant_content is not None or turn.tool_calls):
                     assistant_message = Message(
                         role=MessageRole.ASSISTANT,
                         content=assistant_content,

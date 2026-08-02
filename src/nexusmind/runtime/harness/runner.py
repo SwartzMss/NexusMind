@@ -131,16 +131,27 @@ class HarnessRunner:
     def resume_execution(self, request: HarnessResumeRequest) -> HarnessExecution:
         checkpoint = request.checkpoint
         state = state_from_checkpoint(checkpoint) if checkpoint.state.phase is HarnessPhase.BEFORE_MODEL else None
-        if checkpoint.state.phase is HarnessPhase.AFTER_MODEL:
+        if checkpoint.state.phase in {HarnessPhase.AFTER_MODEL, HarnessPhase.BEFORE_TOOL, HarnessPhase.AFTER_TOOL}:
             assistants = [message for message in checkpoint.state.messages if message.role.value == "assistant"]
-            if not assistants or assistants[-1] is not checkpoint.state.messages[-1]:
-                raise HarnessResumeStateError("AFTER_MODEL checkpoint has no uniquely resumable text completion")
-            state = HarnessState(messages=deepcopy(list(checkpoint.state.messages)), model_turns=checkpoint.state.model_turns, tool_calls_total=checkpoint.state.tool_calls_total, tool_argument_bytes_total=checkpoint.state.tool_argument_bytes_total, tool_result_bytes_total=checkpoint.state.tool_result_bytes_total, started_tool_call_ids=set(checkpoint.state.started_tool_call_ids), executed_tool_call_ids=set(checkpoint.state.executed_tool_call_ids), status=checkpoint.state.status, phase=checkpoint.state.phase)
-            if assistants[-1].tool_calls:
+            if not assistants:
+                raise HarnessResumeStateError("Checkpoint has no resumable Assistant Tool Call batch")
+            if checkpoint.state.phase is HarnessPhase.AFTER_MODEL and assistants[-1] is not checkpoint.state.messages[-1]:
+                raise HarnessResumeStateError("AFTER_MODEL checkpoint has trailing transcript entries")
+            pending = tuple(call for call in assistants[-1].tool_calls if call.id not in checkpoint.state.executed_tool_call_ids)
+            if checkpoint.state.phase is HarnessPhase.AFTER_MODEL and not assistants[-1].tool_calls:
+                state = HarnessState(messages=deepcopy(list(checkpoint.state.messages)), model_turns=checkpoint.state.model_turns, tool_calls_total=checkpoint.state.tool_calls_total, tool_argument_bytes_total=checkpoint.state.tool_argument_bytes_total, tool_result_bytes_total=checkpoint.state.tool_result_bytes_total, started_tool_call_ids=set(checkpoint.state.started_tool_call_ids), executed_tool_call_ids=set(checkpoint.state.executed_tool_call_ids), status=checkpoint.state.status, phase=checkpoint.state.phase)
+                resume_runner = self
+                limits = request.limits or self._default_limits
+            elif not pending:
+                raise HarnessResumeStateError("Checkpoint has no pending Tool Call")
+            elif pending:
+                state = HarnessState(messages=deepcopy(list(checkpoint.state.messages)), model_turns=checkpoint.state.model_turns, tool_calls_total=checkpoint.state.tool_calls_total, tool_argument_bytes_total=checkpoint.state.tool_argument_bytes_total, tool_result_bytes_total=checkpoint.state.tool_result_bytes_total, started_tool_call_ids=set(checkpoint.state.started_tool_call_ids), executed_tool_call_ids=set(checkpoint.state.executed_tool_call_ids), status=checkpoint.state.status, phase=checkpoint.state.phase)
                 state.messages.pop()
                 state.phase = HarnessPhase.BEFORE_MODEL
                 state.model_turns = max(0, state.model_turns - 1)
-                resume_runner = HarnessRunner(_ResumeToolBatchModel(self._model, assistants[-1].tool_calls), self._tool_executor, limits=self._default_limits, tool_policy=self._tool_policy, approval_provider=self._approval_provider, approval_summarizer=self._approval_summarizer)
+                if checkpoint.state.phase is not HarnessPhase.AFTER_MODEL:
+                    state.messages.append(deepcopy(assistants[-1]))
+                resume_runner = HarnessRunner(_ResumeToolBatchModel(self._model, pending), self._tool_executor, limits=self._default_limits, tool_policy=self._tool_policy, approval_provider=self._approval_provider, approval_summarizer=self._approval_summarizer)
             else:
                 resume_runner = self
             limits = request.limits or self._default_limits
@@ -157,6 +168,8 @@ class HarnessRunner:
             limits=limits,
             metadata={"resumed": True, "checkpoint_id": request.checkpoint.checkpoint_id, "checkpoint_sequence": request.checkpoint.sequence},
         )
+        if checkpoint.state.phase in {HarnessPhase.BEFORE_TOOL, HarnessPhase.AFTER_TOOL}:
+            harness_request = HarnessRequest(messages=harness_request.messages, tools=harness_request.tools, limits=harness_request.limits, metadata={**harness_request.metadata, "resume_existing_assistant": True})
         execution = HarnessExecution(resume_runner, harness_request)
         execution.state = state
         execution._resume_source = checkpoint
@@ -180,6 +193,7 @@ class HarnessRunner:
                 tools=list(request.tools),
                 _initial_messages=list(request.messages),
                 _state=state,
+                _skip_assistant_message=bool(request.metadata.get("resume_existing_assistant")),
             ):
                 if event.type.value == "run_completed":
                     state.status = HarnessStatus.COMPLETED
