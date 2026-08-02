@@ -178,8 +178,9 @@ class ToolExecutor:
                 result_budget,
             )
 
+        truncated = isinstance(output, dict) and bool(output.get("truncated") or output.get("stdout_truncated") or output.get("stderr_truncated"))
         return _return_with_budget(
-            ToolResult(call_id=call.id, name=call.name, output=output),
+            ToolResult(call_id=call.id, name=call.name, output=output, metadata={"result_truncated": truncated}),
             result_budget,
         )
 
