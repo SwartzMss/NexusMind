@@ -19,7 +19,7 @@ import uuid
 from typing import Any
 
 from nexusmind.command_errors import CommandCleanupError, CommandConfigError, CommandLimitError, CommandProfileError, CommandStartError
-from nexusmind.tools.contracts import ToolDefinition, ToolResultBudget, ToolResultRequirements, ToolRiskLevel
+from nexusmind.tools.contracts import ToolDefinition, ToolResultBudget, ToolResultRequirements, ToolRiskLevel, json_result_requirements
 from nexusmind.workspace import Workspace, WorkspaceError, resolve_workspace_path, workspace_relative_path
 
 MAX_COMMAND_PROFILES = 32
@@ -28,6 +28,7 @@ MAX_ARG_CHARS = 1024
 MAX_ARGV_BYTES = 8192
 MAX_TIMEOUT_SECONDS = 300
 MAX_OUTPUT_BYTES = 128 * 1024
+MAX_REPORTED_STREAM_BYTES = 2**63 - 1
 DEFAULT_TOOL_RESULT_BYTES = 1024 * 1024
 COMMAND_CLEANUP_GRACE_SECONDS = 2.0
 COMMAND_POSIX_SUPERVISOR_CLEANUP_SECONDS = COMMAND_CLEANUP_GRACE_SECONDS * 3
@@ -135,8 +136,8 @@ class ProcessExecutionBudget:
 
 @dataclass(frozen=True, slots=True)
 class _CleanupResult:
-    stdout: tuple[bytes, bool]
-    stderr: tuple[bytes, bool]
+    stdout: "CapturedStream"
+    stderr: "CapturedStream"
     root_reaped: bool
     tree_terminated: bool
 
@@ -187,8 +188,15 @@ class RunCommandTool:
         profile_id = arguments.get("profile")
         profile = self._config.profiles.get(profile_id) if type(profile_id) is str else None
         profiles = [profile] if profile is not None else list(self._config.profiles.values())
-        min_bytes = max(_minimum_command_result_bytes(item) for item in profiles)
-        return ToolResultRequirements(min_bytes=min_bytes, min_nodes=13, min_depth=2)
+        requirements = [
+            json_result_requirements({"ok": True, "output": _minimum_command_output(item)})
+            for item in profiles
+        ]
+        return ToolResultRequirements(
+            min_bytes=max(item.min_bytes for item in requirements),
+            min_nodes=max(item.min_nodes for item in requirements),
+            min_depth=max(item.min_depth for item in requirements),
+        )
 
     def timeout_for_call(self, arguments: dict[str, Any]) -> float:
         profile_id = arguments.get("profile")
@@ -279,8 +287,8 @@ async def _run_profile(
 ) -> dict[str, Any]:
     start = time.monotonic()
     process: asyncio.subprocess.Process | None = None
-    stdout_task: asyncio.Task[tuple[bytes, bool]] | None = None
-    stderr_task: asyncio.Task[tuple[bytes, bool]] | None = None
+    stdout_task: asyncio.Task[CapturedStream] | None = None
+    stderr_task: asyncio.Task[CapturedStream] | None = None
     process_guard: _ProcessTreeGuard | None = None
     gate_path: Path | None = None
     gate_dir: Path | None = None
@@ -288,6 +296,7 @@ async def _run_profile(
     status_write_fd: int | None = None
     cleanup_result: _CleanupResult | None = None
     cleanup_task: asyncio.Task[_CleanupResult] | None = None
+    lifecycle: asyncio.Future | None = None
     supervisor_status: _SupervisorStatus | None = None
     supervisor_status_error: CommandCleanupError | None = None
     original_exception: BaseException | None = None
@@ -401,6 +410,15 @@ async def _run_profile(
             if process is not None and cleanup_result is None:
                 await ensure_cleanup_once(force=not completed_normally)
         finally:
+            if lifecycle is not None and not lifecycle.done():
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(lifecycle),
+                        timeout=COMMAND_CLEANUP_GRACE_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    lifecycle.cancel()
+                    await asyncio.gather(lifecycle, return_exceptions=True)
             _cleanup_private_temp(gate_path, gate_dir)
             try:
                 if process is not None:
@@ -416,13 +434,18 @@ async def _run_profile(
                 budget.commit_actual_duration(reserved_duration_ms, duration_ms)
             else:
                 budget.release_reservation(reserved_duration_ms)
+    cancelled = isinstance(original_exception, asyncio.CancelledError)
     if process is None and original_exception is not None:
         raise original_exception
     if cleanup_result is None:
-        cleanup_result = _CleanupResult((b"", False), (b"", False), process.returncode is not None, True)
+        empty = CapturedStream(b"", 0, False)
+        cleanup_result = _CleanupResult(empty, empty, process.returncode is not None, True)
+    # Cancellation is the primary outcome even when best-effort cleanup did
+    # not fully reap the process tree.
+    if cancelled:
+        raise original_exception
     if not cleanup_result.root_reaped or not cleanup_result.tree_terminated:
         raise CommandCleanupError("Command process cleanup failed")
-    cancelled = isinstance(original_exception, asyncio.CancelledError)
     status_optional = cancelled or (os.name == "nt" and (timed_out or original_exception is not None))
     if supervisor_status_error is not None and not status_optional:
         raise supervisor_status_error
@@ -449,8 +472,12 @@ async def _run_profile(
         raise CommandCleanupError("Command execution status could not be verified")
     if original_exception is not None:
         raise original_exception
-    stdout_raw, stdout_truncated = cleanup_result.stdout
-    stderr_raw, stderr_truncated = cleanup_result.stderr
+    stdout_raw = cleanup_result.stdout.content
+    stderr_raw = cleanup_result.stderr.content
+    stdout_bytes = cleanup_result.stdout.total_bytes
+    stderr_bytes = cleanup_result.stderr.total_bytes
+    stdout_truncated = cleanup_result.stdout.truncated
+    stderr_truncated = cleanup_result.stderr.truncated
     stdout, stdout_replaced = _decode_output(stdout_raw)
     stderr, stderr_replaced = _decode_output(stderr_raw)
     exit_code = process.returncode
@@ -468,6 +495,8 @@ async def _run_profile(
         "stderr": stderr,
         "stdout_truncated": stdout_truncated,
         "stderr_truncated": stderr_truncated,
+        "stdout_bytes": stdout_bytes,
+        "stderr_bytes": stderr_bytes,
         "encoding_replaced": stdout_replaced or stderr_replaced,
     }
     return _compact_command_output(output, max_result_bytes=max_result_bytes)
@@ -983,16 +1012,18 @@ def _cleanup_private_temp(path: Path | None, directory: Path | None) -> None:
         shutil.rmtree(directory, ignore_errors=True)
 
 
-async def _read_stream_limited(stream: asyncio.StreamReader | None) -> tuple[bytes, bool]:
+async def _read_stream_limited(stream: asyncio.StreamReader | None) -> CapturedStream:
     if stream is None:
-        return b"", False
+        return CapturedStream(b"", 0, False)
     chunks: list[bytes] = []
     size = 0
+    total_bytes = 0
     truncated = False
     while True:
         chunk = await stream.read(8192)
         if not chunk:
             break
+        total_bytes = min(total_bytes + len(chunk), MAX_REPORTED_STREAM_BYTES)
         previous_size = size
         if size < MAX_OUTPUT_BYTES:
             remaining = MAX_OUTPUT_BYTES - size
@@ -1000,21 +1031,21 @@ async def _read_stream_limited(stream: asyncio.StreamReader | None) -> tuple[byt
             size += min(len(chunk), remaining)
         if previous_size + len(chunk) > MAX_OUTPUT_BYTES:
             truncated = True
-    return b"".join(chunks), truncated
+    return CapturedStream(b"".join(chunks), total_bytes, truncated)
 
 
-async def _finish_reader(task: asyncio.Task[tuple[bytes, bool]] | None) -> tuple[bytes, bool]:
+async def _finish_reader(task: asyncio.Task[CapturedStream] | None) -> CapturedStream:
     if task is None:
-        return b"", False
+        return CapturedStream(b"", 0, False)
     try:
         return await asyncio.wait_for(task, timeout=COMMAND_CLEANUP_GRACE_SECONDS)
     except asyncio.TimeoutError:
         task.cancel()
-        return b"", True
+        return CapturedStream(b"", 0, True)
     except asyncio.CancelledError:
         raise
     except Exception:
-        return b"", True
+        return CapturedStream(b"", 0, True)
 
 
 def _resolve_profile_cwd(profile: CommandProfile) -> Path:
@@ -1031,8 +1062,8 @@ def _decode_output(raw: bytes) -> tuple[str, bool]:
     return text, replaced
 
 
-def _minimum_command_result_bytes(profile: CommandProfile) -> int:
-    output = {
+def _minimum_command_output(profile: CommandProfile) -> dict[str, Any]:
+    return {
         "profile": profile.profile_id,
         "cwd": profile.cwd_relative,
         "exit_code": -2_147_483_648,
@@ -1042,9 +1073,10 @@ def _minimum_command_result_bytes(profile: CommandProfile) -> int:
         "stderr": "",
         "stdout_truncated": False,
         "stderr_truncated": False,
+        "stdout_bytes": MAX_REPORTED_STREAM_BYTES,
+        "stderr_bytes": MAX_REPORTED_STREAM_BYTES,
         "encoding_replaced": False,
     }
-    return _command_result_size(output)
 
 
 def _command_result_size(output: dict[str, Any]) -> int:
@@ -1109,7 +1141,19 @@ async def _cleanup_process(
     stderr = await _finish_reader(stderr_task)
     if guard is not None:
         tree_terminated = guard.close() and tree_terminated
+    _close_process_transport(process)
     return _CleanupResult(stdout, stderr, root_reaped, tree_terminated)
+
+
+def _close_process_transport(process: asyncio.subprocess.Process | None) -> None:
+    if process is None or process.returncode is None:
+        return
+    transport = getattr(process, "_transport", None)
+    if transport is not None:
+        try:
+            transport.close()
+        except (OSError, RuntimeError):
+            pass
 
 
 async def _wait_for_process(
@@ -1286,3 +1330,8 @@ def _create_kill_on_close_job() -> Any:
         _KERNEL32.CloseHandle(handle)
         raise OSError("Could not configure Windows job")
     return handle
+@dataclass(frozen=True, slots=True)
+class CapturedStream:
+    content: bytes
+    total_bytes: int
+    truncated: bool

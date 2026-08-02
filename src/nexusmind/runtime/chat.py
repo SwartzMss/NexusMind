@@ -46,6 +46,12 @@ _FINISH_REASONS = {
     "null",
 }
 _RUNTIME_ERROR = "Runtime state machine failed"
+
+class ToolExecutionCancelled(asyncio.CancelledError):
+    def __init__(self, call_id: str, tool_name: str):
+        super().__init__("Tool execution cancelled")
+        self.call_id = call_id
+        self.tool_name = tool_name
 _LIMIT_ERROR = "Agent loop limit exceeded"
 _MIN_TOOL_RESULT_ENVELOPE_BYTES = len('{"ok":true,"output":0}'.encode("utf-8"))
 _MIN_TOOL_RESULT_ENVELOPE_NODES = 3
@@ -186,6 +192,15 @@ class ChatRuntime:
                                 return
                             turn.tool_calls.append(safe_tool_call)
                             turn.tool_arguments_size += arguments_size
+                            event = replace(
+                                event,
+                                tool_call=deepcopy(safe_tool_call),
+                                metadata={
+                                    **event.metadata,
+                                    "argument_bytes": arguments_size,
+                                    **_tool_audit_metadata(safe_tool_call, tool_definitions.get(safe_tool_call.name)),
+                                },
+                            )
                         elif event.type == RuntimeEventType.MODEL_TURN_COMPLETED:
                             turn.completed = True
                             turn.finish_reason = event.finish_reason
@@ -258,6 +273,7 @@ class ChatRuntime:
                             yield RuntimeEvent(
                                 RuntimeEventType.TOOL_APPROVAL_REQUIRED,
                                 tool_approval=policy_result.approval_required,
+                                metadata=_tool_audit_metadata(call, definition),
                             )
                             try:
                                 decision = await self._approval_provider.request(
@@ -282,6 +298,7 @@ class ChatRuntime:
                             yield RuntimeEvent(
                                 RuntimeEventType.TOOL_APPROVAL_RESOLVED,
                                 tool_approval=resolved,
+                                metadata=_tool_audit_metadata(call, definition),
                             )
                             if decision == ApprovalDecision.DENY:
                                 result = _permission_denied_result(call)
@@ -331,12 +348,12 @@ class ChatRuntime:
                                             result_budget=result_budget,
                                         )
                                     except asyncio.CancelledError:
-                                        raise
+                                        raise ToolExecutionCancelled(call.id, call.name)
                                     except ToolResultBudgetError:
-                                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
+                                        yield _tool_failure_after_start(call, _LIMIT_ERROR)
                                         return
                                     except Exception:
-                                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                                        yield _tool_failure_after_start(call, _RUNTIME_ERROR)
                                         return
                         else:
                             if call.id in started_tool_call_ids:
@@ -365,12 +382,12 @@ class ChatRuntime:
                                     result_budget=result_budget,
                                 )
                             except asyncio.CancelledError:
-                                raise
+                                raise ToolExecutionCancelled(call.id, call.name)
                             except ToolResultBudgetError:
-                                yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
+                                yield _tool_failure_after_start(call, _LIMIT_ERROR)
                                 return
                             except Exception:
-                                yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                                yield _tool_failure_after_start(call, _RUNTIME_ERROR)
                                 return
                     if (
                         not isinstance(result, ToolResult)
@@ -379,13 +396,13 @@ class ChatRuntime:
                         or type(result.name) is not str
                         or not result.name
                     ):
-                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                        yield _tool_failure_after_start(call, _RUNTIME_ERROR)
                         return
                     if str.__ne__(result.call_id, call.id) or str.__ne__(result.name, call.name):
-                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                        yield _tool_failure_after_start(call, _RUNTIME_ERROR)
                         return
                     if not _valid_tool_result(result):
-                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                        yield _tool_failure_after_start(call, _RUNTIME_ERROR)
                         return
                     try:
                         content_json, size = _tool_result_message_content(
@@ -396,14 +413,21 @@ class ChatRuntime:
                             max_depth=self._limits.max_json_depth,
                         )
                     except _JsonLimitExceeded:
-                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
+                        yield _tool_failure_after_start(call, _LIMIT_ERROR)
                         return
                     except RuntimeError:
-                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                        yield _tool_failure_after_start(call, _RUNTIME_ERROR)
                         return
                     tool_result_bytes_total += size
                     tool_calls_total += 1
                     executed_tool_call_ids.add(call.id)
+                    result = replace(
+                        result,
+                        metadata={
+                            **getattr(result, "metadata", {}),
+                            "result_bytes": size,
+                        },
+                    )
                     yield RuntimeEvent(RuntimeEventType.TOOL_RESULT, tool_result=result)
                     messages.append(
                         Message(
@@ -686,6 +710,9 @@ def _snapshot_tool_call(
     return ToolCall(id=call.id, name=call.name, arguments=arguments), size
 
 
+def _tool_failure_after_start(call: ToolCall, error: str) -> RuntimeEvent:
+    return RuntimeEvent(RuntimeEventType.RUN_FAILED, error=error, metadata={"tool_execution_started": True, "call_id": call.id, "tool_name": call.name})
+
 def _valid_tool_result(result: ToolResult) -> bool:
     if type(result.metadata) is not dict:
         return False
@@ -698,6 +725,16 @@ def _valid_tool_result(result: ToolResult) -> bool:
         and isinstance(result.error.message, str)
         and isinstance(result.error.retryable, bool)
     )
+
+
+def _tool_audit_metadata(call: ToolCall, definition: ToolDefinition | None) -> dict[str, object]:
+    if call.name == "run_command" and definition is not None:
+        profile = call.arguments.get("profile")
+        schema = definition.input_schema
+        allowed = schema.get("properties", {}).get("profile", {}).get("enum", []) if isinstance(schema, dict) else []
+        if type(profile) is str and isinstance(allowed, list) and profile in allowed:
+            return {"profile": profile}
+    return {}
 
 
 def _tool_result_message_content(

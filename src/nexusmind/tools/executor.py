@@ -44,6 +44,8 @@ class ToolExecutorProtocol(Protocol):
 class ToolResultBudgetError(RuntimeError):
     pass
 
+TOOL_CANCEL_GRACE_SECONDS = 1.0
+
 
 class ToolExecutor:
     def __init__(self, registry: ToolRegistry, timeout: float = 30.0) -> None:
@@ -143,6 +145,17 @@ class ToolExecutor:
             if callable(uncancel):
                 while current_task is not None and current_task.cancelling():
                     uncancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(invoke_task), timeout=TOOL_CANCEL_GRACE_SECONDS)
+            except asyncio.TimeoutError:
+                _consume_background_task_result(invoke_task)
+                raise cancellation
+            except asyncio.CancelledError:
+                raise cancellation
+            except Exception:
+                # Cancellation remains the externally visible outcome.  A
+                # cleanup failure must never turn it into a normal result.
+                raise cancellation
             while not invoke_task.done():
                 try:
                     await asyncio.shield(invoke_task)
@@ -178,8 +191,33 @@ class ToolExecutor:
                 result_budget,
             )
 
+        # Only host-owned adapters may contribute truncation metadata.  A
+        # provider/tool payload is otherwise allowed to contain a business
+        # field named ``truncated`` and must not be able to forge audit data.
+        host_truncation_tools = {
+            "list_files",
+            "read_file",
+            "search_text",
+            "write_file",
+            "replace_text",
+            "run_command",
+        }
+        is_host_adapter = call.name in host_truncation_tools or hasattr(
+            registered.tool, "server_id"
+        )
+        truncated = (
+            is_host_adapter
+            and isinstance(output, dict)
+            and bool(
+                output.get("truncated")
+                or output.get("stdout_truncated")
+                or output.get("stderr_truncated")
+            )
+        )
+        if result_budget is not None and not result_budget.satisfies(_result_requirements(ToolResult(call_id=call.id, name=call.name, output=output))):
+            output, truncated = _truncate_string_output(output, call, result_budget)
         return _return_with_budget(
-            ToolResult(call_id=call.id, name=call.name, output=output),
+            ToolResult(call_id=call.id, name=call.name, output=output, metadata={"result_truncated": truncated}),
             result_budget,
         )
 
@@ -188,10 +226,32 @@ def _failure(call: ToolCall, code: ToolErrorCode, message: str) -> ToolResult:
     return ToolResult(call_id=call.id, name=call.name, error=ToolError(code=code, message=message))
 
 
+def _consume_background_task_result(task: asyncio.Task[Any]) -> None:
+    """Consume a late cancellation/cleanup exception without changing outcome."""
+    def consume(done: asyncio.Task[Any]) -> None:
+        try:
+            done.result()
+        except BaseException:
+            pass
+    task.add_done_callback(consume)
+
+
 def _return_with_budget(result: ToolResult, budget: ToolResultBudget | None) -> ToolResult:
     if budget is not None and not budget.satisfies(_result_requirements(result)):
         raise ToolResultBudgetError("Tool result budget is too small")
     return result
+
+def _truncate_string_output(output: Any, call: ToolCall, budget: ToolResultBudget) -> tuple[Any, bool]:
+    if not isinstance(output, str):
+        raise ToolResultBudgetError("Tool result budget is too small")
+    low, high = 0, len(output)
+    while low < high:
+        middle = (low + high + 1) // 2
+        candidate = ToolResult(call_id=call.id, name=call.name, output=output[:middle])
+        if budget.satisfies(_result_requirements(candidate)): low = middle
+        else: high = middle - 1
+    if low == 0: raise ToolResultBudgetError("Tool result budget is too small")
+    return output[:low], True
 
 
 def _default_result_requirements() -> ToolResultRequirements:

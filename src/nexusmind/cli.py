@@ -13,7 +13,7 @@ from nexusmind.mcp import MCPClientGroup, MCPError, MCPStdioClient, load_mcp_ser
 from nexusmind.models.openai_compatible import OpenAICompatibleChatModel
 from nexusmind.runtime.chat import AgentLoopLimits
 from nexusmind.runtime.policy import ApprovalDecision, ApprovalRequest, DefaultToolApprovalSummarizer
-from nexusmind.runtime.chat import ChatRuntime
+from nexusmind.runtime.chat import ChatRuntime, ToolExecutionCancelled
 from nexusmind.runtime.events import RuntimeEventType
 from nexusmind.skills import SkillError, discover_skills, load_skill, resolve_skill_tool_references
 from nexusmind.skills.resolver import (
@@ -30,6 +30,51 @@ from nexusmind.tools.contracts import ToolDefinition
 from nexusmind.tools.builtin import ApprovalDemoTool, EchoTool, ListFilesTool, ReadFileTool, ReplaceTextTool, SearchTextTool, WriteFileTool
 from nexusmind.tools.builtin.workspace import WorkspaceWriteBudget
 from nexusmind.workspace import Workspace, WorkspaceError, resolve_workspace_create_target, resolve_workspace_path, workspace_relative_path
+from nexusmind.persistence import SQLiteRunStore, StateStoreError, RunKind, RunStartContext, RunStatus, RunTraceEvent
+from datetime import datetime, timezone
+
+AUDIT_EVENT_TYPES = {
+    RuntimeEventType.MODEL_STARTED: "model_turn_started",
+    RuntimeEventType.MODEL_TURN_COMPLETED: "model_turn_completed",
+    RuntimeEventType.MODEL_FAILED: "model_failed",
+    RuntimeEventType.TOOL_CALL_COMPLETED: "tool_call_requested",
+    RuntimeEventType.TOOL_RESULT: "tool_result_recorded",
+    RuntimeEventType.TOOL_APPROVAL_REQUIRED: "tool_approval_required",
+    RuntimeEventType.TOOL_APPROVAL_RESOLVED: "tool_approval_resolved",
+}
+
+async def _best_effort_cancel(store, run_id, *, trace_complete=None, error_code="cancelled", error_message=None, final_text=None) -> None:
+    task = None
+    try:
+        if store and run_id:
+            task = asyncio.create_task(store.finish_run(run_id, RunStatus.CANCELLED, error_code=error_code, error_message=error_message, trace_complete=trace_complete, final_text=final_text))
+            await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
+    except BaseException:
+        if task is not None and not task.done():
+            task.cancel(); await asyncio.gather(task, return_exceptions=True)
+    finally:
+        if store:
+            try: store.close()
+            except Exception: pass
+
+async def _best_effort_finish(store, run_id, status, **kwargs) -> bool:
+    try:
+        if store and run_id: await store.finish_run(run_id, status, **kwargs)
+        return True
+    except StateStoreError: return False
+
+def _best_effort_close(store) -> None:
+    if store:
+        try: store.close()
+        except StateStoreError: pass
+
+def _truncate_utf8(value: str, limit: int) -> str:
+    return value.encode("utf-8")[:limit].decode("utf-8", "ignore")
+
+def _append_bounded_utf8(buffer: bytearray, value: str, limit: int) -> None:
+    remaining = limit - len(buffer)
+    if remaining > 0:
+        buffer.extend(value.encode("utf-8")[:remaining])
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -42,6 +87,8 @@ def main(argv: list[str] | None = None) -> int:
     chat_parser.add_argument("--workspace-write", action="store_true")
     chat_parser.add_argument("--workspace-exec", action="store_true")
     chat_parser.add_argument("--command-config")
+    chat_parser.add_argument("--state-db")
+    chat_parser.add_argument("--record-content", action="store_true")
     chat_parser.add_argument("message", nargs="?")
     tools_parser = subparsers.add_parser("tools")
     tools_subparsers = tools_parser.add_subparsers(dest="tools_command", required=True)
@@ -49,6 +96,12 @@ def main(argv: list[str] | None = None) -> int:
     tools_call_parser = tools_subparsers.add_parser("call")
     tools_call_parser.add_argument("name")
     tools_call_parser.add_argument("arguments")
+    runs_parser = subparsers.add_parser("runs")
+    runs_sub = runs_parser.add_subparsers(dest="runs_command", required=True)
+    runs_list = runs_sub.add_parser("list"); runs_list.add_argument("--state-db", required=True); runs_list.add_argument("--limit", type=int, default=20); runs_list.add_argument("--status"); runs_list.add_argument("--kind"); runs_list.add_argument("--skill")
+    runs_show = runs_sub.add_parser("show"); runs_show.add_argument("run_id"); runs_show.add_argument("--state-db", required=True); runs_show.add_argument("--json", action="store_true")
+    runs_prune = runs_sub.add_parser("prune"); runs_prune.add_argument("--state-db", required=True); runs_prune.add_argument("--older-than-days", type=int, required=True)
+    runs_recover = runs_sub.add_parser("recover"); runs_recover.add_argument("--state-db", required=True)
     mcp_parser = subparsers.add_parser("mcp")
     mcp_subparsers = mcp_parser.add_subparsers(dest="mcp_command", required=True)
     mcp_tools_parser = mcp_subparsers.add_parser("tools")
@@ -74,6 +127,8 @@ def main(argv: list[str] | None = None) -> int:
     skill_run_parser.add_argument("--workspace-write", action="store_true")
     skill_run_parser.add_argument("--workspace-exec", action="store_true")
     skill_run_parser.add_argument("--command-config")
+    skill_run_parser.add_argument("--state-db")
+    skill_run_parser.add_argument("--record-content", action="store_true")
     skill_run_parser.add_argument("message", nargs="*")
 
     parse_argv, separator_message = _split_skill_run_separator_message(argv)
@@ -98,10 +153,13 @@ def main(argv: list[str] | None = None) -> int:
                 enable_workspace_write=args.workspace_write,
                 enable_workspace_exec=args.workspace_exec,
                 command_config_path=args.command_config,
+                state_db=args.state_db, record_content=args.record_content,
             )
         )
     if args.command == "tools":
         return asyncio.run(_tools(args))
+    if args.command == "runs":
+        return _runs(args)
     if args.command == "mcp":
         return asyncio.run(_mcp(args))
     if args.command == "skill":
@@ -118,6 +176,7 @@ async def _chat(
     enable_workspace_write: bool = False,
     enable_workspace_exec: bool = False,
     command_config_path: str | None = None,
+    state_db: str | None = None, record_content: bool = False,
 ) -> int:
     if not message:
         message = input("> ").strip()
@@ -134,6 +193,15 @@ async def _chat(
     if enable_workspace_exec and not command_config_path:
         print("Command error: --workspace-exec requires --command-config", file=sys.stderr)
         return 2
+
+    if state_db:
+        preflight = None
+        try:
+            preflight = SQLiteRunStore(state_db); preflight.close()
+        except StateStoreError:
+            print("State error: Run store could not be initialized", file=sys.stderr); return 2
+        finally:
+            _best_effort_close(preflight)
 
     try:
         workspace = _build_workspace(workspace_path)
@@ -162,7 +230,7 @@ async def _chat(
         )
     )
     if mcp_config is None:
-        return await _run_chat(message, registry, model_config=model_config, workspace=workspace)
+        return await _run_chat(message, registry, model_config=model_config, workspace=workspace, state_db=state_db, record_content=record_content)
 
     try:
         config = load_mcp_server_config(mcp_config, mcp_server)
@@ -172,7 +240,7 @@ async def _chat(
     except Exception:
         print("MCP error: MCP chat tool setup failed", file=sys.stderr)
         return 1
-    return await _run_chat_with_mcp(message, registry, config=config, model_config=model_config)
+    return await _run_chat_with_mcp(message, registry, config=config, model_config=model_config, state_db=state_db, record_content=record_content)
 
 
 async def _run_chat_with_mcp(
@@ -181,15 +249,35 @@ async def _run_chat_with_mcp(
     *,
     config,
     model_config: ModelConfig,
+    state_db: str | None = None, record_content: bool = False,
 ) -> int:
+    store = None; run_id = None; text_sink: list[str] = []; failure_sink = {}; return_code = 1; runtime_started = False
+    try:
+        if state_db:
+            store = SQLiteRunStore(state_db)
+            run_id = await store.start_run(RunStartContext(RunKind.CHAT, model_name=getattr(model_config, "model", None), input_text=message, record_content=record_content))
+    except StateStoreError:
+        _best_effort_close(store)
+        print("State error: Run store could not be initialized", file=sys.stderr); return 2
     client = MCPStdioClient(config)
     try:
         await client.__aenter__()
+    except asyncio.CancelledError:
+        await _best_effort_cancel(store, run_id)
+        raise
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
+        if store and run_id:
+            try: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_start_failed", error_message="MCP server failed to start")
+            except StateStoreError: pass
+        _best_effort_close(store)
         return 1
     except Exception:
         print("MCP error: MCP chat tool setup failed", file=sys.stderr)
+        if store and run_id:
+            try: await store.finish_run(run_id, RunStatus.FAILED, error_code="mcp_start_failed", error_message="MCP server setup failed")
+            except StateStoreError: pass
+        _best_effort_close(store)
         return 1
 
     try:
@@ -197,30 +285,66 @@ async def _run_chat_with_mcp(
             await register_mcp_tools(client, config.server_id, registry)
         except MCPError as exc:
             print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
+            await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_register_failed", error_message="MCP tool registration failed")
             return_code = 1
         except Exception:
             print("MCP error: MCP chat tool setup failed", file=sys.stderr)
+            await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_register_failed", error_message="MCP tool registration failed")
             return_code = 1
         else:
+            runtime_started = True
             return_code = await _run_chat(
                 message,
                 registry,
                 model_config=model_config,
                 executor_timeout=config.request_timeout,
                 workspace=_registry_workspace(registry),
+                state_db=state_db, record_content=record_content,
+                external_store=store, external_run_id=run_id, final_text_sink=text_sink, failure_sink=failure_sink,
             )
     except BaseException as exc:
         try:
             await client.__aexit__(type(exc), exc, exc.__traceback__)
         except BaseException:
             pass
+        if isinstance(exc, asyncio.CancelledError) and store and run_id:
+            await _best_effort_cancel(
+                store,
+                run_id,
+                trace_complete=failure_sink.get("trace_complete"),
+                error_code=failure_sink.get("error_code", "cancelled"),
+                error_message=failure_sink.get("message"),
+                final_text="".join(text_sink) if record_content else None,
+            )
+        _best_effort_close(store)
         raise
 
     try:
         await client.__aexit__(None, None, None)
+    except asyncio.CancelledError as cancellation:
+        if isinstance(cancellation, ToolExecutionCancelled):
+            failure_sink.update(trace_complete=False, error_code="tool_execution_cancelled", message="Tool execution was cancelled; the tool may still be running")
+        await _best_effort_cancel(
+            store,
+            run_id,
+            trace_complete=failure_sink.get("trace_complete"),
+            error_code=failure_sink.get("error_code", "cancelled"),
+            error_message=failure_sink.get("message"),
+            final_text="".join(text_sink) if record_content else None,
+        )
+        raise
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
+        await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code=failure_sink.get("error_code") or "mcp_cleanup_failed", error_message=failure_sink.get("message") or "MCP server cleanup failed", trace_complete=failure_sink.get("trace_complete"), final_text=''.join(text_sink) if record_content else None)
+        _best_effort_close(store)
         return 1
+    if store and run_id and runtime_started and not failure_sink.get("already_finalized"):
+        try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED, error_code=failure_sink.get("error_code"), error_message=failure_sink.get("message"), trace_complete=failure_sink.get("trace_complete"), final_text=''.join(text_sink) if record_content else None)
+        except StateStoreError:
+            print("State error: Run final status could not be persisted", file=sys.stderr); return_code = 1
+        _best_effort_close(store)
+    elif store:
+        _best_effort_close(store)
     return return_code
 
 
@@ -234,7 +358,19 @@ async def _run_chat(
     tools: list[ToolDefinition] | None = None,
     limits: AgentLoopLimits | None = None,
     workspace: Workspace | None = None,
+    state_db: str | None = None, record_content: bool = False, run_kind: RunKind = RunKind.CHAT,
+    skill_name: str | None = None,
+    external_store=None, external_run_id: str | None = None, final_text_sink=None, failure_sink=None,
 ) -> int:
+    failure_sink = failure_sink if failure_sink is not None else {}
+    store = external_store; run_id = external_run_id; owns_store = store is None
+    if state_db and store is None:
+        try:
+            store = SQLiteRunStore(state_db)
+            run_id = await store.start_run(RunStartContext(run_kind, skill_name=skill_name, model_name=getattr(model_config, "model", None), input_text=message, record_content=record_content))
+        except StateStoreError:
+            _best_effort_close(store)
+            print("State error: Run store could not be initialized", file=sys.stderr); return 2
     runtime = ChatRuntime(
         OpenAICompatibleChatModel(model_config),
         tool_executor=ToolExecutor(registry, timeout=executor_timeout),
@@ -243,20 +379,75 @@ async def _run_chat(
         limits=limits,
     )
     tools = registry.list_definitions() if tools is None else tools
-    failed = False
+    failed = False; failure_message = None; trace_complete = True; final_text = []; current_text = bytearray(); current_text_bytes = 0
     stream_kwargs = {"tools": tools}
     if system_prompt is not None:
         stream_kwargs["system_prompt"] = system_prompt
-    async for event in runtime.stream_user_message(message, **stream_kwargs):
-        if event.type == RuntimeEventType.TEXT_DELTA and event.text:
-            print(event.text, end="", flush=True)
-        elif event.type == RuntimeEventType.RUN_FAILED:
-            failed = True
-            print(f"\nModel error: {event.error}", file=sys.stderr)
-
-    if not failed:
-        print()
-    return 1 if failed else 0
+    try:
+        async for event in runtime.stream_user_message(message, **stream_kwargs):
+            if event.type == RuntimeEventType.MODEL_STARTED:
+                current_text.clear(); current_text_bytes = 0
+            if store and run_id and event.type not in {RuntimeEventType.RUN_STARTED, RuntimeEventType.RUN_COMPLETED, RuntimeEventType.RUN_FAILED, RuntimeEventType.TEXT_DELTA, RuntimeEventType.TOOL_CALL_DELTA}:
+                try:
+                    projected = project_runtime_event(event)
+                    if event.tool_call is not None:
+                        try: definition = registry.definition(event.tool_call.name); projected["risk_level"] = definition.risk_level.value
+                        except Exception: projected["risk_level"] = "unspecified"
+                        try:
+                            tool = registry.get(event.tool_call.name)
+                            if hasattr(tool, "server_id"): projected.update(server_id=tool.server_id, remote_tool_name=tool.remote_name)
+                        except Exception: pass
+                    if event.tool_result is not None:
+                        try:
+                            tool = registry.get(event.tool_result.name)
+                            if hasattr(tool, "server_id"): projected.update(server_id=tool.server_id, remote_tool_name=tool.remote_name)
+                        except Exception: pass
+                    if event.type == RuntimeEventType.MODEL_TURN_COMPLETED: projected["text_bytes"] = current_text_bytes
+                    audit_event_type = AUDIT_EVENT_TYPES.get(event.type)
+                    if audit_event_type is not None:
+                        await store.append_event(run_id, RunTraceEvent(audit_event_type, datetime.now(timezone.utc), projected))
+                except StateStoreError:
+                    finalized = await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="trace_persist_failed", error_message="Run trace could not be persisted", trace_complete=False)
+                    failure_sink.update(error_code="trace_persist_failed", message="Run trace could not be persisted", trace_complete=False, already_finalized=finalized)
+                    message = "Run trace could not be persisted after tool execution" if event.type == RuntimeEventType.TOOL_RESULT else "Run trace could not be persisted"
+                    print(message, file=sys.stderr); return 1
+            if event.type == RuntimeEventType.TEXT_DELTA and event.text:
+                current_text_bytes += len(event.text.encode())
+                if record_content and store and run_id:
+                    _append_bounded_utf8(current_text, event.text, 1024 * 1024)
+                print(event.text, end="", flush=True)
+            elif event.type == RuntimeEventType.MODEL_TURN_COMPLETED and event.finish_reason != "tool_calls":
+                if record_content and store and run_id:
+                    current=bytes(current_text).decode("utf-8", "ignore"); final_text.clear(); final_text.append(current)
+                    if final_text_sink is not None: final_text_sink.clear(); final_text_sink.append(current)
+            elif event.type == RuntimeEventType.RUN_FAILED:
+                failed = True; failure_message = _safe_cli_field(event.error or "Runtime execution failed", max_length=1024)
+                if event.metadata.get("tool_execution_started"): trace_complete = False
+                if failure_sink is not None: failure_sink.update(error_code="tool_result_unavailable" if not trace_complete else "runtime_failed", message=failure_message, trace_complete=trace_complete)
+                print(f"\nModel error: {failure_message}", file=sys.stderr)
+        if not failed: print()
+        if store and run_id and owns_store:
+            try: await store.finish_run(run_id, RunStatus.FAILED if failed else RunStatus.COMPLETED, error_code="tool_result_unavailable" if failed and not trace_complete else ("runtime_failed" if failed else None), error_message=failure_message, trace_complete=trace_complete, final_text=''.join(final_text) if record_content else None)
+            except StateStoreError:
+                print("State error: Run final status could not be persisted", file=sys.stderr); return 1
+        return 1 if failed else 0
+    except asyncio.CancelledError as cancellation:
+        if isinstance(cancellation, ToolExecutionCancelled):
+            failure_sink.update(trace_complete=False, error_code="tool_execution_cancelled", message="Tool execution was cancelled; the tool may still be running")
+        await _best_effort_cancel(store, run_id, trace_complete=failure_sink.get("trace_complete"), error_code=failure_sink.get("error_code", "cancelled"), error_message=failure_sink.get("message"), final_text=''.join(final_text) if record_content else None)
+        raise
+    except Exception:
+        await _best_effort_finish(
+            store,
+            run_id,
+            RunStatus.FAILED,
+            error_code="runtime_error",
+            error_message="Runtime execution failed",
+            trace_complete=False if failure_sink.get("trace_complete") is False else None,
+        )
+        raise
+    finally:
+        if owns_store: _best_effort_close(store)
 
 
 async def _tools(args: argparse.Namespace) -> int:
@@ -282,6 +473,66 @@ async def _tools(args: argparse.Namespace) -> int:
             return 2 if result.error.code in {ToolErrorCode.TOOL_NOT_FOUND, ToolErrorCode.INVALID_ARGUMENTS} else 1
         print(json.dumps(result.output, ensure_ascii=True, sort_keys=True))
         return 0
+    return 2
+
+def _open_store(path: str, *, read_only: bool = False):
+    try: return SQLiteRunStore.open_existing_ro(path) if read_only else SQLiteRunStore.open_existing_rw(path)
+    except StateStoreError:
+        print("State error: Run store could not be initialized", file=sys.stderr); return None
+
+def project_runtime_event(event) -> dict:
+    payload = {"text_bytes": len((event.text or '').encode()), "error": _safe_cli_field(event.error or '', max_length=1024)}
+    if event.finish_reason: payload["finish_reason"] = event.finish_reason
+    if event.tool_call is not None:
+        call = event.tool_call; payload.update(call_id=call.id, tool_name=call.name, risk_level=event.metadata.get("risk_level", "unspecified"), argument_bytes=int(event.metadata.get("argument_bytes", len(json.dumps(call.arguments, ensure_ascii=False, separators=(",", ":")).encode()))))
+        if call.name == "run_command" and type(event.metadata.get("profile")) is str:
+            payload["profile"] = event.metadata["profile"]
+    if event.tool_approval is not None:
+        approval = event.tool_approval
+        summary = "command profile approval" if approval.tool_name == "run_command" else _safe_cli_field(approval.summary, max_length=512)
+        payload.update(request_id=approval.request_id, call_id=approval.call_id, tool_name=approval.tool_name, risk_level=approval.risk_level.value, decision=getattr(approval.decision, 'value', approval.decision), summary=summary)
+        if approval.tool_name == "run_command" and type(event.metadata.get("profile")) is str:
+            payload["profile"] = event.metadata["profile"]
+    if event.tool_result is not None:
+        result = event.tool_result; output = result.output
+        result_metadata = getattr(result, "metadata", {})
+        payload.update(call_id=result.call_id, tool_name=result.name, ok=result.error is None, result_bytes=int(result_metadata.get("result_bytes", len(json.dumps(output, ensure_ascii=False, default=str, separators=(",", ":")).encode()))), result_truncated=bool(result_metadata.get("result_truncated", False)), error_code=getattr(result.error.code, 'value', None) if result.error else None)
+        if result.name == "run_command" and isinstance(output, dict):
+            payload.update(profile=output.get("profile"), cwd=output.get("cwd"), exit_code=output.get("exit_code"), timed_out=output.get("timed_out"), duration_ms=output.get("duration_ms"), stdout_bytes=int(output.get("stdout_bytes", len(str(output.get("stdout", "")).encode()))), stderr_bytes=int(output.get("stderr_bytes", len(str(output.get("stderr", "")).encode()))), stdout_truncated=output.get("stdout_truncated"), stderr_truncated=output.get("stderr_truncated"))
+        if result.name in {"write_file", "replace_text"} and isinstance(output, dict):
+            for key in ("path", "operation", "previous_sha256", "sha256", "bytes_written", "replacements", "committed", "cleanup_warning"):
+                if key in output: payload[key] = output[key]
+    return payload
+
+def _runs(args: argparse.Namespace) -> int:
+    store=_open_store(args.state_db, read_only=args.runs_command in {"list", "show"})
+    if store is None:return 2
+    try:
+        if args.runs_command == "list":
+            print("RUN_ID\tSTATUS\tKIND\tSTARTED_AT\tSKILL")
+            for row in store.list_runs(limit=args.limit,status=args.status,kind=args.kind,skill=args.skill): print("\t".join(str(x or "-") for x in row))
+            return 0
+        if args.runs_command == "show":
+            item=store.show_run(args.run_id)
+            if item is None: print("Run error: run not found",file=sys.stderr); return 2
+            if args.json: print(json.dumps(item,default=str,ensure_ascii=False)); return 0
+            print("Run ID\t"+str(item["run"]["id"])); print("Status\t"+str(item["run"]["status"])); print("Events\t"+str(len(item["events"])))
+            print("Trace complete\t"+str(bool(item["run"].get("trace_complete"))))
+            if item["run"].get("error_code"): print("Error code\t"+str(item["run"]["error_code"]))
+            if item["run"].get("error_message"): print("Error message\t"+str(item["run"]["error_message"]))
+            for e in item["events"]:
+                p=e["payload"]; summary=" ".join(f"{k}={p[k]}" for k in ("tool_name","risk_level","decision","profile","path","committed","exit_code","timed_out","duration_ms","stdout_bytes","stderr_bytes","stdout_truncated","stderr_truncated","result_truncated","server_id","remote_tool_name") if k in p)
+                print(f"{e['sequence']}\t{e['event_type']}\t{e['occurred_at']}" + (f"\t{summary}" if summary else ""))
+            return 0
+        if args.runs_command == "recover":
+            store.recover_abandoned(); print("Recovered abandoned runs"); return 0
+        if args.runs_command == "prune":
+            try: count=store.prune(args.older_than_days)
+            except ValueError as exc: print(f"State error: {exc}", file=sys.stderr); return 2
+            print(f"Deleted {count} run(s)"); return 0
+    except StateStoreError:
+        print("State error: Run store operation failed", file=sys.stderr); return 2
+    finally: _best_effort_close(store)
     return 2
 
 
@@ -495,6 +746,11 @@ async def _skill_run(args: argparse.Namespace) -> int:
     except WorkspaceError as exc:
         print(f"Workspace error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
         return 2
+    if args.state_db:
+        try:
+            preflight = SQLiteRunStore(args.state_db); preflight.close()
+        except StateStoreError:
+            print("State error: Run store could not be initialized", file=sys.stderr); return 2
     try:
         command_config = _build_command_config(args.command_config, workspace) if args.workspace_exec else None
     except CommandConfigError as exc:
@@ -525,6 +781,7 @@ async def _skill_run(args: argparse.Namespace) -> int:
             tools=tools,
             limits=limits,
             workspace=workspace,
+            state_db=args.state_db, record_content=args.record_content, run_kind=RunKind.SKILL, skill_name=skill.name,
         )
     try:
         required_server_ids = skill_mcp_server_ids(skill)
@@ -538,7 +795,7 @@ async def _skill_run(args: argparse.Namespace) -> int:
     except Exception:
         print("MCP error: MCP skill tool setup failed", file=sys.stderr)
         return 1
-    return await _run_skill_with_mcp(message, skill, registry, configs=configs, model_config=model_config, limits=limits)
+    return await _run_skill_with_mcp(message, skill, registry, configs=configs, model_config=model_config, limits=limits, state_db=args.state_db, record_content=args.record_content)
 
 
 async def _run_skill_with_mcp(
@@ -549,15 +806,33 @@ async def _run_skill_with_mcp(
     configs,
     model_config: ModelConfig,
     limits: AgentLoopLimits,
+    state_db: str | None = None, record_content: bool = False,
 ) -> int:
+    store = None; run_id = None; text_sink: list[str] = []; failure_sink = {}; return_code = 1
+    try:
+        if state_db:
+            store = SQLiteRunStore(state_db)
+            run_id = await store.start_run(RunStartContext(RunKind.SKILL, skill_name=skill.name, model_name=getattr(model_config, "model", None), input_text=message, record_content=record_content))
+    except StateStoreError:
+        if store:
+            try: store.close()
+            except Exception: pass
+        print("State error: Run store could not be initialized", file=sys.stderr); return 2
     group = MCPClientGroup(configs)
     try:
         await group.__aenter__()
+    except asyncio.CancelledError:
+        await _best_effort_cancel(store, run_id, trace_complete=failure_sink.get("trace_complete"), error_code=failure_sink.get("error_code", "cancelled"), error_message=failure_sink.get("message"), final_text=''.join(text_sink) if record_content else None)
+        raise
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
+        await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_start_failed", error_message="MCP server failed to start")
+        _best_effort_close(store)
         return 1
     except Exception:
         print("MCP error: MCP skill tool setup failed", file=sys.stderr)
+        await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_start_failed", error_message="MCP server setup failed")
+        _best_effort_close(store)
         return 1
     try:
         try:
@@ -565,12 +840,15 @@ async def _run_skill_with_mcp(
             tools = resolve_skill_tool_references(skill, registry)
         except SkillError as exc:
             print(_safe_cli_field(str(exc), max_length=240), file=sys.stderr)
+            await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_register_failed", error_message="Skill tool setup failed")
             return_code = 2
         except MCPError as exc:
             print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
+            await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_register_failed", error_message="MCP tool registration failed")
             return_code = 1
         except Exception:
             print("MCP error: MCP chat tool setup failed", file=sys.stderr)
+            await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_register_failed", error_message="MCP tool registration failed")
             return_code = 1
         else:
             return_code = await _run_chat(
@@ -581,18 +859,52 @@ async def _run_skill_with_mcp(
                 tools=tools,
                 limits=limits,
                 workspace=_registry_workspace(registry),
+                state_db=state_db, record_content=record_content, run_kind=RunKind.SKILL, skill_name=skill.name,
+                external_store=store, external_run_id=run_id, final_text_sink=text_sink, failure_sink=failure_sink,
             )
     except BaseException as exc:
         try:
             await group.__aexit__(type(exc), exc, exc.__traceback__)
         except BaseException:
             pass
+        if isinstance(exc, asyncio.CancelledError) and store and run_id:
+            await _best_effort_cancel(
+                store,
+                run_id,
+                trace_complete=failure_sink.get("trace_complete"),
+                error_code=failure_sink.get("error_code", "cancelled"),
+                error_message=failure_sink.get("message"),
+                final_text="".join(text_sink) if record_content else None,
+            )
+        elif store and run_id:
+            await _best_effort_finish(
+                store,
+                run_id,
+                RunStatus.FAILED,
+                error_code=failure_sink.get("error_code") or "runtime_error",
+                error_message=failure_sink.get("message") or "Skill execution failed",
+                trace_complete=failure_sink.get("trace_complete"),
+                final_text="".join(text_sink) if record_content else None,
+            )
+        _best_effort_close(store)
         raise
     try:
         await group.__aexit__(None, None, None)
+    except asyncio.CancelledError:
+        await _best_effort_cancel(store, run_id, trace_complete=failure_sink.get("trace_complete"), error_code=failure_sink.get("error_code", "cancelled"), error_message=failure_sink.get("message"), final_text=''.join(text_sink) if record_content else None)
+        raise
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
+        await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code=failure_sink.get("error_code") or "mcp_cleanup_failed", error_message=failure_sink.get("message") or "MCP server cleanup failed", trace_complete=failure_sink.get("trace_complete"), final_text=''.join(text_sink) if record_content else None)
+        _best_effort_close(store)
         return 1
+    if store and run_id and "tools" in locals() and not failure_sink.get("already_finalized"):
+        try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED, error_code=failure_sink.get("error_code"), error_message=failure_sink.get("message"), trace_complete=failure_sink.get("trace_complete"), final_text=''.join(text_sink) if record_content else None)
+        except StateStoreError:
+            print("State error: Run final status could not be persisted", file=sys.stderr); return_code = 1
+        _best_effort_close(store)
+    elif store:
+        _best_effort_close(store)
     return return_code
 
 
