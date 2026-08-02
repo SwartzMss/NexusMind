@@ -182,7 +182,7 @@ class _LegacyHarnessRuntime:
                                     max_bytes_per_call=self._limits.max_tool_arguments_bytes_per_call,
                                     remaining_total_bytes=(
                                         self._limits.max_tool_arguments_bytes_total
-                                        - state.tool_argument_bytes_total
+                                        - (0 if _resume_tool_batch else state.tool_argument_bytes_total)
                                         - turn.tool_arguments_size
                                     ),
                                     max_nodes=self._limits.max_json_nodes_per_payload,

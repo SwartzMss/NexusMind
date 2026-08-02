@@ -35,7 +35,7 @@ class _ResumeToolBatchModel:
         yield RuntimeEvent(RuntimeEventType.MODEL_STARTED, metadata=internal)
         for call in self._calls:
             yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=deepcopy(call), metadata=internal)
-            yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls", metadata=internal)
+        yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls", metadata=internal)
 
 def _validate_resume_batches(messages) -> None:
     batches = []
@@ -73,7 +73,6 @@ class HarnessExecution:
         self._resume_complete = False
         self._resume_source = None
         self._resume_limit_exceeded = False
-        self._resume_cursor_pending = False
 
     def create_checkpoint(self, run_id: str | None = None, sequence: int | None = None, boundary: CheckpointBoundary | None = None) -> HarnessCheckpoint:
         if self._resume_cursor_pending:
@@ -138,6 +137,7 @@ class HarnessExecution:
                 self.state.status = HarnessStatus.FAILED
                 self.state.phase = HarnessPhase.TERMINAL
             yield event
+          self._resume_cursor_pending = False
         except asyncio.CancelledError:
             self.state.status = HarnessStatus.CANCELLED
             self.state.phase = HarnessPhase.TERMINAL
@@ -207,7 +207,10 @@ class HarnessRunner:
             batch_calls = {call.id: call for call in assistants[-1].tool_calls}
             if len(batch_calls) != len(assistants[-1].tool_calls):
                 raise HarnessResumeStateError("Assistant Tool Call batch contains duplicate IDs")
-            assistant_index = messages.index(assistants[-1])
+            assistant_index = next(
+                index for index in range(len(messages) - 1, -1, -1)
+                if messages[index] is assistants[-1]
+            )
             batch_results = messages[assistant_index + 1:]
             result_ids: list[str] = []
             for message in batch_results:
@@ -290,9 +293,8 @@ class HarnessRunner:
         limits = request.limits or self._default_limits
         if state.model_turns > limits.max_model_turns or state.tool_calls_total > limits.max_tool_calls_total or state.tool_argument_bytes_total > limits.max_tool_arguments_bytes_total or state.tool_result_bytes_total > limits.max_tool_result_bytes_total:
             raise HarnessResumeCompatibilityError("Checkpoint consumption exceeds selected limits")
-        needs_model = checkpoint.state.phase is HarnessPhase.BEFORE_MODEL or bool(
-            checkpoint.state.phase in {HarnessPhase.BEFORE_TOOL, HarnessPhase.AFTER_TOOL}
-            and state.phase is HarnessPhase.BEFORE_MODEL
+        needs_model = checkpoint.state.phase is HarnessPhase.BEFORE_MODEL or (
+            checkpoint.state.phase is HarnessPhase.AFTER_TOOL and not pending
         )
         if needs_model and state.model_turns >= limits.max_model_turns:
             execution_limit_exceeded = True
