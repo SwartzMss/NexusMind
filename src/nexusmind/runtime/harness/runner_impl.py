@@ -10,7 +10,7 @@ from typing import cast
 from nexusmind.models.base import ChatModel
 from nexusmind.models.tool_calls import ToolCallDelta
 from nexusmind.runtime.events import RuntimeEvent, RuntimeEventType
-from nexusmind.runtime.harness.state import HarnessState
+from nexusmind.runtime.harness.state import HarnessPhase, HarnessState
 from nexusmind.runtime.messages import Message, MessageRole
 from nexusmind.runtime.policy import (
     ApprovalDecision,
@@ -137,6 +137,7 @@ class _LegacyHarnessRuntime:
             model_tools = list(tool_definitions.values())
             allowed_tool_names = set(tool_definitions)
             while True:
+                state.phase = HarnessPhase.BEFORE_MODEL
                 if state.model_turns >= self._limits.max_model_turns:
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
                     return
@@ -218,8 +219,10 @@ class _LegacyHarnessRuntime:
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=terminal_error)
                     return
                 completed_event = cast(RuntimeEvent, turn.completed_event)
+                state.phase = HarnessPhase.AFTER_MODEL
                 yield completed_event
                 if turn.finish_reason != "tool_calls":
+                    state.phase = HarnessPhase.TERMINAL
                     yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
                     return
                 if state.model_turns >= self._limits.max_model_turns:
@@ -246,6 +249,7 @@ class _LegacyHarnessRuntime:
                 messages.append(assistant_message)
                 state.messages.append(assistant_message)
                 for call in turn.tool_calls:
+                    state.phase = HarnessPhase.BEFORE_TOOL
                     remaining_result_bytes = self._limits.max_tool_result_bytes_total - state.tool_result_bytes_total
                     result_budget = _result_budget(self._limits, remaining_result_bytes)
                     if not result_budget.satisfies(_PERMISSION_DENIED_REQUIREMENTS):
@@ -420,6 +424,7 @@ class _LegacyHarnessRuntime:
                     state.tool_result_bytes_total += size
                     state.tool_calls_total += 1
                     state.executed_tool_call_ids.add(call.id)
+                    state.phase = HarnessPhase.AFTER_TOOL
                     result = replace(
                         result,
                         metadata={
