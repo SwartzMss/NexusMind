@@ -293,7 +293,14 @@ async def _run_chat_with_mcp(
         except BaseException:
             pass
         if isinstance(exc, asyncio.CancelledError) and store and run_id:
-            await _best_effort_cancel(store, run_id)
+            await _best_effort_cancel(
+                store,
+                run_id,
+                trace_complete=failure_sink.get("trace_complete"),
+                error_code=failure_sink.get("error_code", "cancelled"),
+                error_message=failure_sink.get("message"),
+                final_text="".join(text_sink) if record_content else None,
+            )
         _best_effort_close(store)
         raise
 
@@ -302,7 +309,14 @@ async def _run_chat_with_mcp(
     except asyncio.CancelledError as cancellation:
         if isinstance(cancellation, ToolExecutionCancelled):
             failure_sink.update(trace_complete=False, error_code="tool_execution_cancelled", message="Tool execution was cancelled")
-        await _best_effort_cancel(store, run_id)
+        await _best_effort_cancel(
+            store,
+            run_id,
+            trace_complete=failure_sink.get("trace_complete"),
+            error_code=failure_sink.get("error_code", "cancelled"),
+            error_message=failure_sink.get("message"),
+            final_text="".join(text_sink) if record_content else None,
+        )
         raise
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
@@ -404,7 +418,14 @@ async def _run_chat(
         await _best_effort_cancel(store, run_id, trace_complete=failure_sink.get("trace_complete"), error_code=failure_sink.get("error_code", "cancelled"), error_message=failure_sink.get("message"), final_text=''.join(final_text) if record_content else None)
         raise
     except Exception:
-        await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="runtime_error", error_message="Runtime execution failed")
+        await _best_effort_finish(
+            store,
+            run_id,
+            RunStatus.FAILED,
+            error_code="runtime_error",
+            error_message="Runtime execution failed",
+            trace_complete=False if failure_sink.get("trace_complete") is False else None,
+        )
         raise
     finally:
         if owns_store: _best_effort_close(store)
@@ -821,9 +842,24 @@ async def _run_skill_with_mcp(
         except BaseException:
             pass
         if isinstance(exc, asyncio.CancelledError) and store and run_id:
-            await _best_effort_cancel(store, run_id)
+            await _best_effort_cancel(
+                store,
+                run_id,
+                trace_complete=failure_sink.get("trace_complete"),
+                error_code=failure_sink.get("error_code", "cancelled"),
+                error_message=failure_sink.get("message"),
+                final_text="".join(text_sink) if record_content else None,
+            )
         elif store and run_id:
-            await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="runtime_error", error_message="Skill execution failed")
+            await _best_effort_finish(
+                store,
+                run_id,
+                RunStatus.FAILED,
+                error_code=failure_sink.get("error_code") or "runtime_error",
+                error_message=failure_sink.get("message") or "Skill execution failed",
+                trace_complete=failure_sink.get("trace_complete"),
+                final_text="".join(text_sink) if record_content else None,
+            )
         _best_effort_close(store)
         raise
     try:
