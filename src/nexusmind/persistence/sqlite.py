@@ -1,5 +1,6 @@
 from __future__ import annotations
 import hashlib, json, sqlite3, uuid
+import asyncio
 from functools import wraps
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -11,18 +12,20 @@ def _async_db_error(fn):
     @wraps(fn)
     async def wrapped(self, *args, **kwargs):
         try: return await fn(self, *args, **kwargs)
-        except sqlite3.Error as exc:
+        except BaseException as exc:
             try: self.db.rollback()
-            except sqlite3.Error: pass
+            except BaseException: pass
+            if isinstance(exc, (StateStoreError, asyncio.CancelledError)): raise
             raise StateStoreError("Run store operation failed") from exc
     return wrapped
 def _sync_db_error(fn):
     @wraps(fn)
     def wrapped(self, *args, **kwargs):
         try: return fn(self, *args, **kwargs)
-        except sqlite3.Error as exc:
+        except BaseException as exc:
             try: self.db.rollback()
-            except sqlite3.Error: pass
+            except BaseException: pass
+            if isinstance(exc, (StateStoreError, asyncio.CancelledError)): raise
             raise StateStoreError("Run store operation failed") from exc
     return wrapped
 def _now(): return datetime.now(timezone.utc).isoformat()
@@ -36,15 +39,18 @@ class SQLiteRunStore:
             if recover_abandoned: self.recover_abandoned()
         except (OSError, sqlite3.Error) as exc: raise StateStoreError("Run store could not be initialized") from exc
     def _schema(self):
+        metadata_exists=self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_metadata'").fetchone()
+        if metadata_exists:
+            row=self.db.execute("SELECT value FROM schema_metadata WHERE key='version'").fetchone()
+            if row is None or row[0] != "1": raise StateStoreError("Unsupported state database schema version")
+            return
+        existing=self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table'").fetchone()
+        if existing: raise StateStoreError("Unsupported state database schema version")
         self.db.executescript('''CREATE TABLE IF NOT EXISTS schema_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY,schema_version INTEGER NOT NULL,execution_id TEXT NOT NULL,kind TEXT NOT NULL,status TEXT NOT NULL,skill_name TEXT,model_name TEXT,input_preview TEXT,input_sha256 TEXT,final_text TEXT,error_code TEXT,error_message TEXT,trace_complete INTEGER NOT NULL DEFAULT 1,event_count INTEGER NOT NULL DEFAULT 0,started_at TEXT NOT NULL,updated_at TEXT NOT NULL,finished_at TEXT);
 CREATE TABLE IF NOT EXISTS run_events(run_id TEXT NOT NULL,sequence INTEGER NOT NULL,event_type TEXT NOT NULL,occurred_at TEXT NOT NULL,payload_json TEXT NOT NULL,payload_bytes INTEGER NOT NULL,PRIMARY KEY(run_id,sequence),FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE);
 CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC); CREATE INDEX IF NOT EXISTS idx_runs_status_started ON runs(status,started_at DESC);''')
-        row=self.db.execute("SELECT value FROM schema_metadata WHERE key='version'").fetchone()
-        if row is None:
-            self.db.execute("INSERT INTO schema_metadata VALUES('version','1')")
-        elif row[0] != "1":
-            raise StateStoreError("Unsupported state database schema version")
+        self.db.execute("INSERT INTO schema_metadata VALUES('version','1')")
         self.db.commit()
     def _recover_abandoned(self):
         now=_now(); rows=self.db.execute("SELECT id FROM runs WHERE status='running' AND execution_id<>?",(self.execution_id,)).fetchall()
@@ -64,12 +70,14 @@ CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC); CREATE 
         payload=json.dumps({"kind":context.kind.value},separators=(',',':')); self.db.execute("INSERT INTO run_events VALUES(?,?,?,?,?,?)",(run_id,1,"run_started",now,payload,len(payload))); self.db.commit(); return run_id
     @_async_db_error
     async def append_event(self, run_id, event: RunTraceEvent):
-        if self.db.execute("SELECT status FROM runs WHERE id=?",(run_id,)).fetchone() != ("running",): raise StateStoreError("Run is not running")
+        self.db.execute("BEGIN IMMEDIATE")
         raw=json.dumps(event.payload,ensure_ascii=False,allow_nan=False,separators=(',',':')).encode()
         if len(raw)>MAX_EVENT_BYTES: raise StateStoreError("Run event payload exceeds limit")
-        row=self.db.execute("SELECT event_count FROM runs WHERE id=?",(run_id,)).fetchone()
-        if not row or row[0]>=MAX_EVENTS-1: raise StateStoreError("Run event limit exceeded")
-        seq=row[0]+1; self.db.execute("INSERT INTO run_events VALUES(?,?,?,?,?,?)",(run_id,seq,event.event_type,event.occurred_at.isoformat(),raw.decode(),len(raw))); self.db.execute("UPDATE runs SET event_count=?,updated_at=? WHERE id=?",(seq,_now(),run_id)); self.db.commit()
+        row=self.db.execute("SELECT status,event_count FROM runs WHERE id=?",(run_id,)).fetchone()
+        if not row: raise StateStoreError("Run not found")
+        if row[0] != RunStatus.RUNNING.value: raise StateStoreError("Run is not running")
+        if row[1]>=MAX_EVENTS-1: raise StateStoreError("Run event limit exceeded")
+        seq=row[1]+1; self.db.execute("INSERT INTO run_events VALUES(?,?,?,?,?,?)",(run_id,seq,event.event_type,event.occurred_at.isoformat(),raw.decode(),len(raw))); self.db.execute("UPDATE runs SET event_count=?,updated_at=? WHERE id=?",(seq,_now(),run_id)); self.db.commit()
     @_async_db_error
     async def finish_run(self, run_id, status, *, error_code=None, error_message=None, trace_complete=None, final_text=None):
         if status is RunStatus.RUNNING: raise StateStoreError("Run finish status must be terminal")
