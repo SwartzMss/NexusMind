@@ -34,6 +34,7 @@ from nexusmind.persistence import SQLiteRunStore, StateStoreError, RunKind, RunS
 from datetime import datetime, timezone
 
 async def _best_effort_cancel(store, run_id) -> None:
+    text_sink: list[str] = []; return_code = 1
     try:
         if store and run_id:
             await asyncio.shield(store.finish_run(run_id, RunStatus.CANCELLED, error_code="cancelled"))
@@ -281,7 +282,7 @@ async def _run_chat_with_mcp(
                 executor_timeout=config.request_timeout,
                 workspace=_registry_workspace(registry),
                 state_db=state_db, record_content=record_content,
-                external_store=store, external_run_id=run_id, final_text_sink=(text_sink := []),
+                external_store=store, external_run_id=run_id, final_text_sink=text_sink,
             )
     except BaseException as exc:
         try:
@@ -293,6 +294,7 @@ async def _run_chat_with_mcp(
         _best_effort_close(store)
         raise
 
+    text_sink: list[str] = []; return_code = 1
     try:
         await client.__aexit__(None, None, None)
     except asyncio.CancelledError:
@@ -771,7 +773,7 @@ async def _run_skill_with_mcp(
                 limits=limits,
                 workspace=_registry_workspace(registry),
                 state_db=state_db, record_content=record_content, run_kind=RunKind.SKILL, skill_name=skill.name,
-                external_store=store, external_run_id=run_id, final_text_sink=(text_sink := []),
+                external_store=store, external_run_id=run_id, final_text_sink=text_sink,
             )
     except BaseException as exc:
         try:
