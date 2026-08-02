@@ -62,12 +62,13 @@ def _validate_resume_batches(messages) -> None:
             cursor += 1
         if len(set(results)) != len(results):
             raise HarnessResumeStateError("Tool batch contains duplicate Tool results")
-        batches.append((calls, set(results), cursor == len(messages)))
+        ordered_call_ids = list(calls)
+        if results != ordered_call_ids[:len(results)]:
+            raise HarnessResumeStateError("Tool results are not an ordered prefix of the Tool Call batch")
+        batches.append((calls, results, cursor == len(messages)))
     for calls, results, reaches_end in batches:
-        if not reaches_end and results != set(calls):
+        if not reaches_end and results != list(calls):
             raise HarnessResumeStateError("A previous Tool Call batch is incomplete")
-    if batches and batches[-1][1] - set(batches[-1][0]):
-        raise HarnessResumeStateError("Tool batch contains an unknown result")
 
 class HarnessExecution:
     def __init__(self, runner: "HarnessRunner", request: HarnessRequest) -> None:
@@ -145,6 +146,8 @@ class HarnessExecution:
                 self.state.stop_reason = self.stop_reason
                 self.state.status = HarnessStatus.FAILED
                 self.state.phase = HarnessPhase.TERMINAL
+            if self._resume_cursor_pending and event.type is RuntimeEventType.TOOL_RESULT:
+                self._resume_cursor_pending = False
             yield event
           self._resume_cursor_pending = False
         except asyncio.CancelledError:
@@ -184,6 +187,8 @@ class HarnessRunner:
 
     def create_execution(self, request: HarnessRequest) -> HarnessExecution:
         """Create isolated mutable state for one run; executions may run concurrently."""
+        if _RESERVED_RESUME_METADATA & set(request.metadata):
+            raise ValueError("Harness request metadata contains reserved internal fields")
         return HarnessExecution(self, request)
 
     def resume_execution(self, request: HarnessResumeRequest) -> HarnessExecution:
@@ -199,6 +204,8 @@ class HarnessRunner:
         if checkpoint.state.phase in {HarnessPhase.AFTER_MODEL, HarnessPhase.BEFORE_TOOL, HarnessPhase.AFTER_TOOL}:
             messages = checkpoint.state.messages
             _validate_resume_batches(messages)
+            user_indexes = [index for index, message in enumerate(messages) if message.role.value == "user"]
+            run_messages = messages[user_indexes[-1] + 1:] if user_indexes else messages
             assistants = [message for message in messages if message.role.value == "assistant"]
             if not assistants:
                 raise HarnessResumeStateError("Checkpoint has no resumable Assistant Tool Call batch")
@@ -242,13 +249,13 @@ class HarnessRunner:
                 raise HarnessResumeStateError("Tool results do not match executed Tool Call IDs")
             transcript_call_ids = [
                 call.id
-                for message in messages
+                for message in run_messages
                 if message.role.value == "assistant"
                 for call in message.tool_calls
             ]
             transcript_result_ids = [
                 message.tool_call_id
-                for message in messages
+                for message in run_messages
                 if message.role.value == "tool" and message.tool_call_id
             ]
             if len(set(transcript_call_ids)) != len(transcript_call_ids):
@@ -264,7 +271,7 @@ class HarnessRunner:
                 accounted_calls = transcript_call_ids[:-len(assistants[-1].tool_calls)] if assistants[-1].tool_calls else transcript_call_ids
             calls_by_id = {
                 call.id: call
-                for message in messages if message.role.value == "assistant"
+                for message in run_messages if message.role.value == "assistant"
                 for call in message.tool_calls
             }
             required_argument_bytes = sum(
@@ -273,8 +280,11 @@ class HarnessRunner:
             )
             required_result_bytes = sum(
                 len((message.content or "").encode("utf-8"))
-                for message in messages if message.role.value == "tool"
+                for message in run_messages if message.role.value == "tool"
             )
+            required_model_turns = sum(1 for message in run_messages if message.role.value == "assistant")
+            if checkpoint.state.model_turns < required_model_turns:
+                raise HarnessResumeStateError("Model turn counter is below transcript consumption")
             if checkpoint.state.tool_argument_bytes_total < required_argument_bytes:
                 raise HarnessResumeStateError("Tool argument byte counter is below transcript consumption")
             if checkpoint.state.tool_result_bytes_total < required_result_bytes:

@@ -52,6 +52,12 @@ def test_execution_stream_is_single_use():
             [event async for event in execution.stream()]
     asyncio.run(run())
 
+def test_normal_request_rejects_internal_resume_metadata():
+    request = HarnessRequest(messages=(Message(role=MessageRole.USER, content="hello"),),
+        metadata={"resume_existing_assistant": True})
+    with pytest.raises(ValueError, match="reserved"):
+        HarnessRunner(FakeChatModel(["done"])).create_execution(request)
+
 def test_resume_after_model_text_completes_without_model_call():
     class CountingModel(FakeChatModel):
         def __init__(self):
@@ -247,6 +253,30 @@ def test_resume_after_model_executes_multiple_pending_tools():
         results = [event.tool_result.call_id for event in events if event.type.value == "tool_result"]
         assert results == ["call-1", "call-2"]
         assert execution.state.executed_tool_call_ids == {"call-1", "call-2"}
+    asyncio.run(run())
+
+def test_checkpoint_allowed_after_first_resumed_tool_result():
+    async def run():
+        calls = (
+            ToolCall(id="call-1", name="echo", arguments={"text": "one"}),
+            ToolCall(id="call-2", name="echo", arguments={"text": "two"}),
+        )
+        state = HarnessState(messages=[Message(role=MessageRole.ASSISTANT, content=None, tool_calls=calls)],
+            model_turns=1, phase=HarnessPhase.AFTER_MODEL)
+        source = HarnessCheckpoint.create(state, "run-mid-tool", 0)
+        registry = ToolRegistry()
+        registry.register(EchoTool())
+        execution = HarnessRunner(FakeChatModel(["done"]), tool_executor=ToolExecutor(registry)).resume_execution(
+            HarnessResumeRequest(source, tools=(EchoTool().definition,))
+        )
+        stream = execution.stream()
+        async for event in stream:
+            if event.type.value == "tool_result":
+                checkpoint = execution.create_checkpoint(sequence=1)
+                assert checkpoint.state.executed_tool_call_ids == ("call-1",)
+                await stream.aclose()
+                return
+        pytest.fail("missing resumed tool result")
     asyncio.run(run())
 
 def test_resume_after_model_allows_arguments_at_total_limit():
