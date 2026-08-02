@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+from copy import deepcopy
 from datetime import datetime, timezone
 from uuid import uuid4
 from collections.abc import AsyncIterator
@@ -10,6 +11,7 @@ from nexusmind.runtime.events import RuntimeEvent
 from nexusmind.runtime.harness.context import HarnessRequest
 from nexusmind.runtime.harness.state import HarnessPhase, HarnessState, HarnessStatus
 from nexusmind.runtime.harness.stop import StopReason
+from nexusmind.runtime.harness.resume import HarnessResumeRequest, state_from_checkpoint
 from nexusmind.runtime.harness.checkpoint import CheckpointBoundary, HarnessCheckpoint, HarnessStateSnapshot
 from nexusmind.runtime.policy import ApprovalProvider, ToolApprovalSummarizer, ToolPolicy
 from nexusmind.tools.executor import ToolExecutorProtocol
@@ -92,6 +94,21 @@ class HarnessRunner:
     def create_execution(self, request: HarnessRequest) -> HarnessExecution:
         """Create isolated mutable state for one run; executions may run concurrently."""
         return HarnessExecution(self, request)
+
+    def resume_execution(self, request: HarnessResumeRequest) -> HarnessExecution:
+        state = state_from_checkpoint(request.checkpoint)
+        limits = request.limits or self._default_limits
+        if state.model_turns >= limits.max_model_turns:
+            raise RuntimeError("Checkpoint has exhausted model turn limits")
+        harness_request = HarnessRequest(
+            messages=tuple(state.messages),
+            tools=tuple(deepcopy(request.tools)),
+            limits=limits,
+            metadata={"resumed": True, "checkpoint_id": request.checkpoint.checkpoint_id, "checkpoint_sequence": request.checkpoint.sequence},
+        )
+        execution = HarnessExecution(self, harness_request)
+        execution.state = state
+        return execution
 
     async def _stream(self, request: HarnessRequest, state: HarnessState) -> AsyncIterator[RuntimeEvent]:
         limits = request.limits or self._default_limits

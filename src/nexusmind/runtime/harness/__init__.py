@@ -9,5 +9,6 @@ from .checkpoint import CheckpointBoundary, HarnessCheckpoint, HarnessStateSnaps
 from .checkpoint_store import CheckpointStore, InMemoryCheckpointStore
 from .checkpoint_codec import checkpoint_from_json, checkpoint_to_json
 from .sqlite_checkpoint_store import SQLiteCheckpointStore
+from .resume import HarnessResumeCompatibilityError, HarnessResumeError, HarnessResumeRequest, HarnessResumeStateError
 
-__all__ = ["CheckpointBoundary", "CheckpointStore", "HarnessCheckpoint", "HarnessExecution", "HarnessLimits", "HarnessPhase", "HarnessRequest", "HarnessRunner", "HarnessState", "HarnessStateSnapshot", "HarnessStatus", "InMemoryCheckpointStore", "SQLiteCheckpointStore", "StopReason", "checkpoint_from_json", "checkpoint_to_json"]
+__all__ = ["CheckpointBoundary", "CheckpointStore", "HarnessCheckpoint", "HarnessExecution", "HarnessLimits", "HarnessPhase", "HarnessRequest", "HarnessResumeCompatibilityError", "HarnessResumeError", "HarnessResumeRequest", "HarnessResumeStateError", "HarnessRunner", "HarnessState", "HarnessStateSnapshot", "HarnessStatus", "InMemoryCheckpointStore", "SQLiteCheckpointStore", "StopReason", "checkpoint_from_json", "checkpoint_to_json"]
