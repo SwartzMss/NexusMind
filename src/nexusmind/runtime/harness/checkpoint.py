@@ -68,6 +68,17 @@ class HarnessCheckpoint:
             datetime.fromisoformat(self.created_at.replace("Z", "+00:00"))
         except ValueError as exc:
             raise ValueError("Checkpoint timestamp must be ISO-8601") from exc
+        self.validate()
+
+    def validate(self) -> None:
+        active_tools = set(self.state.started_tool_call_ids) - set(self.state.executed_tool_call_ids)
+        if active_tools:
+            raise ValueError("Cannot create a checkpoint while a tool may be running")
+        if self.boundary is CheckpointBoundary.RUN_TERMINAL:
+            if self.state.status is HarnessStatus.RUNNING or self.state.stop_reason is None:
+                raise ValueError("Terminal checkpoint requires a terminal status and stop reason")
+        elif self.state.status is not HarnessStatus.RUNNING:
+            raise ValueError("Non-terminal checkpoint requires a running state")
         _ensure_json_size(self)
 
     @classmethod
@@ -86,7 +97,13 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, (tuple, list)): return [_jsonable(item) for item in value]
     if isinstance(value, Message): return {"role": value.role.value, "content": value.content, "name": value.name, "tool_call_id": value.tool_call_id, "tool_calls": [_jsonable(call) for call in value.tool_calls], "metadata": _jsonable(value.metadata)}
     if hasattr(value, "__dataclass_fields__"): return {name: _jsonable(getattr(value, name)) for name in value.__dataclass_fields__}
-    if isinstance(value, dict): return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise ValueError("Checkpoint JSON object keys must be strings")
+            result[key] = _jsonable(item)
+        return result
     if isinstance(value, float) and not __import__("math").isfinite(value):
         raise ValueError("Checkpoint contains a non-finite number")
     if isinstance(value, (str, int, float, bool)) or value is None: return value

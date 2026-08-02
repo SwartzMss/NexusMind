@@ -80,3 +80,40 @@ def test_checkpoint_rejects_active_tool() -> None:
         assert "safe checkpoint" in str(exc)
     else:
         raise AssertionError("active tool must not be checkpointed as after_tool")
+
+
+def test_direct_checkpoint_construction_cannot_bypass_boundary_validation() -> None:
+    state = HarnessState(messages=[], started_tool_call_ids={"call-1"})
+    snapshot = HarnessStateSnapshot.from_state(state)
+    try:
+        HarnessCheckpoint(1, "id", "run", 1, CheckpointBoundary.AFTER_TOOL, snapshot, "2026-08-02T00:00:00Z")
+    except ValueError as exc:
+        assert "tool" in str(exc)
+    else:
+        raise AssertionError("direct construction must validate checkpoint safety")
+
+
+def test_store_revalidates_mutated_checkpoint_before_save() -> None:
+    async def run():
+        store = InMemoryCheckpointStore()
+        state = HarnessState(messages=[Message(role=MessageRole.USER, content="hello")])
+        checkpoint = HarnessCheckpoint.create(state, "run-mutated", 0, CheckpointBoundary.BEFORE_MODEL)
+        checkpoint.state.messages[0].metadata["huge"] = "x" * (4 * 1024 * 1024)
+        try:
+            await store.save(checkpoint)
+        except ValueError as exc:
+            assert "maximum size" in str(exc)
+        else:
+            raise AssertionError("store must validate a checkpoint immediately before saving")
+
+    asyncio.run(run())
+
+
+def test_checkpoint_rejects_non_string_object_keys() -> None:
+    state = HarnessState(messages=[Message(role=MessageRole.USER, content="hello", metadata={1: "bad"})])
+    try:
+        HarnessStateSnapshot.from_state(state)
+    except ValueError as exc:
+        assert "keys must be strings" in str(exc)
+    else:
+        raise AssertionError("non-string JSON object keys must be rejected")
