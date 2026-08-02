@@ -293,7 +293,6 @@ async def _run_chat_with_mcp(
         _best_effort_close(store)
         raise
 
-    text_sink: list[str] = []; return_code = 1
     try:
         await client.__aexit__(None, None, None)
     except asyncio.CancelledError:
