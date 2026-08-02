@@ -39,6 +39,9 @@ class SQLiteCheckpointStore:
             actual = {row[1]: (row[2].upper(), row[3], row[5]) for row in db.execute("PRAGMA table_info(harness_checkpoints)")}
             if actual != expected:
                 raise CheckpointStoreError("Checkpoint database schema is incomplete or incompatible")
+            table_sql = (db.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'harness_checkpoints'").fetchone() or ("",))[0] or ""
+            if "UNIQUE(run_id,sequence)" not in table_sql.replace(" ", ""):
+                raise CheckpointStoreError("Checkpoint database is missing the run sequence uniqueness constraint")
             db.execute("CREATE INDEX IF NOT EXISTS idx_harness_checkpoints_run_sequence ON harness_checkpoints(run_id, sequence DESC)")
             db.execute("PRAGMA user_version = 1")
 

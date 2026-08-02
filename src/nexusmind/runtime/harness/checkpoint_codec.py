@@ -43,7 +43,18 @@ def checkpoint_from_json(payload: str) -> HarnessCheckpoint:
                 raise CheckpointDecodeError("Invalid message fields")
             if type(item["tool_calls"]) is not list or type(item["metadata"]) is not dict:
                 raise CheckpointDecodeError("Invalid message value types")
-            calls = tuple(ToolCall(id=c["id"], name=c["name"], arguments=c["arguments"]) for c in item["tool_calls"])
+            if item["content"] is not None and type(item["content"]) is not str:
+                raise CheckpointDecodeError("Invalid message content type")
+            if item["name"] is not None and type(item["name"]) is not str:
+                raise CheckpointDecodeError("Invalid message name type")
+            if item["tool_call_id"] is not None and type(item["tool_call_id"]) is not str:
+                raise CheckpointDecodeError("Invalid tool call id type")
+            calls_data = []
+            for call in item["tool_calls"]:
+                if type(call) is not dict or set(call) != {"id", "name", "arguments"} or type(call["id"]) is not str or type(call["name"]) is not str or type(call["arguments"]) is not dict:
+                    raise CheckpointDecodeError("Invalid tool call fields")
+                calls_data.append(ToolCall(id=call["id"], name=call["name"], arguments=call["arguments"]))
+            calls = tuple(calls_data)
             messages.append(Message(role=MessageRole(item["role"]), content=item["content"], name=item["name"], tool_call_id=item["tool_call_id"], tool_calls=calls, metadata=item["metadata"]))
         from nexusmind.runtime.harness.checkpoint import HarnessStateSnapshot
         snapshot = HarnessStateSnapshot(tuple(messages), raw["model_turns"], raw["tool_calls_total"], raw["tool_argument_bytes_total"], raw["tool_result_bytes_total"], tuple(raw["started_tool_call_ids"]), tuple(raw["executed_tool_call_ids"]), HarnessStatus(raw["status"]), StopReason(raw["stop_reason"]) if raw["stop_reason"] is not None else None, HarnessPhase(raw["phase"]))
