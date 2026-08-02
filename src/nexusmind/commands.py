@@ -19,7 +19,7 @@ import uuid
 from typing import Any
 
 from nexusmind.command_errors import CommandCleanupError, CommandConfigError, CommandLimitError, CommandProfileError, CommandStartError
-from nexusmind.tools.contracts import ToolDefinition, ToolResultBudget, ToolResultRequirements, ToolRiskLevel
+from nexusmind.tools.contracts import ToolDefinition, ToolResultBudget, ToolResultRequirements, ToolRiskLevel, json_result_requirements
 from nexusmind.workspace import Workspace, WorkspaceError, resolve_workspace_path, workspace_relative_path
 
 MAX_COMMAND_PROFILES = 32
@@ -187,8 +187,15 @@ class RunCommandTool:
         profile_id = arguments.get("profile")
         profile = self._config.profiles.get(profile_id) if type(profile_id) is str else None
         profiles = [profile] if profile is not None else list(self._config.profiles.values())
-        min_bytes = max(_minimum_command_result_bytes(item) for item in profiles)
-        return ToolResultRequirements(min_bytes=min_bytes, min_nodes=13, min_depth=2)
+        requirements = [
+            json_result_requirements({"ok": True, "output": _minimum_command_output(item)})
+            for item in profiles
+        ]
+        return ToolResultRequirements(
+            min_bytes=max(item.min_bytes for item in requirements),
+            min_nodes=max(item.min_nodes for item in requirements),
+            min_depth=max(item.min_depth for item in requirements),
+        )
 
     def timeout_for_call(self, arguments: dict[str, Any]) -> float:
         profile_id = arguments.get("profile")
@@ -403,7 +410,14 @@ async def _run_profile(
                 await ensure_cleanup_once(force=not completed_normally)
         finally:
             if lifecycle is not None and not lifecycle.done():
-                await asyncio.gather(lifecycle, return_exceptions=True)
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(lifecycle),
+                        timeout=COMMAND_CLEANUP_GRACE_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    lifecycle.cancel()
+                    await asyncio.gather(lifecycle, return_exceptions=True)
             _cleanup_private_temp(gate_path, gate_dir)
             try:
                 if process is not None:
@@ -1047,8 +1061,8 @@ def _decode_output(raw: bytes) -> tuple[str, bool]:
     return text, replaced
 
 
-def _minimum_command_result_bytes(profile: CommandProfile) -> int:
-    output = {
+def _minimum_command_output(profile: CommandProfile) -> dict[str, Any]:
+    return {
         "profile": profile.profile_id,
         "cwd": profile.cwd_relative,
         "exit_code": -2_147_483_648,
@@ -1062,7 +1076,6 @@ def _minimum_command_result_bytes(profile: CommandProfile) -> int:
         "stderr_bytes": 0,
         "encoding_replaced": False,
     }
-    return _command_result_size(output)
 
 
 def _command_result_size(output: dict[str, Any]) -> int:

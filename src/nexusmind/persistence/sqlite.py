@@ -83,6 +83,7 @@ class SQLiteRunStore:
 
     def _validate_v1_schema(self):
         required = {
+            "schema_metadata": {"key", "value"},
             "runs": {"id", "schema_version", "execution_id", "kind", "status", "skill_name", "model_name", "input_preview", "input_sha256", "final_text", "error_code", "error_message", "trace_complete", "event_count", "started_at", "updated_at", "finished_at"},
             "run_events": {"run_id", "sequence", "event_type", "occurred_at", "payload_json", "payload_bytes"},
         }
@@ -103,6 +104,10 @@ class SQLiteRunStore:
         }.issubset(not_null["runs"]):
             raise StateStoreError("Unsupported state database schema version")
         if not {"run_id", "sequence", "event_type", "occurred_at", "payload_json", "payload_bytes"}.issubset(not_null["run_events"]):
+            raise StateStoreError("Unsupported state database schema version")
+        metadata_pk = {r[1]: r[5] for r in table_info["schema_metadata"] if r[5]}
+        metadata_not_null = {r[1] for r in table_info["schema_metadata"] if r[3] or r[5]}
+        if metadata_pk != {"key": 1} or not {"key", "value"}.issubset(metadata_not_null):
             raise StateStoreError("Unsupported state database schema version")
         if not any(r[1] == "id" and r[5] == 1 for r in table_info["runs"]):
             raise StateStoreError("Unsupported state database schema version")
@@ -170,15 +175,32 @@ class SQLiteRunStore:
         return self.db.execute(q+" ORDER BY started_at DESC LIMIT ?",(*vals,limit)).fetchall()
     @_sync_db_error
     def show_run(self, run_id):
-        cur=self.db.execute("SELECT * FROM runs WHERE id=?",(run_id,)); row=cur.fetchone()
-        if not row:return None
-        run=dict(zip([d[0] for d in cur.description], row)); cur=self.db.execute("SELECT sequence,event_type,occurred_at,payload_json FROM run_events WHERE run_id=? ORDER BY sequence",(run_id,))
-        events=[{"sequence":r[0],"event_type":r[1],"occurred_at":r[2],"payload":json.loads(r[3])} for r in cur.fetchall()]; return {"run":run,"events":events}
+        self.db.execute("BEGIN")
+        try:
+            cur=self.db.execute("SELECT * FROM runs WHERE id=?",(run_id,)); row=cur.fetchone()
+            if not row:
+                self.db.commit()
+                return None
+            run=dict(zip([d[0] for d in cur.description], row)); cur=self.db.execute("SELECT sequence,event_type,occurred_at,payload_json FROM run_events WHERE run_id=? ORDER BY sequence",(run_id,))
+            events=[{"sequence":r[0],"event_type":r[1],"occurred_at":r[2],"payload":json.loads(r[3])} for r in cur.fetchall()]
+            self.db.commit()
+            return {"run":run,"events":events}
+        except BaseException:
+            self.db.rollback()
+            raise
     @_sync_db_error
     def prune(self, older_than_days):
         if int(older_than_days) < 0: raise ValueError("older-than-days must be non-negative")
         cutoff=(datetime.now(timezone.utc)-timedelta(days=int(older_than_days))).isoformat()
-        rows=self.db.execute("SELECT id FROM runs WHERE status<>'running' AND started_at<?",(cutoff,)).fetchall(); self.db.executemany("DELETE FROM runs WHERE id=?",rows); self.db.commit(); return len(rows)
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            cur=self.db.execute("DELETE FROM runs WHERE status IN ('completed','failed','cancelled','abandoned') AND started_at<?",(cutoff,))
+            deleted=cur.rowcount
+            self.db.commit()
+            return deleted
+        except BaseException:
+            self.db.rollback()
+            raise
     @_sync_db_error
     def recover_abandoned(self):
         self._recover_abandoned()
