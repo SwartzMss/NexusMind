@@ -1,5 +1,7 @@
 from __future__ import annotations
 import asyncio
+from datetime import datetime, timezone
+from uuid import uuid4
 from collections.abc import AsyncIterator
 from nexusmind.models.base import ChatModel
 from nexusmind.runtime.harness.limits import HarnessLimits
@@ -8,6 +10,7 @@ from nexusmind.runtime.events import RuntimeEvent
 from nexusmind.runtime.harness.context import HarnessRequest
 from nexusmind.runtime.harness.state import HarnessState, HarnessStatus
 from nexusmind.runtime.harness.stop import StopReason
+from nexusmind.runtime.harness.checkpoint import CheckpointBoundary, HarnessCheckpoint, HarnessStateSnapshot
 from nexusmind.runtime.policy import ApprovalProvider, ToolApprovalSummarizer, ToolPolicy
 from nexusmind.tools.executor import ToolExecutorProtocol
 
@@ -18,16 +21,40 @@ class HarnessExecution:
         self.state = HarnessState(messages=list(request.messages))
         self.stop_reason: StopReason | None = None
 
+    def create_checkpoint(self, run_id: str, sequence: int, boundary: CheckpointBoundary) -> HarnessCheckpoint:
+        return HarnessCheckpoint(
+            schema_version=1,
+            checkpoint_id=uuid4().hex,
+            run_id=run_id,
+            sequence=sequence,
+            boundary=boundary,
+            state=HarnessStateSnapshot.from_state(self.state, self.stop_reason),
+            created_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        )
+
     async def stream(self) -> AsyncIterator[RuntimeEvent]:
-        async for event in self._runner._stream(self._request, self.state):
+        try:
+          async for event in self._runner._stream(self._request, self.state):
             if event.type.value == "run_completed":
                 self.stop_reason = StopReason.MODEL_COMPLETED
-            elif event.type.value in {"model_failed", "run_failed"}:
+            elif event.type.value == "model_failed" and self.stop_reason is None:
+                self.stop_reason = StopReason.MODEL_FAILED
+            elif event.type.value == "run_failed" and self.stop_reason is None:
                 reason = event.metadata.get("stop_reason")
-                self.stop_reason = StopReason(reason) if reason in StopReason._value2member_map_ else (
-                    StopReason.MODEL_FAILED if event.type.value == "model_failed" else StopReason.RUNTIME_ERROR
-                )
+                if reason in StopReason._value2member_map_:
+                    self.stop_reason = StopReason(reason)
+                elif event.error == "Agent loop limit exceeded":
+                    self.stop_reason = StopReason.LIMIT_EXCEEDED
+                elif event.metadata.get("tool_execution_started"):
+                    self.stop_reason = StopReason.TOOL_FAILED
+                else:
+                    self.stop_reason = StopReason.RUNTIME_ERROR
+                self.state.status = HarnessStatus.FAILED
             yield event
+        except asyncio.CancelledError:
+            self.state.status = HarnessStatus.CANCELLED
+            self.stop_reason = StopReason.CANCELLED
+            raise
 
 
 class HarnessRunner:
