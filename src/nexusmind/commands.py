@@ -28,6 +28,7 @@ MAX_ARG_CHARS = 1024
 MAX_ARGV_BYTES = 8192
 MAX_TIMEOUT_SECONDS = 300
 MAX_OUTPUT_BYTES = 128 * 1024
+MAX_REPORTED_STREAM_BYTES = 2**63 - 1
 DEFAULT_TOOL_RESULT_BYTES = 1024 * 1024
 COMMAND_CLEANUP_GRACE_SECONDS = 2.0
 COMMAND_POSIX_SUPERVISOR_CLEANUP_SECONDS = COMMAND_CLEANUP_GRACE_SECONDS * 3
@@ -1022,7 +1023,7 @@ async def _read_stream_limited(stream: asyncio.StreamReader | None) -> CapturedS
         chunk = await stream.read(8192)
         if not chunk:
             break
-        total_bytes += len(chunk)
+        total_bytes = min(total_bytes + len(chunk), MAX_REPORTED_STREAM_BYTES)
         previous_size = size
         if size < MAX_OUTPUT_BYTES:
             remaining = MAX_OUTPUT_BYTES - size
@@ -1072,8 +1073,8 @@ def _minimum_command_output(profile: CommandProfile) -> dict[str, Any]:
         "stderr": "",
         "stdout_truncated": False,
         "stderr_truncated": False,
-        "stdout_bytes": 0,
-        "stderr_bytes": 0,
+        "stdout_bytes": MAX_REPORTED_STREAM_BYTES,
+        "stderr_bytes": MAX_REPORTED_STREAM_BYTES,
         "encoding_replaced": False,
     }
 

@@ -272,6 +272,7 @@ class ChatRuntime:
                             yield RuntimeEvent(
                                 RuntimeEventType.TOOL_APPROVAL_REQUIRED,
                                 tool_approval=policy_result.approval_required,
+                                metadata=_tool_audit_metadata(call),
                             )
                             try:
                                 decision = await self._approval_provider.request(
@@ -296,6 +297,7 @@ class ChatRuntime:
                             yield RuntimeEvent(
                                 RuntimeEventType.TOOL_APPROVAL_RESOLVED,
                                 tool_approval=resolved,
+                                metadata=_tool_audit_metadata(call),
                             )
                             if decision == ApprovalDecision.DENY:
                                 result = _permission_denied_result(call)
@@ -722,6 +724,12 @@ def _valid_tool_result(result: ToolResult) -> bool:
         and isinstance(result.error.message, str)
         and isinstance(result.error.retryable, bool)
     )
+
+
+def _tool_audit_metadata(call: ToolCall) -> dict[str, object]:
+    if call.name == "run_command" and type(call.arguments.get("profile")) is str:
+        return {"profile": call.arguments["profile"]}
+    return {}
 
 
 def _tool_result_message_content(

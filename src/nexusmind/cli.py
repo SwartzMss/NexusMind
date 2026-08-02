@@ -466,10 +466,14 @@ def project_runtime_event(event) -> dict:
     if event.finish_reason: payload["finish_reason"] = event.finish_reason
     if event.tool_call is not None:
         call = event.tool_call; payload.update(call_id=call.id, tool_name=call.name, risk_level=event.metadata.get("risk_level", "unspecified"), argument_bytes=int(event.metadata.get("argument_bytes", len(json.dumps(call.arguments, ensure_ascii=False, separators=(",", ":")).encode()))))
+        if call.name == "run_command" and type(call.arguments.get("profile")) is str:
+            payload["profile"] = call.arguments["profile"]
     if event.tool_approval is not None:
         approval = event.tool_approval
         summary = "command profile approval" if approval.tool_name == "run_command" else _safe_cli_field(approval.summary, max_length=512)
         payload.update(request_id=approval.request_id, call_id=approval.call_id, tool_name=approval.tool_name, risk_level=approval.risk_level.value, decision=getattr(approval.decision, 'value', approval.decision), summary=summary)
+        if approval.tool_name == "run_command" and type(event.metadata.get("profile")) is str:
+            payload["profile"] = event.metadata["profile"]
     if event.tool_result is not None:
         result = event.tool_result; output = result.output
         result_metadata = getattr(result, "metadata", {})
@@ -498,7 +502,7 @@ def _runs(args: argparse.Namespace) -> int:
             if item["run"].get("error_code"): print("Error code\t"+str(item["run"]["error_code"]))
             if item["run"].get("error_message"): print("Error message\t"+str(item["run"]["error_message"]))
             for e in item["events"]:
-                p=e["payload"]; summary=" ".join(f"{k}={p[k]}" for k in ("tool_name","risk_level","decision","path","committed","exit_code","server_id","remote_tool_name") if k in p)
+                p=e["payload"]; summary=" ".join(f"{k}={p[k]}" for k in ("tool_name","risk_level","decision","profile","path","committed","exit_code","timed_out","duration_ms","stdout_bytes","stderr_bytes","stdout_truncated","stderr_truncated","result_truncated","server_id","remote_tool_name") if k in p)
                 print(f"{e['sequence']}\t{e['event_type']}\t{e['occurred_at']}" + (f"\t{summary}" if summary else ""))
             return 0
         if args.runs_command == "recover":

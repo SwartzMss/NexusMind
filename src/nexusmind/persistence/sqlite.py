@@ -55,11 +55,14 @@ class SQLiteRunStore:
                 uri = "file:" + urllib.parse.quote(str(self.path.resolve()), safe="/\\:") + "?mode=ro"
                 self.db=sqlite3.connect(uri, uri=True, timeout=0.5)
                 self.db.execute("PRAGMA foreign_keys=ON")
-                self._validate_v1_schema()
+                self._validate_existing_schema()
             else:
                 uri = "file:" + urllib.parse.quote(str(self.path.resolve()), safe="/\\:") + "?mode=rw" if not create else str(self.path)
                 self.db=sqlite3.connect(uri, uri=not create, timeout=0.5); self.db.execute("PRAGMA busy_timeout=500"); self.db.execute("PRAGMA foreign_keys=ON")
-                self._schema()
+                if create:
+                    self._schema()
+                else:
+                    self._validate_existing_schema()
             if recover_abandoned: self.recover_abandoned()
         except BaseException as exc:
             try: self.db.close()
@@ -85,9 +88,7 @@ class SQLiteRunStore:
     def _schema_transaction(self):
         metadata_exists=self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_metadata'").fetchone()
         if metadata_exists:
-            row=self.db.execute("SELECT value FROM schema_metadata WHERE key='version'").fetchone()
-            if row is None or row[0] != "1": raise StateStoreError("Unsupported state database schema version")
-            self._validate_v1_schema()
+            self._validate_existing_schema()
             return
         existing=self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table'").fetchone()
         if existing: raise StateStoreError("Unsupported state database schema version")
@@ -96,6 +97,12 @@ class SQLiteRunStore:
         self.db.execute("CREATE TABLE run_events(run_id TEXT NOT NULL,sequence INTEGER NOT NULL,event_type TEXT NOT NULL,occurred_at TEXT NOT NULL,payload_json TEXT NOT NULL,payload_bytes INTEGER NOT NULL,PRIMARY KEY(run_id,sequence),FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE)")
         self.db.execute("CREATE INDEX idx_runs_started_at ON runs(started_at DESC)"); self.db.execute("CREATE INDEX idx_runs_status_started ON runs(status,started_at DESC)")
         self.db.execute("INSERT INTO schema_metadata VALUES('version','1')")
+
+    def _validate_existing_schema(self):
+        row=self.db.execute("SELECT value FROM schema_metadata WHERE key='version'").fetchone()
+        if row is None or row[0] != "1":
+            raise StateStoreError("Unsupported state database schema version")
+        self._validate_v1_schema()
 
     def _validate_v1_schema(self):
         required = {
@@ -125,7 +132,11 @@ class SQLiteRunStore:
         metadata_not_null = {r[1] for r in table_info["schema_metadata"] if r[3] or r[5]}
         if metadata_pk != {"key": 1} or not {"key", "value"}.issubset(metadata_not_null):
             raise StateStoreError("Unsupported state database schema version")
-        if not any(r[1] == "id" and r[5] == 1 for r in table_info["runs"]):
+        runs_pk = {r[1]: r[5] for r in table_info["runs"] if r[5]}
+        if runs_pk != {"id": 1}:
+            raise StateStoreError("Unsupported state database schema version")
+        trace_complete = next(r for r in table_info["runs"] if r[1] == "trace_complete")
+        if str(trace_complete[4]).strip("'\"") != "1":
             raise StateStoreError("Unsupported state database schema version")
         event_pk = {r[1]: r[5] for r in table_info["run_events"] if r[5]}
         if event_pk != {"run_id": 1, "sequence": 2}:
