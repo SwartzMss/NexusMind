@@ -34,7 +34,6 @@ from nexusmind.persistence import SQLiteRunStore, StateStoreError, RunKind, RunS
 from datetime import datetime, timezone
 
 async def _best_effort_cancel(store, run_id) -> None:
-    text_sink: list[str] = []; return_code = 1
     try:
         if store and run_id:
             await asyncio.shield(store.finish_run(run_id, RunStatus.CANCELLED, error_code="cancelled"))
