@@ -329,6 +329,7 @@ async def _run_chat(
     skill_name: str | None = None,
     external_store=None, external_run_id: str | None = None, final_text_sink=None, failure_sink=None,
 ) -> int:
+    failure_sink = failure_sink if failure_sink is not None else {}
     store = external_store; run_id = external_run_id; owns_store = store is None
     if state_db and store is None:
         try:
@@ -371,9 +372,8 @@ async def _run_chat(
                     if event.type == RuntimeEventType.MODEL_TURN_COMPLETED: projected["text_bytes"] = current_text_bytes
                     await store.append_event(run_id, RunTraceEvent(event.type.value, datetime.now(timezone.utc), projected))
                 except StateStoreError:
-                    failure_sink.update(error_code="trace_persist_failed", message="Run trace could not be persisted", trace_complete=False, already_finalized=True)
-                    try: await store.finish_run(run_id, RunStatus.FAILED, error_code="trace_persist_failed", error_message="Run trace could not be persisted", trace_complete=False)
-                    except StateStoreError: pass
+                    finalized = await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="trace_persist_failed", error_message="Run trace could not be persisted", trace_complete=False)
+                    failure_sink.update(error_code="trace_persist_failed", message="Run trace could not be persisted", trace_complete=False, already_finalized=finalized)
                     message = "Run trace could not be persisted after tool execution" if event.type == RuntimeEventType.TOOL_RESULT else "Run trace could not be persisted"
                     print(message, file=sys.stderr); return 1
             if event.type == RuntimeEventType.TEXT_DELTA and event.text:

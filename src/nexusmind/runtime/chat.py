@@ -235,7 +235,7 @@ class ChatRuntime:
                     remaining_result_bytes = self._limits.max_tool_result_bytes_total - tool_result_bytes_total
                     result_budget = _result_budget(self._limits, remaining_result_bytes)
                     if not result_budget.satisfies(_PERMISSION_DENIED_REQUIREMENTS):
-                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
+                        yield _tool_failure_after_start(call, _LIMIT_ERROR)
                         return
                     definition = tool_definitions[call.name]
                     policy_result = await self._resolve_tool_policy(
@@ -245,7 +245,7 @@ class ChatRuntime:
                         tool_call_index=tool_calls_total,
                     )
                     if policy_result.failed:
-                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                        yield _tool_failure_after_start(call, _RUNTIME_ERROR)
                         return
                     if policy_result.result is not None:
                         result = policy_result.result
