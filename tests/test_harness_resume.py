@@ -142,6 +142,16 @@ def test_resume_rejects_missing_pending_tool_before_execution():
     with pytest.raises(HarnessResumeCompatibilityError, match="missing tools"):
         HarnessRunner(FakeChatModel(["done"])).resume_execution(HarnessResumeRequest(checkpoint))
 
+def test_resume_rejects_unknown_tool_result_in_batch():
+    call = ToolCall(id="call-1", name="echo", arguments={"text": "hi"})
+    state = HarnessState(messages=[
+        Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(call,)),
+        Message(role=MessageRole.TOOL, name="echo", tool_call_id="unknown", content="{}"),
+    ], model_turns=1, tool_calls_total=1, executed_tool_call_ids={"unknown"},
+        phase=HarnessPhase.AFTER_TOOL)
+    with pytest.raises(ValueError):
+        HarnessCheckpoint.create(state, "run-invalid", 0)
+
 def test_resume_before_tool_executes_pending_tool():
     async def run():
         call = ToolCall(id="call-1", name="echo", arguments={"text": "hi"})
