@@ -11,7 +11,7 @@ from nexusmind.runtime.events import RuntimeEvent, RuntimeEventType
 from nexusmind.runtime.harness.context import HarnessRequest
 from nexusmind.runtime.harness.state import HarnessPhase, HarnessState, HarnessStatus
 from nexusmind.runtime.harness.stop import StopReason
-from nexusmind.runtime.harness.resume import HarnessResumeRequest, HarnessResumeStateError, state_from_checkpoint
+from nexusmind.runtime.harness.resume import HarnessResumeCompatibilityError, HarnessResumeRequest, HarnessResumeStateError, state_from_checkpoint
 from nexusmind.runtime.harness.checkpoint import CheckpointBoundary, HarnessCheckpoint, HarnessStateSnapshot
 from nexusmind.runtime.policy import ApprovalProvider, ToolApprovalSummarizer, ToolPolicy
 from nexusmind.tools.executor import ToolExecutorProtocol
@@ -23,8 +23,14 @@ class HarnessExecution:
         self.state = HarnessState(messages=list(request.messages))
         self.stop_reason: StopReason | None = None
         self._resume_complete = False
+        self._resume_source = None
 
     def create_checkpoint(self, run_id: str, sequence: int, boundary: CheckpointBoundary | None = None) -> HarnessCheckpoint:
+        if self._resume_source is not None:
+            if run_id != self._resume_source.run_id:
+                raise HarnessResumeStateError("Resumed execution must keep the source run ID")
+            if sequence <= self._resume_source.sequence:
+                raise HarnessResumeStateError("Resumed checkpoint sequence must increase")
         return HarnessCheckpoint.create(
             state=self.state,
             run_id=run_id,
@@ -35,7 +41,7 @@ class HarnessExecution:
 
     async def stream(self) -> AsyncIterator[RuntimeEvent]:
         if self._resume_complete:
-            yield RuntimeEvent(RuntimeEventType.RUN_STARTED, metadata={"resumed": True})
+            yield RuntimeEvent(RuntimeEventType.RUN_STARTED, metadata={"resumed": True, "checkpoint_id": self._resume_source.checkpoint_id, "checkpoint_sequence": self._resume_source.sequence, "checkpoint_boundary": self._resume_source.boundary.value})
             self.state.status = HarnessStatus.COMPLETED
             self.state.stop_reason = StopReason.MODEL_COMPLETED
             self.state.phase = HarnessPhase.TERMINAL
@@ -109,14 +115,14 @@ class HarnessRunner:
         state = state_from_checkpoint(checkpoint) if checkpoint.state.phase is HarnessPhase.BEFORE_MODEL else None
         if checkpoint.state.phase is HarnessPhase.AFTER_MODEL:
             assistants = [message for message in checkpoint.state.messages if message.role.value == "assistant"]
-            if not assistants or assistants[-1].tool_calls:
+            if not assistants or assistants[-1] is not checkpoint.state.messages[-1] or assistants[-1].tool_calls:
                 raise HarnessResumeStateError("AFTER_MODEL checkpoint has no uniquely resumable text completion")
             state = HarnessState(messages=deepcopy(list(checkpoint.state.messages)), model_turns=checkpoint.state.model_turns, tool_calls_total=checkpoint.state.tool_calls_total, tool_argument_bytes_total=checkpoint.state.tool_argument_bytes_total, tool_result_bytes_total=checkpoint.state.tool_result_bytes_total, started_tool_call_ids=set(checkpoint.state.started_tool_call_ids), executed_tool_call_ids=set(checkpoint.state.executed_tool_call_ids), status=checkpoint.state.status, phase=checkpoint.state.phase)
         if state is None:
             raise HarnessResumeStateError("Checkpoint phase is not safely resumable")
         limits = request.limits or self._default_limits
-        if state.model_turns >= limits.max_model_turns:
-            raise RuntimeError("Checkpoint has exhausted model turn limits")
+        if state.model_turns > limits.max_model_turns or state.tool_calls_total > limits.max_tool_calls_total or state.tool_argument_bytes_total > limits.max_tool_arguments_bytes_total or state.tool_result_bytes_total > limits.max_tool_result_bytes_total:
+            raise HarnessResumeCompatibilityError("Checkpoint consumption exceeds selected limits")
         harness_request = HarnessRequest(
             messages=tuple(state.messages),
             tools=tuple(deepcopy(request.tools)),
@@ -125,6 +131,7 @@ class HarnessRunner:
         )
         execution = HarnessExecution(self, harness_request)
         execution.state = state
+        execution._resume_source = checkpoint
         execution._resume_complete = checkpoint.state.phase is HarnessPhase.AFTER_MODEL
         return execution
 
