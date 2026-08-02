@@ -66,6 +66,7 @@ class SQLiteRunStore:
         if metadata_exists:
             row=self.db.execute("SELECT value FROM schema_metadata WHERE key='version'").fetchone()
             if row is None or row[0] != "1": raise StateStoreError("Unsupported state database schema version")
+            self._validate_v1_schema()
             return
         existing=self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table'").fetchone()
         if existing: raise StateStoreError("Unsupported state database schema version")
@@ -74,6 +75,16 @@ class SQLiteRunStore:
         self.db.execute("CREATE TABLE run_events(run_id TEXT NOT NULL,sequence INTEGER NOT NULL,event_type TEXT NOT NULL,occurred_at TEXT NOT NULL,payload_json TEXT NOT NULL,payload_bytes INTEGER NOT NULL,PRIMARY KEY(run_id,sequence),FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE)")
         self.db.execute("CREATE INDEX idx_runs_started_at ON runs(started_at DESC)"); self.db.execute("CREATE INDEX idx_runs_status_started ON runs(status,started_at DESC)")
         self.db.execute("INSERT INTO schema_metadata VALUES('version','1')")
+
+    def _validate_v1_schema(self):
+        required = {
+            "runs": {"id", "schema_version", "execution_id", "kind", "status", "trace_complete", "event_count", "started_at"},
+            "run_events": {"run_id", "sequence", "event_type", "occurred_at", "payload_json", "payload_bytes"},
+        }
+        for table, columns in required.items():
+            row=self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone()
+            actual={r[1] for r in self.db.execute(f"PRAGMA table_info({table})").fetchall()} if row else set()
+            if not row or not columns.issubset(actual): raise StateStoreError("Unsupported state database schema version")
     def _recover_abandoned(self):
         now=_now(); rows=self.db.execute("SELECT id FROM runs WHERE status='running' AND execution_id<>?",(self.execution_id,)).fetchall()
         for (run_id,) in rows:
