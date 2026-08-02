@@ -176,4 +176,8 @@ def test_resume_after_tool_executes_only_remaining_calls():
         results = [event.tool_result.call_id for event in events if event.type.value == "tool_result"]
         assert results == ["call-2"]
         assert execution.state.executed_tool_call_ids == {"call-1", "call-2"}
+        assert [message.tool_call_id for message in execution.state.messages if message.role is MessageRole.TOOL] == ["call-1", "call-2"]
+        assistants = [message for message in execution.state.messages if message.role is MessageRole.ASSISTANT]
+        assert len(assistants) == 2
+        assert assistants[-1].content == "unexpected"
     asyncio.run(run())

@@ -120,6 +120,7 @@ class _LegacyHarnessRuntime:
         _initial_messages: list[Message] | None = None,
         _state: HarnessState | None = None,
         _skip_assistant_message: bool = False,
+        _resume_tool_batch: bool = False,
     ) -> AsyncIterator[RuntimeEvent]:
         messages: list[Message] = list(_initial_messages or [])
         if _initial_messages is None:
@@ -129,6 +130,7 @@ class _LegacyHarnessRuntime:
 
         state = _state or HarnessState(messages=messages)
         yield RuntimeEvent(RuntimeEventType.RUN_STARTED)
+        skip_assistant_message_once = _skip_assistant_message
         try:
             try:
                 tool_definitions = _snapshot_runtime_tool_definitions(tools or [], self._tool_executor)
@@ -142,7 +144,8 @@ class _LegacyHarnessRuntime:
                 if state.model_turns >= self._limits.max_model_turns:
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
                     return
-                state.model_turns += 1
+                if not _resume_tool_batch:
+                    state.model_turns += 1
                 state.phase = HarnessPhase.MODEL_RUNNING
                 turn = _ModelTurn()
                 try:
@@ -222,7 +225,7 @@ class _LegacyHarnessRuntime:
                     return
                 completed_event = cast(RuntimeEvent, turn.completed_event)
                 assistant_content = "".join(turn.text_parts) or None
-                if not _skip_assistant_message and (assistant_content is not None or turn.tool_calls):
+                if not skip_assistant_message_once and (assistant_content is not None or turn.tool_calls):
                     assistant_message = Message(
                         role=MessageRole.ASSISTANT,
                         content=assistant_content,
@@ -230,6 +233,7 @@ class _LegacyHarnessRuntime:
                     )
                     messages.append(assistant_message)
                     state.messages.append(assistant_message)
+                skip_assistant_message_once = False
                 state.phase = HarnessPhase.AFTER_MODEL
                 yield completed_event
                 if turn.finish_reason != "tool_calls":
@@ -251,7 +255,8 @@ class _LegacyHarnessRuntime:
                 if any(call.name not in allowed_tool_names for call in turn.tool_calls):
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                     return
-                state.tool_argument_bytes_total += turn.tool_arguments_size
+                if not _resume_tool_batch:
+                    state.tool_argument_bytes_total += turn.tool_arguments_size
                 for call in turn.tool_calls:
                     state.phase = HarnessPhase.BEFORE_TOOL
                     remaining_result_bytes = self._limits.max_tool_result_bytes_total - state.tool_result_bytes_total
@@ -445,6 +450,7 @@ class _LegacyHarnessRuntime:
                     state.executed_tool_call_ids.add(call.id)
                     state.phase = HarnessPhase.AFTER_TOOL
                     yield RuntimeEvent(RuntimeEventType.TOOL_RESULT, tool_result=result)
+                _resume_tool_batch = False
                 continue
         except asyncio.CancelledError:
             raise
