@@ -70,6 +70,38 @@ def _validate_resume_batches(messages) -> None:
         if not reaches_end and results != list(calls):
             raise HarnessResumeStateError("A previous Tool Call batch is incomplete")
 
+def _validate_run_consumption(checkpoint: HarnessCheckpoint) -> None:
+    messages = checkpoint.state.messages
+    user_indexes = [index for index, message in enumerate(messages) if message.role.value == "user"]
+    run_messages = messages[user_indexes[-1] + 1:] if user_indexes else messages
+    _validate_resume_batches(run_messages)
+    calls = [call for message in run_messages if message.role.value == "assistant" for call in message.tool_calls]
+    results = [message for message in run_messages if message.role.value == "tool"]
+    call_ids = [call.id for call in calls]
+    result_ids = [message.tool_call_id for message in results]
+    if len(set(call_ids)) != len(call_ids):
+        raise HarnessResumeStateError("Checkpoint transcript contains duplicate Tool Call IDs")
+    if any(not result_id or result_id not in set(call_ids) for result_id in result_ids):
+        raise HarnessResumeStateError("Checkpoint transcript contains an unknown Tool result")
+    if set(checkpoint.state.executed_tool_call_ids) != set(result_ids) or checkpoint.state.tool_calls_total != len(results):
+        raise HarnessResumeStateError("Tool counters do not match the current Run transcript")
+    if not set(checkpoint.state.started_tool_call_ids).issubset(set(call_ids)):
+        raise HarnessResumeStateError("Started Tool Call IDs do not match the current Run transcript")
+    accounted_calls = calls
+    if checkpoint.state.phase is HarnessPhase.AFTER_MODEL:
+        assistants = [message for message in run_messages if message.role.value == "assistant"]
+        if assistants and assistants[-1].tool_calls:
+            accounted_calls = calls[:-len(assistants[-1].tool_calls)]
+    required_argument_bytes = sum(len(json.dumps(call.arguments, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) for call in accounted_calls)
+    required_result_bytes = sum(len((message.content or "").encode("utf-8")) for message in results)
+    required_model_turns = sum(1 for message in run_messages if message.role.value == "assistant")
+    if checkpoint.state.model_turns < required_model_turns:
+        raise HarnessResumeStateError("Model turn counter is below transcript consumption")
+    if checkpoint.state.tool_argument_bytes_total < required_argument_bytes:
+        raise HarnessResumeStateError("Tool argument byte counter is below transcript consumption")
+    if checkpoint.state.tool_result_bytes_total < required_result_bytes:
+        raise HarnessResumeStateError("Tool result byte counter is below transcript consumption")
+
 class HarnessExecution:
     def __init__(self, runner: "HarnessRunner", request: HarnessRequest) -> None:
         self._runner = runner
@@ -81,6 +113,8 @@ class HarnessExecution:
         self._resume_limit_exceeded = False
         self._resume_cursor_pending = False
         self._stream_started = False
+        self._resume_tool_batch = False
+        self._skip_assistant_once = False
 
     def create_checkpoint(self, run_id: str | None = None, sequence: int | None = None, boundary: CheckpointBoundary | None = None) -> HarnessCheckpoint:
         if self._resume_cursor_pending:
@@ -125,7 +159,12 @@ class HarnessExecution:
             yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error="Agent loop limit exceeded", metadata={"stop_reason": StopReason.LIMIT_EXCEEDED.value})
             return
         try:
-          async for event in self._runner._stream(self._request, self.state):
+          async for event in self._runner._stream(
+              self._request,
+              self.state,
+              resume_tool_batch=self._resume_tool_batch,
+              skip_assistant_once=self._skip_assistant_once,
+          ):
             if event.type.value == "run_completed":
                 self.stop_reason = StopReason.MODEL_COMPLETED
                 self.state.stop_reason = self.stop_reason
@@ -199,21 +238,20 @@ class HarnessRunner:
             checkpoint.validate()
         except ValueError as exc:
             raise HarnessResumeStateError("Checkpoint is not valid for resume") from exc
+        _validate_run_consumption(checkpoint)
         pending: tuple[ToolCall, ...] = ()
         state = state_from_checkpoint(checkpoint) if checkpoint.state.phase is HarnessPhase.BEFORE_MODEL else None
         if checkpoint.state.phase in {HarnessPhase.AFTER_MODEL, HarnessPhase.BEFORE_TOOL, HarnessPhase.AFTER_TOOL}:
             messages = checkpoint.state.messages
-            _validate_resume_batches(messages)
             user_indexes = [index for index, message in enumerate(messages) if message.role.value == "user"]
             run_messages = messages[user_indexes[-1] + 1:] if user_indexes else messages
+            _validate_resume_batches(run_messages)
             assistants = [message for message in messages if message.role.value == "assistant"]
             if not assistants:
                 raise HarnessResumeStateError("Checkpoint has no resumable Assistant Tool Call batch")
             last = messages[-1]
             if checkpoint.state.phase is HarnessPhase.AFTER_MODEL and last is not assistants[-1]:
                 raise HarnessResumeStateError("AFTER_MODEL checkpoint has trailing transcript entries")
-            if checkpoint.state.phase is HarnessPhase.BEFORE_TOOL and last is not assistants[-1]:
-                raise HarnessResumeStateError("BEFORE_TOOL checkpoint has trailing transcript entries")
             if checkpoint.state.phase is HarnessPhase.AFTER_TOOL:
                 if last.role.value != "tool" or not last.tool_call_id:
                     raise HarnessResumeStateError("AFTER_TOOL checkpoint must end with a Tool result")
@@ -356,17 +394,17 @@ class HarnessRunner:
                 "checkpoint_boundary": request.checkpoint.boundary.value,
             },
         )
-        if pending:
-            harness_request = HarnessRequest(messages=harness_request.messages, tools=harness_request.tools, limits=harness_request.limits, metadata={**harness_request.metadata, "resume_existing_assistant": True, "resume_tool_batch": True})
         execution = HarnessExecution(resume_runner, harness_request)
         execution.state = state
         execution._resume_source = checkpoint
         execution._resume_limit_exceeded = execution_limit_exceeded
         execution._resume_cursor_pending = bool(pending)
+        execution._resume_tool_batch = bool(pending)
+        execution._skip_assistant_once = bool(pending)
         execution._resume_complete = checkpoint.state.phase is HarnessPhase.AFTER_MODEL and not assistants[-1].tool_calls if checkpoint.state.phase is HarnessPhase.AFTER_MODEL else False
         return execution
 
-    async def _stream(self, request: HarnessRequest, state: HarnessState) -> AsyncIterator[RuntimeEvent]:
+    async def _stream(self, request: HarnessRequest, state: HarnessState, *, resume_tool_batch: bool = False, skip_assistant_once: bool = False) -> AsyncIterator[RuntimeEvent]:
         limits = request.limits or self._default_limits
         runtime = _LegacyHarnessRuntime(
             self._model,
@@ -383,8 +421,8 @@ class HarnessRunner:
                 tools=list(request.tools),
                 _initial_messages=list(request.messages),
                 _state=state,
-                _skip_assistant_message=bool(request.metadata.get("resume_existing_assistant")),
-                _resume_tool_batch=bool(request.metadata.get("resume_tool_batch")),
+                _skip_assistant_message=skip_assistant_once,
+                _resume_tool_batch=resume_tool_batch,
             ):
                 if event.metadata.get("resume_internal"):
                     continue
