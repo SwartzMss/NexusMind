@@ -9,7 +9,7 @@ from nexusmind.tools.contracts import ToolDefinition
 class HarnessRequest:
     messages: tuple[Message, ...]
     tools: tuple[ToolDefinition, ...] = ()
-    limits: HarnessLimits = field(default_factory=HarnessLimits)
+    limits: HarnessLimits | None = None
     metadata: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

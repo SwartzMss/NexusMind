@@ -11,6 +11,25 @@ from nexusmind.runtime.harness.stop import StopReason
 from nexusmind.runtime.policy import ApprovalProvider, ToolApprovalSummarizer, ToolPolicy
 from nexusmind.tools.executor import ToolExecutorProtocol
 
+class HarnessExecution:
+    def __init__(self, runner: "HarnessRunner", request: HarnessRequest) -> None:
+        self._runner = runner
+        self._request = request
+        self.state = HarnessState(messages=list(request.messages))
+        self.stop_reason: StopReason | None = None
+
+    async def stream(self) -> AsyncIterator[RuntimeEvent]:
+        async for event in self._runner._stream(self._request, self.state):
+            if event.type.value == "run_completed":
+                self.stop_reason = StopReason.MODEL_COMPLETED
+            elif event.type.value in {"model_failed", "run_failed"}:
+                reason = event.metadata.get("stop_reason")
+                self.stop_reason = StopReason(reason) if reason in StopReason._value2member_map_ else (
+                    StopReason.MODEL_FAILED if event.type.value == "model_failed" else StopReason.RUNTIME_ERROR
+                )
+            yield event
+
+
 class HarnessRunner:
     """Bounded, provider-neutral execution boundary."""
     def __init__(self, model: ChatModel, tool_executor: ToolExecutorProtocol | None = None,
@@ -31,6 +50,18 @@ class HarnessRunner:
         return self._default_limits
 
     async def stream(self, request: HarnessRequest) -> AsyncIterator[RuntimeEvent]:
+        execution = self.create_execution(request)
+        async for event in execution.stream():
+            yield event
+        # Compatibility snapshot for callers that used the old runner fields.
+        self.state = execution.state
+        self.stop_reason = execution.stop_reason
+
+    def create_execution(self, request: HarnessRequest) -> HarnessExecution:
+        """Create isolated mutable state for one run; executions may run concurrently."""
+        return HarnessExecution(self, request)
+
+    async def _stream(self, request: HarnessRequest, state: HarnessState) -> AsyncIterator[RuntimeEvent]:
         limits = request.limits or self._default_limits
         runtime = _LegacyHarnessRuntime(
             self._model,
@@ -40,8 +71,6 @@ class HarnessRunner:
             approval_provider=self._approval_provider,
             approval_summarizer=self._approval_summarizer,
         )
-        self.state = HarnessState(messages=list(request.messages))
-        self.stop_reason = None
         user = next((m.content for m in reversed(request.messages) if m.role.value == "user"), "")
         try:
             async for event in runtime.stream_user_message(
@@ -50,21 +79,16 @@ class HarnessRunner:
                 _initial_messages=list(request.messages),
             ):
                 if event.type.value == "model_started":
-                    self.state.model_turns += 1
+                    state.model_turns += 1
                 elif event.type.value == "tool_call_completed":
-                    self.state.tool_calls_total += 1
+                    state.tool_calls_total += 1
                 elif event.type.value == "tool_result":
-                    self.state.executed_tool_call_ids.add(event.tool_result.call_id)
+                    state.executed_tool_call_ids.add(event.tool_result.call_id)
                 elif event.type.value == "run_completed":
-                    self.state.status = HarnessStatus.COMPLETED
-                    self.stop_reason = StopReason.MODEL_COMPLETED
+                    state.status = HarnessStatus.COMPLETED
                 elif event.type.value == "run_failed":
-                    self.state.status = HarnessStatus.FAILED
-                    self.stop_reason = StopReason.RUNTIME_ERROR
-                elif event.type.value == "model_failed":
-                    self.stop_reason = StopReason.MODEL_FAILED
+                    state.status = HarnessStatus.FAILED
                 yield event
         except asyncio.CancelledError:
-            self.state.status = HarnessStatus.CANCELLED
-            self.stop_reason = StopReason.CANCELLED
+            state.status = HarnessStatus.CANCELLED
             raise

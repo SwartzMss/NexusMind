@@ -79,6 +79,16 @@ def test_harness_runner_uses_request_limits() -> None:
     assert events[-1].type is RuntimeEventType.RUN_COMPLETED
 
 
+def test_harness_runner_constructor_limits_are_used_when_request_omits_limits() -> None:
+    async def collect():
+        runner = HarnessRunner(FakeChatModel(["hello", "again"]), limits=HarnessLimits(max_model_turns=1))
+        request = HarnessRequest(messages=(Message(role=MessageRole.USER, content="hi"),))
+        return [event async for event in runner.stream(request)]
+
+    events = asyncio.run(collect())
+    assert events[-1].type is RuntimeEventType.RUN_COMPLETED
+
+
 def test_harness_runner_records_terminal_state() -> None:
     async def collect(runner, request):
         [event async for event in runner.stream(request)]
