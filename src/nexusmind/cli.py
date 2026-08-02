@@ -304,10 +304,10 @@ async def _run_chat_with_mcp(
         raise
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
-        await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_cleanup_failed", error_message="MCP server cleanup failed", final_text=''.join(text_sink) if record_content else None)
+        await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code=failure_sink.get("error_code") or "mcp_cleanup_failed", error_message=failure_sink.get("message") or "MCP server cleanup failed", trace_complete=failure_sink.get("trace_complete"), final_text=''.join(text_sink) if record_content else None)
         _best_effort_close(store)
         return 1
-    if store and run_id and runtime_started:
+    if store and run_id and runtime_started and not failure_sink.get("already_finalized"):
         try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED, error_code=failure_sink.get("error_code"), error_message=failure_sink.get("message"), trace_complete=failure_sink.get("trace_complete"), final_text=''.join(text_sink) if record_content else None)
         except StateStoreError:
             print("State error: Run final status could not be persisted", file=sys.stderr); return_code = 1
@@ -371,6 +371,7 @@ async def _run_chat(
                     if event.type == RuntimeEventType.MODEL_TURN_COMPLETED: projected["text_bytes"] = current_text_bytes
                     await store.append_event(run_id, RunTraceEvent(event.type.value, datetime.now(timezone.utc), projected))
                 except StateStoreError:
+                    failure_sink.update(error_code="trace_persist_failed", message="Run trace could not be persisted", trace_complete=False, already_finalized=True)
                     try: await store.finish_run(run_id, RunStatus.FAILED, error_code="trace_persist_failed", error_message="Run trace could not be persisted", trace_complete=False)
                     except StateStoreError: pass
                     message = "Run trace could not be persisted after tool execution" if event.type == RuntimeEventType.TOOL_RESULT else "Run trace could not be persisted"
@@ -823,10 +824,10 @@ async def _run_skill_with_mcp(
         raise
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
-        await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_cleanup_failed", error_message="MCP server cleanup failed", final_text=''.join(text_sink) if record_content else None)
+        await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code=failure_sink.get("error_code") or "mcp_cleanup_failed", error_message=failure_sink.get("message") or "MCP server cleanup failed", trace_complete=failure_sink.get("trace_complete"), final_text=''.join(text_sink) if record_content else None)
         _best_effort_close(store)
         return 1
-    if store and run_id and "tools" in locals():
+    if store and run_id and "tools" in locals() and not failure_sink.get("already_finalized"):
         try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED, error_code=failure_sink.get("error_code"), error_message=failure_sink.get("message"), trace_complete=failure_sink.get("trace_complete"), final_text=''.join(text_sink) if record_content else None)
         except StateStoreError:
             print("State error: Run final status could not be persisted", file=sys.stderr); return_code = 1
