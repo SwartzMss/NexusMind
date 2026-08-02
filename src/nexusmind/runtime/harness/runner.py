@@ -58,8 +58,8 @@ def _validate_resume_batches(messages) -> None:
         if len(set(results)) != len(results):
             raise HarnessResumeStateError("Tool batch contains duplicate Tool results")
         batches.append((calls, set(results), cursor == len(messages)))
-    for calls, results, is_last in batches[:-1]:
-        if results != set(calls):
+    for calls, results, reaches_end in batches:
+        if not reaches_end and results != set(calls):
             raise HarnessResumeStateError("A previous Tool Call batch is incomplete")
     if batches and batches[-1][1] - set(batches[-1][0]):
         raise HarnessResumeStateError("Tool batch contains an unknown result")
