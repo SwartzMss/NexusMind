@@ -141,7 +141,7 @@ class _LegacyHarnessRuntime:
             allowed_tool_names = set(tool_definitions)
             while True:
                 state.phase = HarnessPhase.BEFORE_MODEL
-                if state.model_turns >= self._limits.max_model_turns:
+                if not _resume_tool_batch and state.model_turns >= self._limits.max_model_turns:
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
                     return
                 if not _resume_tool_batch:
@@ -240,7 +240,7 @@ class _LegacyHarnessRuntime:
                     state.phase = HarnessPhase.TERMINAL
                     yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
                     return
-                if state.model_turns >= self._limits.max_model_turns:
+                if not _resume_tool_batch and state.model_turns >= self._limits.max_model_turns:
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
                     return
                 if self._tool_executor is None:
