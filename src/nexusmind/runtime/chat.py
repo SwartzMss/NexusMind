@@ -241,7 +241,7 @@ class ChatRuntime:
                     remaining_result_bytes = self._limits.max_tool_result_bytes_total - tool_result_bytes_total
                     result_budget = _result_budget(self._limits, remaining_result_bytes)
                     if not result_budget.satisfies(_PERMISSION_DENIED_REQUIREMENTS):
-                        yield _tool_failure_after_start(call, _LIMIT_ERROR)
+                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
                         return
                     definition = tool_definitions[call.name]
                     policy_result = await self._resolve_tool_policy(
@@ -251,7 +251,7 @@ class ChatRuntime:
                         tool_call_index=tool_calls_total,
                     )
                     if policy_result.failed:
-                        yield _tool_failure_after_start(call, _RUNTIME_ERROR)
+                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                         return
                     if policy_result.result is not None:
                         result = policy_result.result
@@ -327,8 +327,8 @@ class ChatRuntime:
                                     if result_budget is None:
                                         yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
                                         return
-                                    if not _executor_definition_matches(self._tool_executor, call.name, definition):
-                                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                                if not _executor_definition_matches(self._tool_executor, call.name, definition):
+                                    yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                                         return
                                     started_tool_call_ids.add(call.id)
                                     try:
@@ -349,7 +349,7 @@ class ChatRuntime:
                                 yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                                 return
                             if not _executor_definition_matches(self._tool_executor, call.name, definition):
-                                yield _tool_failure_after_start(call, _RUNTIME_ERROR)
+                                yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                                 return
                             try:
                                 result_budget = _result_budget_for_call(
@@ -359,7 +359,7 @@ class ChatRuntime:
                                     remaining_result_bytes,
                                 )
                             except RuntimeError:
-                                yield _tool_failure_after_start(call, _RUNTIME_ERROR)
+                                yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                                 return
                             if result_budget is None:
                                 yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
