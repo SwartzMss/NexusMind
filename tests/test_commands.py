@@ -456,13 +456,14 @@ def test_immediate_cancellation_after_supervisor_spawn_preserves_cancellation(
         asyncio.run(executor.execute(ToolCall(id="1", name="run_command", arguments={"profile": "slow"})))
 
 
-def test_cancellation_reports_cleanup_failure(monkeypatch, tmp_path: Path) -> None:
+def test_cancellation_preserves_cancelled_error_when_cleanup_fails(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "commands.json"
     _write_config(config_path, {"slow": {"argv": [sys.executable, "-c", "import time; time.sleep(2)"], "cwd": ".", "timeout_seconds": 10}})
     executor = ToolExecutor(_registry(RunCommandTool(load_command_config(config_path, Workspace(tmp_path)))), timeout=20)
 
     async def failed_cleanup(*args, **kwargs):
-        return command_module._CleanupResult((b"", False), (b"", False), False, False)
+        empty = command_module.CapturedStream(b"", 0, False)
+        return command_module._CleanupResult(empty, empty, False, False)
 
     monkeypatch.setattr(command_module, "_cleanup_process", failed_cleanup)
 
@@ -472,10 +473,8 @@ def test_cancellation_reports_cleanup_failure(monkeypatch, tmp_path: Path) -> No
         task.cancel()
         return await task
 
-    result = asyncio.run(run_and_cancel())
-
-    assert result.error is not None
-    assert result.error.code is ToolErrorCode.EXECUTION_FAILED
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(run_and_cancel())
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process group cleanup")

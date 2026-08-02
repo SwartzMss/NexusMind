@@ -151,8 +151,10 @@ class ToolExecutor:
                 raise cancellation
             except asyncio.CancelledError:
                 raise cancellation
-            except Exception as exc:
-                return _return_with_budget(_failure(call, ToolErrorCode.EXECUTION_FAILED, str(exc) or "Tool execution failed"), result_budget)
+            except Exception:
+                # Cancellation remains the externally visible outcome.  A
+                # cleanup failure must never turn it into a normal result.
+                raise cancellation
             while not invoke_task.done():
                 try:
                     await asyncio.shield(invoke_task)

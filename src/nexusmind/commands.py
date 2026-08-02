@@ -135,8 +135,8 @@ class ProcessExecutionBudget:
 
 @dataclass(frozen=True, slots=True)
 class _CleanupResult:
-    stdout: tuple[bytes, bool]
-    stderr: tuple[bytes, bool]
+    stdout: "CapturedStream"
+    stderr: "CapturedStream"
     root_reaped: bool
     tree_terminated: bool
 
@@ -279,8 +279,8 @@ async def _run_profile(
 ) -> dict[str, Any]:
     start = time.monotonic()
     process: asyncio.subprocess.Process | None = None
-    stdout_task: asyncio.Task[tuple[bytes, bool]] | None = None
-    stderr_task: asyncio.Task[tuple[bytes, bool]] | None = None
+    stdout_task: asyncio.Task[CapturedStream] | None = None
+    stderr_task: asyncio.Task[CapturedStream] | None = None
     process_guard: _ProcessTreeGuard | None = None
     gate_path: Path | None = None
     gate_dir: Path | None = None
@@ -449,8 +449,12 @@ async def _run_profile(
         raise CommandCleanupError("Command execution status could not be verified")
     if original_exception is not None:
         raise original_exception
-    stdout_raw, stdout_truncated = cleanup_result.stdout
-    stderr_raw, stderr_truncated = cleanup_result.stderr
+    stdout_raw = cleanup_result.stdout.content
+    stderr_raw = cleanup_result.stderr.content
+    stdout_bytes = cleanup_result.stdout.total_bytes
+    stderr_bytes = cleanup_result.stderr.total_bytes
+    stdout_truncated = cleanup_result.stdout.truncated
+    stderr_truncated = cleanup_result.stderr.truncated
     stdout, stdout_replaced = _decode_output(stdout_raw)
     stderr, stderr_replaced = _decode_output(stderr_raw)
     exit_code = process.returncode
@@ -468,6 +472,8 @@ async def _run_profile(
         "stderr": stderr,
         "stdout_truncated": stdout_truncated,
         "stderr_truncated": stderr_truncated,
+        "stdout_bytes": stdout_bytes,
+        "stderr_bytes": stderr_bytes,
         "encoding_replaced": stdout_replaced or stderr_replaced,
     }
     return _compact_command_output(output, max_result_bytes=max_result_bytes)
@@ -983,16 +989,18 @@ def _cleanup_private_temp(path: Path | None, directory: Path | None) -> None:
         shutil.rmtree(directory, ignore_errors=True)
 
 
-async def _read_stream_limited(stream: asyncio.StreamReader | None) -> tuple[bytes, bool]:
+async def _read_stream_limited(stream: asyncio.StreamReader | None) -> CapturedStream:
     if stream is None:
-        return b"", False
+        return CapturedStream(b"", 0, False)
     chunks: list[bytes] = []
     size = 0
+    total_bytes = 0
     truncated = False
     while True:
         chunk = await stream.read(8192)
         if not chunk:
             break
+        total_bytes += len(chunk)
         previous_size = size
         if size < MAX_OUTPUT_BYTES:
             remaining = MAX_OUTPUT_BYTES - size
@@ -1000,21 +1008,21 @@ async def _read_stream_limited(stream: asyncio.StreamReader | None) -> tuple[byt
             size += min(len(chunk), remaining)
         if previous_size + len(chunk) > MAX_OUTPUT_BYTES:
             truncated = True
-    return b"".join(chunks), truncated
+    return CapturedStream(b"".join(chunks), total_bytes, truncated)
 
 
-async def _finish_reader(task: asyncio.Task[tuple[bytes, bool]] | None) -> tuple[bytes, bool]:
+async def _finish_reader(task: asyncio.Task[CapturedStream] | None) -> CapturedStream:
     if task is None:
-        return b"", False
+        return CapturedStream(b"", 0, False)
     try:
         return await asyncio.wait_for(task, timeout=COMMAND_CLEANUP_GRACE_SECONDS)
     except asyncio.TimeoutError:
         task.cancel()
-        return b"", True
+        return CapturedStream(b"", 0, True)
     except asyncio.CancelledError:
         raise
     except Exception:
-        return b"", True
+        return CapturedStream(b"", 0, True)
 
 
 def _resolve_profile_cwd(profile: CommandProfile) -> Path:
@@ -1286,3 +1294,8 @@ def _create_kill_on_close_job() -> Any:
         _KERNEL32.CloseHandle(handle)
         raise OSError("Could not configure Windows job")
     return handle
+@dataclass(frozen=True, slots=True)
+class CapturedStream:
+    content: bytes
+    total_bytes: int
+    truncated: bool

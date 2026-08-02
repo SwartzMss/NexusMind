@@ -472,7 +472,7 @@ def project_runtime_event(event) -> dict:
         result = event.tool_result; output = result.output
         payload.update(call_id=result.call_id, tool_name=result.name, ok=result.error is None, result_bytes=len(json.dumps(output, ensure_ascii=False, default=str).encode()), result_truncated=bool(getattr(result, "metadata", {}).get("result_truncated", False)), error_code=getattr(result.error.code, 'value', None) if result.error else None)
         if result.name == "run_command" and isinstance(output, dict):
-            payload.update(profile=output.get("profile"), cwd=output.get("cwd"), exit_code=output.get("exit_code"), timed_out=output.get("timed_out"), duration_ms=output.get("duration_ms"), stdout_bytes=len(str(output.get("stdout", "")).encode()), stderr_bytes=len(str(output.get("stderr", "")).encode()), stdout_truncated=output.get("stdout_truncated"), stderr_truncated=output.get("stderr_truncated"))
+            payload.update(profile=output.get("profile"), cwd=output.get("cwd"), exit_code=output.get("exit_code"), timed_out=output.get("timed_out"), duration_ms=output.get("duration_ms"), stdout_bytes=int(output.get("stdout_bytes", len(str(output.get("stdout", "")).encode()))), stderr_bytes=int(output.get("stderr_bytes", len(str(output.get("stderr", "")).encode()))), stdout_truncated=output.get("stdout_truncated"), stderr_truncated=output.get("stderr_truncated"))
         if result.name in {"write_file", "replace_text"} and isinstance(output, dict):
             for key in ("path", "operation", "previous_sha256", "sha256", "bytes_written", "replacements", "committed", "cleanup_warning"):
                 if key in output: payload[key] = output[key]

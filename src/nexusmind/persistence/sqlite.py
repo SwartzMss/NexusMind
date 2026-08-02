@@ -86,10 +86,33 @@ class SQLiteRunStore:
             "runs": {"id", "schema_version", "execution_id", "kind", "status", "skill_name", "model_name", "input_preview", "input_sha256", "final_text", "error_code", "error_message", "trace_complete", "event_count", "started_at", "updated_at", "finished_at"},
             "run_events": {"run_id", "sequence", "event_type", "occurred_at", "payload_json", "payload_bytes"},
         }
+        table_info = {}
         for table, columns in required.items():
             row=self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone()
-            actual={r[1] for r in self.db.execute(f"PRAGMA table_info({table})").fetchall()} if row else set()
+            info=self.db.execute(f"PRAGMA table_info({table})").fetchall() if row else []
+            actual={r[1] for r in info}
             if not row or not columns.issubset(actual): raise StateStoreError("Unsupported state database schema version")
+            table_info[table] = info
+        if not any(r[1] == "id" and r[5] == 1 for r in table_info["runs"]):
+            raise StateStoreError("Unsupported state database schema version")
+        event_pk = {r[1]: r[5] for r in table_info["run_events"] if r[5]}
+        if event_pk != {"run_id": 1, "sequence": 2}:
+            raise StateStoreError("Unsupported state database schema version")
+        foreign_keys = self.db.execute("PRAGMA foreign_key_list(run_events)").fetchall()
+        if not any(
+            row[2] == "runs"
+            and row[3] == "run_id"
+            and row[4] == "id"
+            and row[6].upper() == "CASCADE"
+            for row in foreign_keys
+        ):
+            raise StateStoreError("Unsupported state database schema version")
+        indexes = {
+            row[1]
+            for row in self.db.execute("PRAGMA index_list(runs)").fetchall()
+        }
+        if not {"idx_runs_started_at", "idx_runs_status_started"}.issubset(indexes):
+            raise StateStoreError("Unsupported state database schema version")
     def _recover_abandoned(self):
         now=_now(); rows=self.db.execute("SELECT id FROM runs WHERE status='running' AND execution_id<>?",(self.execution_id,)).fetchall()
         for (run_id,) in rows:

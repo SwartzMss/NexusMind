@@ -88,3 +88,24 @@ def test_schema_metadata_without_core_tables_is_rejected(tmp_path):
     path = tmp_path / "state.db"
     db = sqlite3.connect(path); db.execute("CREATE TABLE schema_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)"); db.execute("INSERT INTO schema_metadata VALUES('version','1')"); db.commit(); db.close()
     with pytest.raises(StateStoreError): SQLiteRunStore(path)
+
+def test_schema_rejects_missing_run_constraints(tmp_path):
+    path = tmp_path / "invalid-constraints.db"
+    db = sqlite3.connect(path)
+    db.executescript("""
+        CREATE TABLE schema_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+        INSERT INTO schema_metadata VALUES('version','1');
+        CREATE TABLE runs(
+            id TEXT, schema_version INTEGER, execution_id TEXT, kind TEXT,
+            status TEXT, skill_name TEXT, model_name TEXT, input_preview TEXT,
+            input_sha256 TEXT, final_text TEXT, error_code TEXT,
+            error_message TEXT, trace_complete INTEGER, event_count INTEGER,
+            started_at TEXT, updated_at TEXT, finished_at TEXT
+        );
+        CREATE TABLE run_events(
+            run_id TEXT, sequence INTEGER, event_type TEXT,
+            occurred_at TEXT, payload_json TEXT, payload_bytes INTEGER
+        );
+    """)
+    db.commit(); db.close()
+    with pytest.raises(StateStoreError): SQLiteRunStore(path)
