@@ -51,6 +51,17 @@ def test_resume_after_model_text_completes_without_model_call():
         assert execution.state.status is HarnessStatus.COMPLETED
     asyncio.run(run())
 
+def test_resumed_checkpoint_defaults_to_source_run_id():
+    state = HarnessState(messages=[Message(role=MessageRole.USER, content="hello")], phase=HarnessPhase.BEFORE_MODEL)
+    checkpoint = HarnessCheckpoint.create(state, "run-lineage", 3)
+    execution = HarnessRunner(FakeChatModel(["done"])).resume_execution(HarnessResumeRequest(checkpoint))
+    resumed = execution.create_checkpoint(sequence=4)
+    assert resumed.run_id == "run-lineage"
+    with pytest.raises(HarnessResumeStateError):
+        execution.create_checkpoint(sequence=3)
+    with pytest.raises(HarnessResumeStateError):
+        execution.create_checkpoint(run_id="other-run", sequence=5)
+
 def test_two_resumes_are_isolated_from_each_other_and_checkpoint():
     async def run():
         source_message = Message(role=MessageRole.USER, content="hello", metadata={"nested": {"value": 1}})
