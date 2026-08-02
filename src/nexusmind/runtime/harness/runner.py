@@ -46,12 +46,18 @@ class HarnessExecution:
         self._resume_source = None
         self._resume_limit_exceeded = False
 
-    def create_checkpoint(self, run_id: str, sequence: int, boundary: CheckpointBoundary | None = None) -> HarnessCheckpoint:
+    def create_checkpoint(self, run_id: str | None = None, sequence: int | None = None, boundary: CheckpointBoundary | None = None) -> HarnessCheckpoint:
         if self._resume_source is not None:
+            if run_id is None:
+                run_id = self._resume_source.run_id
+            if sequence is None:
+                raise HarnessResumeStateError("Resumed checkpoint requires a new sequence")
             if run_id != self._resume_source.run_id:
                 raise HarnessResumeStateError("Resumed execution must keep the source run ID")
             if sequence <= self._resume_source.sequence:
                 raise HarnessResumeStateError("Resumed checkpoint sequence must increase")
+        elif run_id is None or sequence is None:
+            raise ValueError("Checkpoint run_id and sequence are required")
         return HarnessCheckpoint.create(
             state=self.state,
             run_id=run_id,
