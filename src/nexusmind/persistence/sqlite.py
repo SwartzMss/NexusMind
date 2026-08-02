@@ -66,17 +66,18 @@ class SQLiteRunStore:
                 raise StateStoreError("Run store does not exist")
             if read_only:
                 uri = "file:" + urllib.parse.quote(str(self.path.resolve()), safe="/\\:") + "?mode=ro"
-                self.db=sqlite3.connect(uri, uri=True, timeout=0.5)
+                self.db=sqlite3.connect(uri, uri=True, timeout=2.0)
+                self.db.execute("PRAGMA busy_timeout=2000")
                 self.db.execute("PRAGMA foreign_keys=ON")
                 self._validate_existing_schema()
             else:
                 uri = "file:" + urllib.parse.quote(str(self.path.resolve()), safe="/\\:") + "?mode=rw" if not create else str(self.path)
                 self.db=sqlite3.connect(uri, uri=not create, timeout=2.0); self.db.execute("PRAGMA busy_timeout=2000"); self.db.execute("PRAGMA foreign_keys=ON")
-                self.db.execute("PRAGMA journal_mode=WAL")
                 if create:
                     self._schema()
                 else:
                     self._validate_existing_schema()
+                self.db.execute("PRAGMA journal_mode=WAL")
                 self._secure_files()
             if recover_abandoned: self.recover_abandoned()
         except BaseException as exc:
@@ -179,15 +180,20 @@ class SQLiteRunStore:
         if index_columns.get("idx_runs_started_at") != ["started_at"] or index_columns.get("idx_runs_status_started") != ["status", "started_at"]:
             raise StateStoreError("Unsupported state database schema version")
     def _recover_abandoned(self):
-        now=_now(); rows=self.db.execute("SELECT id FROM runs WHERE status='running' AND execution_id<>?",(self.execution_id,)).fetchall()
-        for (run_id,) in rows:
-            cur=self.db.execute("UPDATE runs SET status='abandoned',trace_complete=0,error_code='process_abandoned',updated_at=?,finished_at=?,error_message=? WHERE id=? AND status='running'",(now,now,"Previous NexusMind process ended before the run reached a terminal state",run_id))
-            if cur.rowcount == 0: continue
-            seq=self.db.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM run_events WHERE run_id=?",(run_id,)).fetchone()[0]
-            payload=json.dumps({"reason":"previous_process"})
-            self.db.execute("INSERT INTO run_events VALUES(?,?,?,?,?,?)",(run_id,seq,"run_abandoned",now,payload,len(payload)))
-            self.db.execute("UPDATE runs SET event_count=? WHERE id=?",(seq,run_id))
-        self.db.commit()
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            now=_now(); rows=self.db.execute("SELECT id FROM runs WHERE status='running' AND execution_id<>?",(self.execution_id,)).fetchall()
+            for (run_id,) in rows:
+                cur=self.db.execute("UPDATE runs SET status='abandoned',trace_complete=0,error_code='process_abandoned',updated_at=?,finished_at=?,error_message=? WHERE id=? AND status='running'",(now,now,"Previous NexusMind process ended before the run reached a terminal state",run_id))
+                if cur.rowcount == 0: continue
+                seq=self.db.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM run_events WHERE run_id=?",(run_id,)).fetchone()[0]
+                payload=json.dumps({"reason":"previous_process"})
+                self.db.execute("INSERT INTO run_events VALUES(?,?,?,?,?,?)",(run_id,seq,"run_abandoned",now,payload,len(payload)))
+                self.db.execute("UPDATE runs SET event_count=? WHERE id=?",(seq,run_id))
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
     @_async_db_error
     async def start_run(self, context: RunStartContext):
         run_id=uuid.uuid4().hex; now=_now(); digest=hashlib.sha256((context.input_text or '').encode()).hexdigest()
@@ -230,13 +236,14 @@ class SQLiteRunStore:
             if not row:
                 self.db.commit()
                 return None
-            run=dict(zip([d[0] for d in cur.description], row)); cur=self.db.execute("SELECT sequence,event_type,occurred_at,payload_json FROM run_events WHERE run_id=? ORDER BY sequence",(run_id,))
-            events=[{"sequence":r[0],"event_type":r[1],"occurred_at":r[2],"payload":json.loads(r[3])} for r in cur.fetchall()]
+            run=dict(zip([d[0] for d in cur.description], row))
+            event_rows=self.db.execute("SELECT sequence,event_type,occurred_at,payload_json FROM run_events WHERE run_id=? ORDER BY sequence",(run_id,)).fetchall()
             self.db.commit()
-            return {"run":run,"events":events}
         except BaseException:
             self.db.rollback()
             raise
+        events=[{"sequence":r[0],"event_type":r[1],"occurred_at":r[2],"payload":json.loads(r[3])} for r in event_rows]
+        return {"run":run,"events":events}
     @_sync_db_error
     def prune(self, older_than_days):
         if int(older_than_days) < 0: raise ValueError("older-than-days must be non-negative")
