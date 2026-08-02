@@ -130,6 +130,7 @@ def test_resume_after_model_executes_pending_tool_without_model_replay():
         )
         events = [event async for event in execution.stream()]
         assert any(event.type.value == "tool_result" for event in events)
+        assert not any(event.metadata.get("resume_internal") for event in events)
         assert execution.state.executed_tool_call_ids == {"call-1"}
     asyncio.run(run())
 
