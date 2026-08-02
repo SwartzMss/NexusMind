@@ -15,8 +15,8 @@ class InMemoryCheckpointStore:
         self._lock = asyncio.Lock()
 
     async def save(self, checkpoint: HarnessCheckpoint) -> None:
-        checkpoint.validate()
         async with self._lock:
+            checkpoint.validate()
             items = self._items.setdefault(checkpoint.run_id, [])
             if items and checkpoint.sequence <= items[-1].sequence:
                 raise ValueError("Checkpoint sequence must increase")

@@ -9,6 +9,13 @@ class HarnessStatus(str, Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
 
+class HarnessPhase(str, Enum):
+    BEFORE_MODEL = "before_model"
+    AFTER_MODEL = "after_model"
+    BEFORE_TOOL = "before_tool"
+    AFTER_TOOL = "after_tool"
+    TERMINAL = "terminal"
+
 @dataclass(slots=True)
 class HarnessState:
     messages: list[Message]
@@ -20,3 +27,4 @@ class HarnessState:
     executed_tool_call_ids: set[str] = field(default_factory=set)
     status: HarnessStatus = HarnessStatus.RUNNING
     stop_reason: StopReason | None = None
+    phase: HarnessPhase = HarnessPhase.BEFORE_MODEL

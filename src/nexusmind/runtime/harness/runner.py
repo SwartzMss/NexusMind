@@ -8,7 +8,7 @@ from nexusmind.runtime.harness.limits import HarnessLimits
 from nexusmind.runtime.harness.runner_impl import _LegacyHarnessRuntime
 from nexusmind.runtime.events import RuntimeEvent
 from nexusmind.runtime.harness.context import HarnessRequest
-from nexusmind.runtime.harness.state import HarnessState, HarnessStatus
+from nexusmind.runtime.harness.state import HarnessPhase, HarnessState, HarnessStatus
 from nexusmind.runtime.harness.stop import StopReason
 from nexusmind.runtime.harness.checkpoint import CheckpointBoundary, HarnessCheckpoint, HarnessStateSnapshot
 from nexusmind.runtime.policy import ApprovalProvider, ToolApprovalSummarizer, ToolPolicy
@@ -21,7 +21,7 @@ class HarnessExecution:
         self.state = HarnessState(messages=list(request.messages))
         self.stop_reason: StopReason | None = None
 
-    def create_checkpoint(self, run_id: str, sequence: int, boundary: CheckpointBoundary) -> HarnessCheckpoint:
+    def create_checkpoint(self, run_id: str, sequence: int, boundary: CheckpointBoundary | None = None) -> HarnessCheckpoint:
         return HarnessCheckpoint.create(
             state=self.state,
             run_id=run_id,
@@ -43,14 +43,22 @@ class HarnessExecution:
                 reason = event.metadata.get("stop_reason")
                 if reason in StopReason._value2member_map_:
                     self.stop_reason = StopReason(reason)
-                elif event.error == "Agent loop limit exceeded":
-                    self.stop_reason = StopReason.LIMIT_EXCEEDED
                 elif event.metadata.get("tool_execution_started"):
                     self.stop_reason = StopReason.TOOL_FAILED
+                elif event.error == "Agent loop limit exceeded":
+                    self.stop_reason = StopReason.LIMIT_EXCEEDED
                 else:
                     self.stop_reason = StopReason.RUNTIME_ERROR
                 self.state.stop_reason = self.stop_reason
                 self.state.status = HarnessStatus.FAILED
+            if event.type.value == "tool_call_completed":
+                self.state.phase = HarnessPhase.BEFORE_TOOL
+            elif event.type.value == "tool_result":
+                self.state.phase = HarnessPhase.AFTER_TOOL
+            elif event.type.value == "model_turn_completed":
+                self.state.phase = HarnessPhase.AFTER_MODEL
+            elif event.type.value in {"run_completed", "run_failed"}:
+                self.state.phase = HarnessPhase.TERMINAL
             yield event
         except asyncio.CancelledError:
             self.state.status = HarnessStatus.CANCELLED

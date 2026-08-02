@@ -8,7 +8,7 @@ from typing import Any
 from uuid import uuid4
 from copy import deepcopy
 
-from nexusmind.runtime.harness.state import HarnessState, HarnessStatus
+from nexusmind.runtime.harness.state import HarnessPhase, HarnessState, HarnessStatus
 from nexusmind.runtime.harness.stop import StopReason
 from nexusmind.runtime.messages import Message
 
@@ -60,7 +60,9 @@ class HarnessCheckpoint:
     created_at: str
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1 or not self.checkpoint_id or not self.run_id:
+        if type(self.schema_version) is not int or self.schema_version != 1:
+            raise ValueError("Invalid checkpoint schema version")
+        if type(self.checkpoint_id) is not str or not self.checkpoint_id or type(self.run_id) is not str or not self.run_id:
             raise ValueError("Invalid checkpoint identity or schema version")
         if type(self.sequence) is not int or self.sequence < 0:
             raise ValueError("Checkpoint sequence must be non-negative")
@@ -71,9 +73,21 @@ class HarnessCheckpoint:
         self.validate()
 
     def validate(self) -> None:
+        if type(self.boundary) is not CheckpointBoundary or not isinstance(self.state, HarnessStateSnapshot):
+            raise ValueError("Invalid checkpoint boundary or state")
+        if type(self.state.status) is not HarnessStatus or (self.state.stop_reason is not None and type(self.state.stop_reason) is not StopReason):
+            raise ValueError("Invalid checkpoint status or stop reason")
         active_tools = set(self.state.started_tool_call_ids) - set(self.state.executed_tool_call_ids)
         if active_tools:
             raise ValueError("Cannot create a checkpoint while a tool may be running")
+        if self.state.status is HarnessStatus.RUNNING and self.state.stop_reason is not None:
+            raise ValueError("Running checkpoint cannot have a stop reason")
+        if self.state.status is HarnessStatus.COMPLETED and self.state.stop_reason is not StopReason.MODEL_COMPLETED:
+            raise ValueError("Completed checkpoint requires model_completed")
+        if self.state.status is HarnessStatus.CANCELLED and self.state.stop_reason is not StopReason.CANCELLED:
+            raise ValueError("Cancelled checkpoint requires cancelled")
+        if self.state.status is HarnessStatus.FAILED and self.state.stop_reason not in {StopReason.MODEL_FAILED, StopReason.TOOL_FAILED, StopReason.LIMIT_EXCEEDED, StopReason.RUNTIME_ERROR}:
+            raise ValueError("Failed checkpoint has an invalid stop reason")
         if self.boundary is CheckpointBoundary.RUN_TERMINAL:
             if self.state.status is HarnessStatus.RUNNING or self.state.stop_reason is None:
                 raise ValueError("Terminal checkpoint requires a terminal status and stop reason")
@@ -82,7 +96,11 @@ class HarnessCheckpoint:
         _ensure_json_size(self)
 
     @classmethod
-    def create(cls, state: HarnessState, run_id: str, sequence: int, boundary: CheckpointBoundary, stop_reason: StopReason | None = None) -> "HarnessCheckpoint":
+    def create(cls, state: HarnessState, run_id: str, sequence: int, boundary: CheckpointBoundary | None = None, stop_reason: StopReason | None = None) -> "HarnessCheckpoint":
+        if boundary is None:
+            boundary = CheckpointBoundary(state.phase.value)
+        if type(boundary) is not CheckpointBoundary:
+            raise ValueError("Invalid checkpoint boundary")
         active_tools = state.started_tool_call_ids - state.executed_tool_call_ids
         if active_tools:
             raise ValueError("Cannot create a safe checkpoint while a tool may be running")
