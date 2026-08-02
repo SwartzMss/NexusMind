@@ -7,11 +7,11 @@ from collections.abc import AsyncIterator
 from nexusmind.models.base import ChatModel
 from nexusmind.runtime.harness.limits import HarnessLimits
 from nexusmind.runtime.harness.runner_impl import _LegacyHarnessRuntime
-from nexusmind.runtime.events import RuntimeEvent
+from nexusmind.runtime.events import RuntimeEvent, RuntimeEventType
 from nexusmind.runtime.harness.context import HarnessRequest
 from nexusmind.runtime.harness.state import HarnessPhase, HarnessState, HarnessStatus
 from nexusmind.runtime.harness.stop import StopReason
-from nexusmind.runtime.harness.resume import HarnessResumeRequest, state_from_checkpoint
+from nexusmind.runtime.harness.resume import HarnessResumeRequest, HarnessResumeStateError, state_from_checkpoint
 from nexusmind.runtime.harness.checkpoint import CheckpointBoundary, HarnessCheckpoint, HarnessStateSnapshot
 from nexusmind.runtime.policy import ApprovalProvider, ToolApprovalSummarizer, ToolPolicy
 from nexusmind.tools.executor import ToolExecutorProtocol
