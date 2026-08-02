@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import json
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timezone
 from uuid import uuid4
 from collections.abc import AsyncIterator
@@ -220,6 +221,17 @@ class HarnessRunner:
                 _state=state,
                 _skip_assistant_message=bool(request.metadata.get("resume_existing_assistant")),
             ):
+                if event.type is RuntimeEventType.RUN_STARTED and request.metadata.get("resumed"):
+                    event = replace(
+                        event,
+                        metadata={
+                            **event.metadata,
+                            "resumed": True,
+                            "checkpoint_id": request.metadata["checkpoint_id"],
+                            "checkpoint_sequence": request.metadata["checkpoint_sequence"],
+                            "checkpoint_boundary": request.metadata["checkpoint_boundary"],
+                        },
+                    )
                 if event.type.value == "run_completed":
                     state.status = HarnessStatus.COMPLETED
                 elif event.type.value == "run_failed":

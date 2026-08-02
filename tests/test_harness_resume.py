@@ -7,6 +7,7 @@ from nexusmind.runtime.harness import (
     HarnessResumeRequest, HarnessResumeStateError, HarnessRunner, HarnessState,
     HarnessStatus, StopReason,
 )
+from nexusmind.runtime.harness.limits import HarnessLimits
 from nexusmind.runtime.messages import Message, MessageRole
 from nexusmind.tools.contracts import ToolCall, ToolDefinition, ToolResult
 
@@ -45,4 +46,24 @@ def test_resume_after_model_text_completes_without_model_call():
         [event async for event in execution.stream()]
         assert model.calls == 0
         assert execution.state.status is HarnessStatus.COMPLETED
+    asyncio.run(run())
+
+def test_resume_after_model_rejects_trailing_transcript():
+    state = HarnessState(messages=[
+        Message(role=MessageRole.ASSISTANT, content="answer"),
+        Message(role=MessageRole.USER, content="later"),
+    ], model_turns=1, status=HarnessStatus.RUNNING, phase=HarnessPhase.AFTER_MODEL)
+    checkpoint = HarnessCheckpoint.create(state, "run-text", 0)
+    with pytest.raises(HarnessResumeStateError):
+        HarnessRunner(FakeChatModel(["done"])).resume_execution(HarnessResumeRequest(checkpoint))
+
+def test_resume_at_model_limit_emits_limit_failure():
+    async def run():
+        state = HarnessState(messages=[Message(role=MessageRole.USER, content="hello")], model_turns=1, status=HarnessStatus.RUNNING, phase=HarnessPhase.BEFORE_MODEL)
+        checkpoint = HarnessCheckpoint.create(state, "run-limit", 0)
+        execution = HarnessRunner(FakeChatModel(["unexpected"]), limits=HarnessLimits(max_model_turns=1)).resume_execution(HarnessResumeRequest(checkpoint))
+        events = [event async for event in execution.stream()]
+        assert events[-1].type.value == "run_failed"
+        assert execution.stop_reason is StopReason.LIMIT_EXCEEDED
+        assert execution.state.phase is HarnessPhase.TERMINAL
     asyncio.run(run())
