@@ -102,3 +102,40 @@ def test_resume_after_model_executes_pending_tool_without_model_replay():
         assert any(event.type.value == "tool_result" for event in events)
         assert execution.state.executed_tool_call_ids == {"call-1"}
     asyncio.run(run())
+
+def test_resume_before_tool_executes_pending_tool():
+    async def run():
+        call = ToolCall(id="call-1", name="echo", arguments={"text": "hi"})
+        state = HarnessState(messages=[Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(call,))],
+            model_turns=1, status=HarnessStatus.RUNNING, phase=HarnessPhase.BEFORE_TOOL)
+        checkpoint = HarnessCheckpoint.create(state, "run-before-tool", 0)
+        registry = ToolRegistry()
+        registry.register(EchoTool())
+        execution = HarnessRunner(FakeChatModel(["unexpected"]), tool_executor=ToolExecutor(registry)).resume_execution(
+            HarnessResumeRequest(checkpoint, tools=(EchoTool().definition,))
+        )
+        events = [event async for event in execution.stream()]
+        assert any(event.type.value == "tool_result" for event in events)
+        assert execution.state.executed_tool_call_ids == {"call-1"}
+    asyncio.run(run())
+
+def test_resume_after_tool_executes_only_remaining_calls():
+    async def run():
+        first = ToolCall(id="call-1", name="echo", arguments={"text": "one"})
+        second = ToolCall(id="call-2", name="echo", arguments={"text": "two"})
+        state = HarnessState(messages=[
+            Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(first, second)),
+            Message(role=MessageRole.TOOL, name="echo", tool_call_id="call-1", content='{"ok":true}'),
+        ], model_turns=1, tool_calls_total=1, started_tool_call_ids={"call-1"},
+            executed_tool_call_ids={"call-1"}, phase=HarnessPhase.AFTER_TOOL)
+        checkpoint = HarnessCheckpoint.create(state, "run-partial-tool", 0)
+        registry = ToolRegistry()
+        registry.register(EchoTool())
+        execution = HarnessRunner(FakeChatModel(["unexpected"]), tool_executor=ToolExecutor(registry)).resume_execution(
+            HarnessResumeRequest(checkpoint, tools=(EchoTool().definition,))
+        )
+        events = [event async for event in execution.stream()]
+        results = [event.tool_result.call_id for event in events if event.type.value == "tool_result"]
+        assert results == ["call-2"]
+        assert execution.state.executed_tool_call_ids == {"call-1", "call-2"}
+    asyncio.run(run())
