@@ -134,6 +134,24 @@ def test_resume_after_model_executes_pending_tool_without_model_replay():
         assert execution.state.executed_tool_call_ids == {"call-1"}
     asyncio.run(run())
 
+def test_resume_pending_tool_at_model_limit_executes_before_next_model():
+    async def run():
+        call = ToolCall(id="call-limit", name="echo", arguments={"text": "hi"})
+        state = HarnessState(messages=[Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(call,))],
+            model_turns=1, status=HarnessStatus.RUNNING, phase=HarnessPhase.AFTER_MODEL)
+        checkpoint = HarnessCheckpoint.create(state, "run-limit-tool", 0)
+        registry = ToolRegistry()
+        registry.register(EchoTool())
+        execution = HarnessRunner(FakeChatModel(["unexpected"]), tool_executor=ToolExecutor(registry),
+            limits=HarnessLimits(max_model_turns=1)).resume_execution(
+                HarnessResumeRequest(checkpoint, tools=(EchoTool().definition,))
+            )
+        events = [event async for event in execution.stream()]
+        assert any(event.type.value == "tool_result" for event in events)
+        assert execution.stop_reason is StopReason.LIMIT_EXCEEDED
+        assert execution.state.executed_tool_call_ids == {"call-limit"}
+    asyncio.run(run())
+
 def test_resume_rejects_missing_pending_tool_before_execution():
     call = ToolCall(id="call-1", name="echo", arguments={"text": "hi"})
     state = HarnessState(messages=[Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(call,))],
