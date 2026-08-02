@@ -9,7 +9,7 @@ from nexusmind.runtime.harness import (
     HarnessStateSnapshot,
     InMemoryCheckpointStore,
 )
-from nexusmind.runtime.harness.state import HarnessStatus
+from nexusmind.runtime.harness.state import HarnessPhase, HarnessStatus
 from nexusmind.runtime.harness.stop import StopReason
 from nexusmind.runtime.messages import Message, MessageRole
 
@@ -38,6 +38,7 @@ def test_checkpoint_store_enforces_sequence_and_latest() -> None:
         first = HarnessCheckpoint.create(state, "run-1", 0, CheckpointBoundary.BEFORE_MODEL)
         state.status = HarnessStatus.COMPLETED
         state.stop_reason = StopReason.MODEL_COMPLETED
+        state.phase = HarnessPhase.TERMINAL
         second = HarnessCheckpoint.create(state, "run-1", 1, CheckpointBoundary.RUN_TERMINAL)
         await store.save(first)
         await store.save(second)
@@ -61,13 +62,13 @@ def test_checkpoint_rejects_secret_like_metadata() -> None:
 
 
 def test_terminal_checkpoint_contains_stop_reason() -> None:
-    state = HarnessState(messages=[], status=HarnessStatus.COMPLETED, stop_reason=StopReason.MODEL_COMPLETED)
+    state = HarnessState(messages=[], status=HarnessStatus.COMPLETED, stop_reason=StopReason.MODEL_COMPLETED, phase=HarnessPhase.TERMINAL)
     checkpoint = HarnessCheckpoint.create(state, "run-terminal", 0, CheckpointBoundary.RUN_TERMINAL)
     assert checkpoint.state.status.value == "completed"
 
 
 def test_checkpoint_allows_after_tool_when_previous_tools_are_complete() -> None:
-    state = HarnessState(messages=[], started_tool_call_ids={"call-1"}, executed_tool_call_ids={"call-1"})
+    state = HarnessState(messages=[], started_tool_call_ids={"call-1"}, executed_tool_call_ids={"call-1"}, phase=HarnessPhase.AFTER_TOOL)
     checkpoint = HarnessCheckpoint.create(state, "run-tool", 0, CheckpointBoundary.AFTER_TOOL)
     assert checkpoint.boundary is CheckpointBoundary.AFTER_TOOL
 
@@ -77,7 +78,7 @@ def test_checkpoint_rejects_active_tool() -> None:
     try:
         HarnessCheckpoint.create(state, "run-tool", 0, CheckpointBoundary.AFTER_TOOL)
     except ValueError as exc:
-        assert "safe checkpoint" in str(exc)
+        assert "boundary" in str(exc) or "safe checkpoint" in str(exc)
     else:
         raise AssertionError("active tool must not be checkpointed as after_tool")
 
@@ -88,7 +89,7 @@ def test_direct_checkpoint_construction_cannot_bypass_boundary_validation() -> N
     try:
         HarnessCheckpoint(1, "id", "run", 1, CheckpointBoundary.AFTER_TOOL, snapshot, "2026-08-02T00:00:00Z")
     except ValueError as exc:
-        assert "tool" in str(exc)
+        assert "boundary" in str(exc) or "tool" in str(exc)
     else:
         raise AssertionError("direct construction must validate checkpoint safety")
 

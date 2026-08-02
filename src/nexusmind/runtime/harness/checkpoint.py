@@ -21,6 +21,14 @@ class CheckpointBoundary(str, Enum):
     AFTER_TOOL = "after_tool"
     RUN_TERMINAL = "run_terminal"
 
+_PHASE_TO_BOUNDARY = {
+    HarnessPhase.BEFORE_MODEL: CheckpointBoundary.BEFORE_MODEL,
+    HarnessPhase.AFTER_MODEL: CheckpointBoundary.AFTER_MODEL,
+    HarnessPhase.BEFORE_TOOL: CheckpointBoundary.BEFORE_TOOL,
+    HarnessPhase.AFTER_TOOL: CheckpointBoundary.AFTER_TOOL,
+    HarnessPhase.TERMINAL: CheckpointBoundary.RUN_TERMINAL,
+}
+
 @dataclass(frozen=True, slots=True)
 class HarnessStateSnapshot:
     messages: tuple[Message, ...]
@@ -32,6 +40,7 @@ class HarnessStateSnapshot:
     executed_tool_call_ids: tuple[str, ...]
     status: HarnessStatus
     stop_reason: StopReason | None
+    phase: HarnessPhase
 
     @classmethod
     def from_state(cls, state: HarnessState, stop_reason: StopReason | None = None) -> "HarnessStateSnapshot":
@@ -45,6 +54,7 @@ class HarnessStateSnapshot:
             executed_tool_call_ids=tuple(sorted(state.executed_tool_call_ids)),
             status=state.status,
             stop_reason=stop_reason if stop_reason is not None else state.stop_reason,
+            phase=state.phase,
         )
         _ensure_json_size(snapshot)
         return snapshot
@@ -75,6 +85,8 @@ class HarnessCheckpoint:
     def validate(self) -> None:
         if type(self.boundary) is not CheckpointBoundary or not isinstance(self.state, HarnessStateSnapshot):
             raise ValueError("Invalid checkpoint boundary or state")
+        if type(self.state.phase) is not HarnessPhase or self.boundary is not _PHASE_TO_BOUNDARY[self.state.phase]:
+            raise ValueError("Checkpoint boundary does not match execution phase")
         if type(self.state.status) is not HarnessStatus or (self.state.stop_reason is not None and type(self.state.stop_reason) is not StopReason):
             raise ValueError("Invalid checkpoint status or stop reason")
         active_tools = set(self.state.started_tool_call_ids) - set(self.state.executed_tool_call_ids)
@@ -98,9 +110,11 @@ class HarnessCheckpoint:
     @classmethod
     def create(cls, state: HarnessState, run_id: str, sequence: int, boundary: CheckpointBoundary | None = None, stop_reason: StopReason | None = None) -> "HarnessCheckpoint":
         if boundary is None:
-            boundary = CheckpointBoundary(state.phase.value)
+            boundary = _PHASE_TO_BOUNDARY[state.phase]
         if type(boundary) is not CheckpointBoundary:
             raise ValueError("Invalid checkpoint boundary")
+        if boundary is not _PHASE_TO_BOUNDARY[state.phase]:
+            raise ValueError("Checkpoint boundary does not match execution phase")
         active_tools = state.started_tool_call_ids - state.executed_tool_call_ids
         if active_tools:
             raise ValueError("Cannot create a safe checkpoint while a tool may be running")

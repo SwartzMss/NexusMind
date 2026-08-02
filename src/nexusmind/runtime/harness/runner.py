@@ -8,7 +8,7 @@ from nexusmind.runtime.harness.limits import HarnessLimits
 from nexusmind.runtime.harness.runner_impl import _LegacyHarnessRuntime
 from nexusmind.runtime.events import RuntimeEvent
 from nexusmind.runtime.harness.context import HarnessRequest
-from nexusmind.runtime.harness.state import HarnessState, HarnessStatus
+from nexusmind.runtime.harness.state import HarnessPhase, HarnessState, HarnessStatus
 from nexusmind.runtime.harness.stop import StopReason
 from nexusmind.runtime.harness.checkpoint import CheckpointBoundary, HarnessCheckpoint, HarnessStateSnapshot
 from nexusmind.runtime.policy import ApprovalProvider, ToolApprovalSummarizer, ToolPolicy
@@ -51,9 +51,11 @@ class HarnessExecution:
                     self.stop_reason = StopReason.RUNTIME_ERROR
                 self.state.stop_reason = self.stop_reason
                 self.state.status = HarnessStatus.FAILED
+                self.state.phase = HarnessPhase.TERMINAL
             yield event
         except asyncio.CancelledError:
             self.state.status = HarnessStatus.CANCELLED
+            self.state.phase = HarnessPhase.TERMINAL
             self.stop_reason = StopReason.CANCELLED
             self.state.stop_reason = self.stop_reason
             raise

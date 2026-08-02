@@ -219,6 +219,15 @@ class _LegacyHarnessRuntime:
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=terminal_error)
                     return
                 completed_event = cast(RuntimeEvent, turn.completed_event)
+                assistant_content = "".join(turn.text_parts) or None
+                if assistant_content is not None or turn.tool_calls:
+                    assistant_message = Message(
+                        role=MessageRole.ASSISTANT,
+                        content=assistant_content,
+                        tool_calls=tuple(turn.tool_calls),
+                    )
+                    messages.append(assistant_message)
+                    state.messages.append(assistant_message)
                 state.phase = HarnessPhase.AFTER_MODEL
                 yield completed_event
                 if turn.finish_reason != "tool_calls":
@@ -241,13 +250,6 @@ class _LegacyHarnessRuntime:
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                     return
                 state.tool_argument_bytes_total += turn.tool_arguments_size
-                assistant_message = Message(
-                        role=MessageRole.ASSISTANT,
-                        content="".join(turn.text_parts) or None,
-                        tool_calls=tuple(turn.tool_calls),
-                )
-                messages.append(assistant_message)
-                state.messages.append(assistant_message)
                 for call in turn.tool_calls:
                     state.phase = HarnessPhase.BEFORE_TOOL
                     remaining_result_bytes = self._limits.max_tool_result_bytes_total - state.tool_result_bytes_total
@@ -422,9 +424,6 @@ class _LegacyHarnessRuntime:
                         yield _tool_failure_after_start(call, _RUNTIME_ERROR)
                         return
                     state.tool_result_bytes_total += size
-                    state.tool_calls_total += 1
-                    state.executed_tool_call_ids.add(call.id)
-                    state.phase = HarnessPhase.AFTER_TOOL
                     result = replace(
                         result,
                         metadata={
@@ -432,7 +431,6 @@ class _LegacyHarnessRuntime:
                             "result_bytes": size,
                         },
                     )
-                    yield RuntimeEvent(RuntimeEventType.TOOL_RESULT, tool_result=result)
                     tool_message = Message(
                             role=MessageRole.TOOL,
                             name=result.name,
@@ -441,6 +439,10 @@ class _LegacyHarnessRuntime:
                     )
                     messages.append(tool_message)
                     state.messages.append(tool_message)
+                    state.tool_calls_total += 1
+                    state.executed_tool_call_ids.add(call.id)
+                    state.phase = HarnessPhase.AFTER_TOOL
+                    yield RuntimeEvent(RuntimeEventType.TOOL_RESULT, tool_result=result)
                 continue
         except asyncio.CancelledError:
             raise
