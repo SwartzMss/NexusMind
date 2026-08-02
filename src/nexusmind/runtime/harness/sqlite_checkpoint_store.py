@@ -30,19 +30,22 @@ class SQLiteCheckpointStore:
         return connection
 
     def _initialize(self):
-        with self._connect() as db:
-            version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
-                raise CheckpointStoreError("Unsupported checkpoint database schema")
-            table_exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='harness_checkpoints'").fetchone() is not None
-            if version == 0 and table_exists:
-                raise CheckpointStoreError("Unversioned checkpoint schema is partially initialized")
-            if version == 0:
-                db.execute("""CREATE TABLE harness_checkpoints (checkpoint_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence >= 0), checkpoint_schema_version INTEGER NOT NULL, boundary TEXT NOT NULL, created_at TEXT NOT NULL, payload_json TEXT NOT NULL, payload_sha256 TEXT NOT NULL, UNIQUE(run_id, sequence))""")
-                db.execute("CREATE INDEX idx_harness_checkpoints_run_sequence ON harness_checkpoints(run_id, sequence DESC)")
-                db.execute("PRAGMA user_version = 1")
-            elif not table_exists:
-                raise CheckpointStoreError("Checkpoint schema is missing")
+        try:
+            with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                version = db.execute("PRAGMA user_version").fetchone()[0]
+                if version not in (0, 1):
+                    raise CheckpointStoreError("Unsupported checkpoint database schema")
+                table_exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='harness_checkpoints'").fetchone() is not None
+                if version == 0:
+                    objects = db.execute("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").fetchall()
+                    if objects:
+                        raise CheckpointStoreError("Unversioned database is not empty")
+                    db.execute("""CREATE TABLE harness_checkpoints (checkpoint_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence >= 0), checkpoint_schema_version INTEGER NOT NULL, boundary TEXT NOT NULL, created_at TEXT NOT NULL, payload_json TEXT NOT NULL, payload_sha256 TEXT NOT NULL, UNIQUE(run_id, sequence))""")
+                    db.execute("CREATE INDEX idx_harness_checkpoints_run_sequence ON harness_checkpoints(run_id, sequence DESC)")
+                    db.execute("PRAGMA user_version = 1")
+                elif not table_exists:
+                    raise CheckpointStoreError("Checkpoint schema is missing")
             expected = {"checkpoint_id": ("TEXT", 0, 1), "run_id": ("TEXT", 1, 0), "sequence": ("INTEGER", 1, 0), "checkpoint_schema_version": ("INTEGER", 1, 0), "boundary": ("TEXT", 1, 0), "created_at": ("TEXT", 1, 0), "payload_json": ("TEXT", 1, 0), "payload_sha256": ("TEXT", 1, 0)}
             actual = {row[1]: (row[2].upper(), row[3], row[5]) for row in db.execute("PRAGMA table_info(harness_checkpoints)")}
             if actual != expected:
@@ -50,13 +53,18 @@ class SQLiteCheckpointStore:
             table_sql = (db.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'harness_checkpoints'").fetchone() or ("",))[0] or ""
             if "UNIQUE(run_id,sequence)" not in table_sql.replace(" ", ""):
                 raise CheckpointStoreError("Checkpoint database is missing the run sequence uniqueness constraint")
-            index = db.execute("PRAGMA index_list(harness_checkpoints)").fetchall()
-            index_name = next((row[1] for row in index if row[1] == "idx_harness_checkpoints_run_sequence"), None)
-            if index_name is None:
-                raise CheckpointStoreError("Checkpoint sequence index is missing")
-            columns = [row[2] for row in db.execute(f"PRAGMA index_info({index_name})")]
-            if columns != ["run_id", "sequence"]:
-                raise CheckpointStoreError("Checkpoint sequence index is invalid")
+                index = db.execute("PRAGMA index_list(harness_checkpoints)").fetchall()
+                index_name = next((row[1] for row in index if row[1] == "idx_harness_checkpoints_run_sequence"), None)
+                if index_name is None:
+                    raise CheckpointStoreError("Checkpoint sequence index is missing")
+                columns = [row[2] for row in db.execute(f"PRAGMA index_info({index_name})")]
+                if columns != ["run_id", "sequence"]:
+                    raise CheckpointStoreError("Checkpoint sequence index is invalid")
+                db.commit()
+        except CheckpointStoreError:
+            raise
+        except sqlite3.Error as exc:
+            raise CheckpointStoreError("SQLite checkpoint initialization failed") from exc
 
     def _require(self):
         if not self._initialized or self._closed:
@@ -70,8 +78,11 @@ class SQLiteCheckpointStore:
         try:
             with self._connect() as db:
                 db.execute("BEGIN IMMEDIATE")
-                latest = db.execute("SELECT sequence FROM harness_checkpoints WHERE run_id = ? ORDER BY sequence DESC LIMIT 1", (checkpoint.run_id,)).fetchone()
-                if latest and checkpoint.sequence <= latest[0]: raise CheckpointStoreError("Checkpoint sequence must increase")
+                latest = db.execute("SELECT checkpoint_id, run_id, sequence, checkpoint_schema_version, boundary, created_at, payload_json, payload_sha256 FROM harness_checkpoints WHERE run_id = ? ORDER BY sequence DESC LIMIT 1", (checkpoint.run_id,)).fetchone()
+                if latest is not None:
+                    latest_checkpoint = self._decode_row(latest)
+                    if checkpoint.sequence <= latest_checkpoint.sequence:
+                        raise CheckpointStoreError("Checkpoint sequence must increase")
                 if type(payload) is not str:
                     raise CheckpointStoreError("Checkpoint payload has an invalid storage type")
                 db.execute("INSERT INTO harness_checkpoints VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (checkpoint.checkpoint_id, checkpoint.run_id, checkpoint.sequence, checkpoint.schema_version, checkpoint.boundary.value, checkpoint.created_at, payload, digest))
