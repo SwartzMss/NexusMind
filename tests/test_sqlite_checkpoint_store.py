@@ -13,6 +13,7 @@ from nexusmind.runtime.harness import (
     HarnessRequest,
     HarnessRunner,
 )
+from nexusmind.runtime.harness.checkpoint_codec import CheckpointDecodeError, checkpoint_from_json
 from nexusmind.models.fake import FakeChatModel
 from nexusmind.runtime.messages import Message, MessageRole
 
@@ -148,6 +149,53 @@ def test_sqlite_store_rejects_unknown_database_schema(tmp_path) -> None:
             assert "schema" in str(exc)
         else:
             raise AssertionError("unknown database schema must be rejected")
+    asyncio.run(run())
+
+
+def test_sqlite_store_rejects_nonempty_unversioned_database(tmp_path) -> None:
+    path = tmp_path / "foreign.db"
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY)")
+    async def run():
+        try:
+            await SQLiteCheckpointStore(path).initialize()
+        except Exception as exc:
+            assert "not empty" in str(exc)
+        else:
+            raise AssertionError("foreign database must not be claimed")
+    asyncio.run(run())
+
+
+def test_sqlite_store_rejects_memory_path() -> None:
+    try:
+        SQLiteCheckpointStore(":memory:")
+    except ValueError as exc:
+        assert "persistent" in str(exc)
+    else:
+        raise AssertionError("memory database must be rejected")
+
+
+def test_codec_rejects_duplicate_json_fields() -> None:
+    payload = '{"schema_version":1,"schema_version":1}'
+    try:
+        checkpoint_from_json(payload)
+    except CheckpointDecodeError as exc:
+        assert "duplicate" in str(exc)
+    else:
+        raise AssertionError("duplicate fields must be rejected")
+
+
+def test_closed_sqlite_store_rejects_operations(tmp_path) -> None:
+    async def run():
+        store = SQLiteCheckpointStore(tmp_path / "closed.db")
+        await store.initialize()
+        await store.close()
+        try:
+            await store.list("run-1")
+        except Exception as exc:
+            assert "initialized" in str(exc)
+        else:
+            raise AssertionError("closed store must reject operations")
     asyncio.run(run())
 
 
