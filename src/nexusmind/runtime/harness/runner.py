@@ -77,14 +77,9 @@ class HarnessRunner:
                 user or "",
                 tools=list(request.tools),
                 _initial_messages=list(request.messages),
+                _state=state,
             ):
-                if event.type.value == "model_started":
-                    state.model_turns += 1
-                elif event.type.value == "tool_call_completed":
-                    state.tool_calls_total += 1
-                elif event.type.value == "tool_result":
-                    state.executed_tool_call_ids.add(event.tool_result.call_id)
-                elif event.type.value == "run_completed":
+                if event.type.value == "run_completed":
                     state.status = HarnessStatus.COMPLETED
                 elif event.type.value == "run_failed":
                     state.status = HarnessStatus.FAILED

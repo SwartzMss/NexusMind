@@ -10,6 +10,7 @@ from typing import cast
 from nexusmind.models.base import ChatModel
 from nexusmind.models.tool_calls import ToolCallDelta
 from nexusmind.runtime.events import RuntimeEvent, RuntimeEventType
+from nexusmind.runtime.harness.state import HarnessState
 from nexusmind.runtime.messages import Message, MessageRole
 from nexusmind.runtime.policy import (
     ApprovalDecision,
@@ -117,6 +118,7 @@ class _LegacyHarnessRuntime:
         system_prompt: str | None = None,
         tools: list[ToolDefinition] | None = None,
         _initial_messages: list[Message] | None = None,
+        _state: HarnessState | None = None,
     ) -> AsyncIterator[RuntimeEvent]:
         messages: list[Message] = list(_initial_messages or [])
         if _initial_messages is None:
@@ -124,14 +126,9 @@ class _LegacyHarnessRuntime:
                 messages.append(Message(role=MessageRole.SYSTEM, content=system_prompt))
             messages.append(Message(role=MessageRole.USER, content=content))
 
+        state = _state or HarnessState(messages=messages)
         yield RuntimeEvent(RuntimeEventType.RUN_STARTED)
         try:
-            model_turns = 0
-            tool_calls_total = 0
-            tool_arguments_bytes_total = 0
-            tool_result_bytes_total = 0
-            started_tool_call_ids: set[str] = set()
-            executed_tool_call_ids: set[str] = set()
             try:
                 tool_definitions = _snapshot_runtime_tool_definitions(tools or [], self._tool_executor)
             except RuntimeError:
@@ -140,10 +137,10 @@ class _LegacyHarnessRuntime:
             model_tools = list(tool_definitions.values())
             allowed_tool_names = set(tool_definitions)
             while True:
-                if model_turns >= self._limits.max_model_turns:
+                if state.model_turns >= self._limits.max_model_turns:
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
                     return
-                model_turns += 1
+                state.model_turns += 1
                 turn = _ModelTurn()
                 try:
                     async for event in self._model.stream(
@@ -170,7 +167,7 @@ class _LegacyHarnessRuntime:
                                 yield RuntimeEvent(RuntimeEventType.MODEL_FAILED, error=_RUNTIME_ERROR)
                                 yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                                 return
-                            if tool_calls_total + len(turn.tool_calls) + 1 > self._limits.max_tool_calls_total:
+                            if state.tool_calls_total + len(turn.tool_calls) + 1 > self._limits.max_tool_calls_total:
                                 yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
                                 return
                             try:
@@ -179,7 +176,7 @@ class _LegacyHarnessRuntime:
                                     max_bytes_per_call=self._limits.max_tool_arguments_bytes_per_call,
                                     remaining_total_bytes=(
                                         self._limits.max_tool_arguments_bytes_total
-                                        - tool_arguments_bytes_total
+                                        - state.tool_argument_bytes_total
                                         - turn.tool_arguments_size
                                     ),
                                     max_nodes=self._limits.max_json_nodes_per_payload,
@@ -225,7 +222,7 @@ class _LegacyHarnessRuntime:
                 if turn.finish_reason != "tool_calls":
                     yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
                     return
-                if model_turns >= self._limits.max_model_turns:
+                if state.model_turns >= self._limits.max_model_turns:
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
                     return
                 if self._tool_executor is None:
@@ -234,22 +231,22 @@ class _LegacyHarnessRuntime:
                 if _has_duplicate_call_ids(turn.tool_calls):
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                     return
-                if any(call.id in executed_tool_call_ids for call in turn.tool_calls):
+                if any(call.id in state.executed_tool_call_ids for call in turn.tool_calls):
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                     return
                 if any(call.name not in allowed_tool_names for call in turn.tool_calls):
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                     return
-                tool_arguments_bytes_total += turn.tool_arguments_size
-                messages.append(
-                    Message(
+                state.tool_argument_bytes_total += turn.tool_arguments_size
+                assistant_message = Message(
                         role=MessageRole.ASSISTANT,
                         content="".join(turn.text_parts) or None,
                         tool_calls=tuple(turn.tool_calls),
-                    )
                 )
+                messages.append(assistant_message)
+                state.messages.append(assistant_message)
                 for call in turn.tool_calls:
-                    remaining_result_bytes = self._limits.max_tool_result_bytes_total - tool_result_bytes_total
+                    remaining_result_bytes = self._limits.max_tool_result_bytes_total - state.tool_result_bytes_total
                     result_budget = _result_budget(self._limits, remaining_result_bytes)
                     if not result_budget.satisfies(_PERMISSION_DENIED_REQUIREMENTS):
                         yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
@@ -258,8 +255,8 @@ class _LegacyHarnessRuntime:
                     policy_result = await self._resolve_tool_policy(
                         call,
                         definition,
-                        model_turn=model_turns,
-                        tool_call_index=tool_calls_total,
+                        model_turn=state.model_turns,
+                        tool_call_index=state.tool_calls_total,
                     )
                     if policy_result.failed:
                         yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
@@ -305,10 +302,10 @@ class _LegacyHarnessRuntime:
                             if decision == ApprovalDecision.DENY:
                                 result = _permission_denied_result(call)
                             else:
-                                remaining_result_bytes = self._limits.max_tool_result_bytes_total - tool_result_bytes_total
+                                remaining_result_bytes = self._limits.max_tool_result_bytes_total - state.tool_result_bytes_total
                                 if (
-                                    call.id in started_tool_call_ids
-                                    or call.id in executed_tool_call_ids
+                                    call.id in state.started_tool_call_ids
+                                    or call.id in state.executed_tool_call_ids
                                     or call.name not in allowed_tool_names
                                     or call.name not in tool_definitions
                                     or not _tool_call_matches_snapshot(call, approval_call_snapshot)
@@ -318,8 +315,8 @@ class _LegacyHarnessRuntime:
                                 post_approval_decision = await self._evaluate_tool_policy_decision(
                                     call,
                                     definition,
-                                    model_turn=model_turns,
-                                    tool_call_index=tool_calls_total,
+                                    model_turn=state.model_turns,
+                                    tool_call_index=state.tool_calls_total,
                                 )
                                 if post_approval_decision is None:
                                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
@@ -343,7 +340,7 @@ class _LegacyHarnessRuntime:
                                     if not _executor_definition_matches(self._tool_executor, call.name, definition):
                                         yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                                         return
-                                    started_tool_call_ids.add(call.id)
+                                    state.started_tool_call_ids.add(call.id)
                                     try:
                                         result = await self._tool_executor.execute_with_result_budget(
                                             call,
@@ -358,7 +355,7 @@ class _LegacyHarnessRuntime:
                                         yield _tool_failure_after_start(call, _RUNTIME_ERROR)
                                         return
                         else:
-                            if call.id in started_tool_call_ids:
+                            if call.id in state.started_tool_call_ids:
                                 yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                                 return
                             if not _executor_definition_matches(self._tool_executor, call.name, definition):
@@ -377,7 +374,7 @@ class _LegacyHarnessRuntime:
                             if result_budget is None:
                                 yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
                                 return
-                            started_tool_call_ids.add(call.id)
+                            state.started_tool_call_ids.add(call.id)
                             try:
                                 result = await self._tool_executor.execute_with_result_budget(
                                     call,
@@ -410,7 +407,7 @@ class _LegacyHarnessRuntime:
                         content_json, size = _tool_result_message_content(
                             result,
                             max_bytes_per_call=self._limits.max_tool_result_bytes_per_call,
-                            remaining_total_bytes=self._limits.max_tool_result_bytes_total - tool_result_bytes_total,
+                            remaining_total_bytes=self._limits.max_tool_result_bytes_total - state.tool_result_bytes_total,
                             max_nodes=self._limits.max_json_nodes_per_payload,
                             max_depth=self._limits.max_json_depth,
                         )
@@ -420,9 +417,9 @@ class _LegacyHarnessRuntime:
                     except RuntimeError:
                         yield _tool_failure_after_start(call, _RUNTIME_ERROR)
                         return
-                    tool_result_bytes_total += size
-                    tool_calls_total += 1
-                    executed_tool_call_ids.add(call.id)
+                    state.tool_result_bytes_total += size
+                    state.tool_calls_total += 1
+                    state.executed_tool_call_ids.add(call.id)
                     result = replace(
                         result,
                         metadata={
@@ -431,14 +428,14 @@ class _LegacyHarnessRuntime:
                         },
                     )
                     yield RuntimeEvent(RuntimeEventType.TOOL_RESULT, tool_result=result)
-                    messages.append(
-                        Message(
+                    tool_message = Message(
                             role=MessageRole.TOOL,
                             name=result.name,
                             tool_call_id=result.call_id,
                             content=content_json,
-                        )
                     )
+                    messages.append(tool_message)
+                    state.messages.append(tool_message)
                 continue
         except asyncio.CancelledError:
             raise
