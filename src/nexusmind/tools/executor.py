@@ -148,6 +148,7 @@ class ToolExecutor:
             try:
                 await asyncio.wait_for(asyncio.shield(invoke_task), timeout=TOOL_CANCEL_GRACE_SECONDS)
             except asyncio.TimeoutError:
+                _consume_background_task_result(invoke_task)
                 raise cancellation
             except asyncio.CancelledError:
                 raise cancellation
@@ -223,6 +224,16 @@ class ToolExecutor:
 
 def _failure(call: ToolCall, code: ToolErrorCode, message: str) -> ToolResult:
     return ToolResult(call_id=call.id, name=call.name, error=ToolError(code=code, message=message))
+
+
+def _consume_background_task_result(task: asyncio.Task[Any]) -> None:
+    """Consume a late cancellation/cleanup exception without changing outcome."""
+    def consume(done: asyncio.Task[Any]) -> None:
+        try:
+            done.result()
+        except BaseException:
+            pass
+    task.add_done_callback(consume)
 
 
 def _return_with_budget(result: ToolResult, budget: ToolResultBudget | None) -> ToolResult:
