@@ -188,7 +188,29 @@ class ToolExecutor:
                 result_budget,
             )
 
-        truncated = isinstance(output, dict) and bool(output.get("truncated") or output.get("stdout_truncated") or output.get("stderr_truncated"))
+        # Only host-owned adapters may contribute truncation metadata.  A
+        # provider/tool payload is otherwise allowed to contain a business
+        # field named ``truncated`` and must not be able to forge audit data.
+        host_truncation_tools = {
+            "list_files",
+            "read_file",
+            "search_text",
+            "write_file",
+            "replace_text",
+            "run_command",
+        }
+        is_host_adapter = call.name in host_truncation_tools or hasattr(
+            registered.tool, "server_id"
+        )
+        truncated = (
+            is_host_adapter
+            and isinstance(output, dict)
+            and bool(
+                output.get("truncated")
+                or output.get("stdout_truncated")
+                or output.get("stderr_truncated")
+            )
+        )
         if result_budget is not None and not result_budget.satisfies(_result_requirements(ToolResult(call_id=call.id, name=call.name, output=output))):
             output, truncated = _truncate_string_output(output, call, result_budget)
         return _return_with_budget(

@@ -9,7 +9,7 @@ class TruncatedTool(Tool):
     async def invoke(self, arguments):
         return {"text": "partial", "truncated": True}
 
-def test_executor_records_result_truncated_metadata():
+def test_provider_payload_cannot_forge_result_truncated_metadata():
     registry = ToolRegistry(); registry.register(TruncatedTool())
     result = asyncio.run(ToolExecutor(registry).execute_with_result_budget(__import__('nexusmind.tools.contracts', fromlist=['ToolCall']).ToolCall(id="c1", name="truncated", arguments={}), result_budget=None))
-    assert result.metadata["result_truncated"] is True
+    assert result.metadata["result_truncated"] is False

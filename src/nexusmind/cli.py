@@ -398,7 +398,9 @@ async def _run_chat(
             except StateStoreError:
                 print("State error: Run final status could not be persisted", file=sys.stderr); return 1
         return 1 if failed else 0
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as cancellation:
+        if isinstance(cancellation, ToolExecutionCancelled):
+            failure_sink.update(trace_complete=False, error_code="tool_execution_cancelled", message="Tool execution was cancelled")
         await _best_effort_cancel(store, run_id, trace_complete=failure_sink.get("trace_complete"), error_code=failure_sink.get("error_code", "cancelled"), error_message=failure_sink.get("message"), final_text=''.join(final_text) if record_content else None)
         raise
     except Exception:
