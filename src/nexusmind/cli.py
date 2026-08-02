@@ -236,7 +236,7 @@ async def _run_chat_with_mcp(
     model_config: ModelConfig,
     state_db: str | None = None, record_content: bool = False,
 ) -> int:
-    store = None; run_id = None; text_sink: list[str] = []; return_code = 1
+    store = None; run_id = None; text_sink: list[str] = []; return_code = 1; runtime_started = False
     try:
         if state_db:
             store = SQLiteRunStore(state_db)
@@ -277,6 +277,7 @@ async def _run_chat_with_mcp(
             await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_register_failed", error_message="MCP tool registration failed")
             return_code = 1
         else:
+            runtime_started = True
             return_code = await _run_chat(
                 message,
                 registry,
@@ -306,7 +307,7 @@ async def _run_chat_with_mcp(
         await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_cleanup_failed", error_message="MCP server cleanup failed")
         _best_effort_close(store)
         return 1
-    if store and run_id and (not store.show_run(run_id) or store.show_run(run_id)["run"]["status"] == RunStatus.RUNNING.value):
+    if store and run_id and runtime_started:
         try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED, final_text=''.join(text_sink) if record_content else None)
         except StateStoreError:
             print("State error: Run final status could not be persisted", file=sys.stderr); return_code = 1
@@ -824,7 +825,7 @@ async def _run_skill_with_mcp(
         await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_cleanup_failed", error_message="MCP server cleanup failed")
         _best_effort_close(store)
         return 1
-    if store and run_id:
+    if store and run_id and "tools" in locals():
         try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED, final_text=''.join(text_sink) if record_content else None)
         except StateStoreError:
             print("State error: Run final status could not be persisted", file=sys.stderr); return_code = 1
