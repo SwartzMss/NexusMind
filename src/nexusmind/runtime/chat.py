@@ -327,8 +327,8 @@ class ChatRuntime:
                                     if result_budget is None:
                                         yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
                                         return
-                                if not _executor_definition_matches(self._tool_executor, call.name, definition):
-                                    yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                                    if not _executor_definition_matches(self._tool_executor, call.name, definition):
+                                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                                         return
                                     started_tool_call_ids.add(call.id)
                                     try:
