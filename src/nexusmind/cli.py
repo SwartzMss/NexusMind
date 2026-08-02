@@ -234,7 +234,7 @@ async def _run_chat_with_mcp(
     model_config: ModelConfig,
     state_db: str | None = None, record_content: bool = False,
 ) -> int:
-    store = None; run_id = None
+    store = None; run_id = None; text_sink: list[str] = []; return_code = 1
     try:
         if state_db:
             store = SQLiteRunStore(state_db)
@@ -721,7 +721,7 @@ async def _run_skill_with_mcp(
     limits: AgentLoopLimits,
     state_db: str | None = None, record_content: bool = False,
 ) -> int:
-    store = None; run_id = None
+    store = None; run_id = None; text_sink: list[str] = []; return_code = 1
     try:
         if state_db:
             store = SQLiteRunStore(state_db)
