@@ -93,6 +93,17 @@ class SQLiteRunStore:
             actual={r[1] for r in info}
             if not row or not columns.issubset(actual): raise StateStoreError("Unsupported state database schema version")
             table_info[table] = info
+        not_null = {
+            "runs": {r[1] for r in table_info["runs"] if r[3] or r[5]},
+            "run_events": {r[1] for r in table_info["run_events"] if r[3] or r[5]},
+        }
+        if not {
+            "id", "schema_version", "execution_id", "kind", "status",
+            "trace_complete", "event_count", "started_at", "updated_at",
+        }.issubset(not_null["runs"]):
+            raise StateStoreError("Unsupported state database schema version")
+        if not {"run_id", "sequence", "event_type", "occurred_at", "payload_json", "payload_bytes"}.issubset(not_null["run_events"]):
+            raise StateStoreError("Unsupported state database schema version")
         if not any(r[1] == "id" and r[5] == 1 for r in table_info["runs"]):
             raise StateStoreError("Unsupported state database schema version")
         event_pk = {r[1]: r[5] for r in table_info["run_events"] if r[5]}
@@ -107,11 +118,11 @@ class SQLiteRunStore:
             for row in foreign_keys
         ):
             raise StateStoreError("Unsupported state database schema version")
-        indexes = {
-            row[1]
+        index_columns = {
+            row[1]: [item[2] for item in self.db.execute(f"PRAGMA index_info({row[1]})").fetchall()]
             for row in self.db.execute("PRAGMA index_list(runs)").fetchall()
         }
-        if not {"idx_runs_started_at", "idx_runs_status_started"}.issubset(indexes):
+        if index_columns.get("idx_runs_started_at") != ["started_at"] or index_columns.get("idx_runs_status_started") != ["status", "started_at"]:
             raise StateStoreError("Unsupported state database schema version")
     def _recover_abandoned(self):
         now=_now(); rows=self.db.execute("SELECT id FROM runs WHERE status='running' AND execution_id<>?",(self.execution_id,)).fetchall()

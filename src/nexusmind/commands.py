@@ -416,13 +416,18 @@ async def _run_profile(
                 budget.commit_actual_duration(reserved_duration_ms, duration_ms)
             else:
                 budget.release_reservation(reserved_duration_ms)
+    cancelled = isinstance(original_exception, asyncio.CancelledError)
     if process is None and original_exception is not None:
         raise original_exception
     if cleanup_result is None:
-        cleanup_result = _CleanupResult((b"", False), (b"", False), process.returncode is not None, True)
+        empty = CapturedStream(b"", 0, False)
+        cleanup_result = _CleanupResult(empty, empty, process.returncode is not None, True)
+    # Cancellation is the primary outcome even when best-effort cleanup did
+    # not fully reap the process tree.
+    if cancelled:
+        raise original_exception
     if not cleanup_result.root_reaped or not cleanup_result.tree_terminated:
         raise CommandCleanupError("Command process cleanup failed")
-    cancelled = isinstance(original_exception, asyncio.CancelledError)
     status_optional = cancelled or (os.name == "nt" and (timed_out or original_exception is not None))
     if supervisor_status_error is not None and not status_optional:
         raise supervisor_status_error
@@ -1050,6 +1055,8 @@ def _minimum_command_result_bytes(profile: CommandProfile) -> int:
         "stderr": "",
         "stdout_truncated": False,
         "stderr_truncated": False,
+        "stdout_bytes": 0,
+        "stderr_bytes": 0,
         "encoding_replaced": False,
     }
     return _command_result_size(output)
