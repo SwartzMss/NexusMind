@@ -33,11 +33,11 @@ from nexusmind.workspace import Workspace, WorkspaceError, resolve_workspace_cre
 from nexusmind.persistence import SQLiteRunStore, StateStoreError, RunKind, RunStartContext, RunStatus, RunTraceEvent
 from datetime import datetime, timezone
 
-async def _best_effort_cancel(store, run_id) -> None:
+async def _best_effort_cancel(store, run_id, *, trace_complete=None, error_code="cancelled", error_message=None, final_text=None) -> None:
     task = None
     try:
         if store and run_id:
-            task = asyncio.create_task(store.finish_run(run_id, RunStatus.CANCELLED, error_code="cancelled"))
+            task = asyncio.create_task(store.finish_run(run_id, RunStatus.CANCELLED, error_code=error_code, error_message=error_message, trace_complete=trace_complete, final_text=final_text))
             await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
     except BaseException:
         if task is not None and not task.done():
@@ -399,7 +399,7 @@ async def _run_chat(
                 print("State error: Run final status could not be persisted", file=sys.stderr); return 1
         return 1 if failed else 0
     except asyncio.CancelledError:
-        await _best_effort_cancel(store, run_id)
+        await _best_effort_cancel(store, run_id, trace_complete=failure_sink.get("trace_complete"), error_code=failure_sink.get("error_code", "cancelled"), error_message=failure_sink.get("message"), final_text=''.join(final_text) if record_content else None)
         raise
     except Exception:
         await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="runtime_error", error_message="Runtime execution failed")
