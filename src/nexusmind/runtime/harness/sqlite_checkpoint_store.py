@@ -35,8 +35,8 @@ class SQLiteCheckpointStore:
             if version not in (0, 1):
                 raise CheckpointStoreError("Unsupported checkpoint database schema")
             db.execute("""CREATE TABLE IF NOT EXISTS harness_checkpoints (checkpoint_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence >= 0), checkpoint_schema_version INTEGER NOT NULL, boundary TEXT NOT NULL, created_at TEXT NOT NULL, payload_json BLOB NOT NULL, payload_sha256 TEXT NOT NULL, UNIQUE(run_id, sequence))""")
-            expected = {"checkpoint_id": ("TEXT", 1), "run_id": ("TEXT", 1), "sequence": ("INTEGER", 0), "checkpoint_schema_version": ("INTEGER", 1), "boundary": ("TEXT", 1), "created_at": ("TEXT", 1), "payload_json": ("BLOB", 1), "payload_sha256": ("TEXT", 1)}
-            actual = {row[1]: (row[2].upper(), row[5]) for row in db.execute("PRAGMA table_info(harness_checkpoints)")}
+            expected = {"checkpoint_id": ("TEXT", 0, 1), "run_id": ("TEXT", 1, 0), "sequence": ("INTEGER", 1, 0), "checkpoint_schema_version": ("INTEGER", 1, 0), "boundary": ("TEXT", 1, 0), "created_at": ("TEXT", 1, 0), "payload_json": ("BLOB", 1, 0), "payload_sha256": ("TEXT", 1, 0)}
+            actual = {row[1]: (row[2].upper(), row[3], row[5]) for row in db.execute("PRAGMA table_info(harness_checkpoints)")}
             if actual != expected:
                 raise CheckpointStoreError("Checkpoint database schema is incomplete or incompatible")
             db.execute("CREATE INDEX IF NOT EXISTS idx_harness_checkpoints_run_sequence ON harness_checkpoints(run_id, sequence DESC)")
