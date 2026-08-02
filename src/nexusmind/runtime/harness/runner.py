@@ -171,6 +171,25 @@ class HarnessRunner:
                 if last.tool_call_id not in checkpoint.state.executed_tool_call_ids:
                     raise HarnessResumeStateError("AFTER_TOOL result is not recorded as executed")
             pending = tuple(call for call in assistants[-1].tool_calls if call.id not in checkpoint.state.executed_tool_call_ids)
+            batch_calls = {call.id: call for call in assistants[-1].tool_calls}
+            if len(batch_calls) != len(assistants[-1].tool_calls):
+                raise HarnessResumeStateError("Assistant Tool Call batch contains duplicate IDs")
+            assistant_index = messages.index(assistants[-1])
+            batch_results = messages[assistant_index + 1:]
+            result_ids: list[str] = []
+            for message in batch_results:
+                if message.role.value != "tool":
+                    raise HarnessResumeStateError("Tool batch has an invalid trailing transcript entry")
+                if not message.tool_call_id or message.tool_call_id not in batch_calls:
+                    raise HarnessResumeStateError("Tool result does not match the current Assistant Tool Call batch")
+                if message.name != batch_calls[message.tool_call_id].name:
+                    raise HarnessResumeStateError("Tool result name does not match its Tool Call")
+                result_ids.append(message.tool_call_id)
+            if len(set(result_ids)) != len(result_ids):
+                raise HarnessResumeStateError("Tool batch contains duplicate Tool results")
+            executed_batch_ids = set(checkpoint.state.executed_tool_call_ids) & set(batch_calls)
+            if set(result_ids) != executed_batch_ids:
+                raise HarnessResumeStateError("Tool results do not match executed Tool Call IDs")
             if pending:
                 requested_tool_names = [tool.name for tool in request.tools]
                 if len(set(requested_tool_names)) != len(requested_tool_names):
