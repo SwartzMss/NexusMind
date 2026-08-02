@@ -37,6 +37,13 @@ def checkpoint_from_json(payload: str) -> HarnessCheckpoint:
         required = {"messages", "model_turns", "tool_calls_total", "tool_argument_bytes_total", "tool_result_bytes_total", "started_tool_call_ids", "executed_tool_call_ids", "status", "stop_reason", "phase"}
         if type(raw) is not dict or set(raw) != required:
             raise CheckpointDecodeError("Invalid checkpoint state fields")
+        if type(raw["messages"]) is not list:
+            raise CheckpointDecodeError("Checkpoint messages must be an array")
+        for field in ("started_tool_call_ids", "executed_tool_call_ids"):
+            if type(raw[field]) is not list:
+                raise CheckpointDecodeError(f"Checkpoint {field} must be an array")
+            if any(type(call_id) is not str or not call_id for call_id in raw[field]):
+                raise CheckpointDecodeError(f"Checkpoint {field} contains invalid IDs")
         messages = []
         for item in raw["messages"]:
             if type(item) is not dict or set(item) != {"role", "content", "name", "tool_call_id", "tool_calls", "metadata"}:
