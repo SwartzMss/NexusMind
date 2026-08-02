@@ -11,8 +11,10 @@ class HarnessStatus(str, Enum):
 
 class HarnessPhase(str, Enum):
     BEFORE_MODEL = "before_model"
+    MODEL_RUNNING = "model_running"
     AFTER_MODEL = "after_model"
     BEFORE_TOOL = "before_tool"
+    TOOL_RUNNING = "tool_running"
     AFTER_TOOL = "after_tool"
     TERMINAL = "terminal"
 

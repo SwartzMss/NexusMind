@@ -42,6 +42,20 @@ class HarnessStateSnapshot:
     stop_reason: StopReason | None
     phase: HarnessPhase
 
+    def validate(self) -> None:
+        for value in (self.model_turns, self.tool_calls_total, self.tool_argument_bytes_total, self.tool_result_bytes_total):
+            if type(value) is not int or value < 0:
+                raise ValueError("Checkpoint counters must be non-negative integers")
+        all_ids = self.started_tool_call_ids + self.executed_tool_call_ids
+        if any(type(call_id) is not str or not call_id for call_id in all_ids):
+            raise ValueError("Checkpoint tool call IDs must be non-empty strings")
+        if len(set(self.started_tool_call_ids)) != len(self.started_tool_call_ids):
+            raise ValueError("Checkpoint started tool call IDs must be unique")
+        if len(set(self.executed_tool_call_ids)) != len(self.executed_tool_call_ids):
+            raise ValueError("Checkpoint executed tool call IDs must be unique")
+        if not set(self.executed_tool_call_ids).issubset(self.started_tool_call_ids):
+            raise ValueError("Checkpoint executed tool calls must have started")
+
     @classmethod
     def from_state(cls, state: HarnessState, stop_reason: StopReason | None = None) -> "HarnessStateSnapshot":
         snapshot = cls(
@@ -56,6 +70,7 @@ class HarnessStateSnapshot:
             stop_reason=stop_reason if stop_reason is not None else state.stop_reason,
             phase=state.phase,
         )
+        snapshot.validate()
         _ensure_json_size(snapshot)
         return snapshot
 
@@ -85,8 +100,9 @@ class HarnessCheckpoint:
     def validate(self) -> None:
         if type(self.boundary) is not CheckpointBoundary or not isinstance(self.state, HarnessStateSnapshot):
             raise ValueError("Invalid checkpoint boundary or state")
-        if type(self.state.phase) is not HarnessPhase or self.boundary is not _PHASE_TO_BOUNDARY[self.state.phase]:
+        if type(self.state.phase) is not HarnessPhase or self.state.phase not in _PHASE_TO_BOUNDARY or self.boundary is not _PHASE_TO_BOUNDARY[self.state.phase]:
             raise ValueError("Checkpoint boundary does not match execution phase")
+        self.state.validate()
         if type(self.state.status) is not HarnessStatus or (self.state.stop_reason is not None and type(self.state.stop_reason) is not StopReason):
             raise ValueError("Invalid checkpoint status or stop reason")
         active_tools = set(self.state.started_tool_call_ids) - set(self.state.executed_tool_call_ids)
@@ -110,9 +126,13 @@ class HarnessCheckpoint:
     @classmethod
     def create(cls, state: HarnessState, run_id: str, sequence: int, boundary: CheckpointBoundary | None = None, stop_reason: StopReason | None = None) -> "HarnessCheckpoint":
         if boundary is None:
+            if state.phase not in _PHASE_TO_BOUNDARY:
+                raise ValueError("Current harness phase is not checkpointable")
             boundary = _PHASE_TO_BOUNDARY[state.phase]
         if type(boundary) is not CheckpointBoundary:
             raise ValueError("Invalid checkpoint boundary")
+        if state.phase not in _PHASE_TO_BOUNDARY:
+            raise ValueError("Current harness phase is not checkpointable")
         if boundary is not _PHASE_TO_BOUNDARY[state.phase]:
             raise ValueError("Checkpoint boundary does not match execution phase")
         active_tools = state.started_tool_call_ids - state.executed_tool_call_ids

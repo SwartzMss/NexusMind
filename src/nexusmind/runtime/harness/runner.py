@@ -49,6 +49,7 @@ class HarnessExecution:
                     self.stop_reason = StopReason.LIMIT_EXCEEDED
                 else:
                     self.stop_reason = StopReason.RUNTIME_ERROR
+            elif event.type.value == "run_failed":
                 self.state.stop_reason = self.stop_reason
                 self.state.status = HarnessStatus.FAILED
                 self.state.phase = HarnessPhase.TERMINAL

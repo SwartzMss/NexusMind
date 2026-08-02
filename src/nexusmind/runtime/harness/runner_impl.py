@@ -142,6 +142,7 @@ class _LegacyHarnessRuntime:
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
                     return
                 state.model_turns += 1
+                state.phase = HarnessPhase.MODEL_RUNNING
                 turn = _ModelTurn()
                 try:
                     async for event in self._model.stream(
@@ -252,6 +253,7 @@ class _LegacyHarnessRuntime:
                 state.tool_argument_bytes_total += turn.tool_arguments_size
                 for call in turn.tool_calls:
                     state.phase = HarnessPhase.BEFORE_TOOL
+                    state.phase = HarnessPhase.TOOL_RUNNING
                     remaining_result_bytes = self._limits.max_tool_result_bytes_total - state.tool_result_bytes_total
                     result_budget = _result_budget(self._limits, remaining_result_bytes)
                     if not result_budget.satisfies(_PERMISSION_DENIED_REQUIREMENTS):
