@@ -35,7 +35,34 @@ class _ResumeToolBatchModel:
         yield RuntimeEvent(RuntimeEventType.MODEL_STARTED, metadata=internal)
         for call in self._calls:
             yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=deepcopy(call), metadata=internal)
-        yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls", metadata=internal)
+            yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls", metadata=internal)
+
+def _validate_resume_batches(messages) -> None:
+    batches = []
+    for index, message in enumerate(messages):
+        if message.role.value != "assistant" or not message.tool_calls:
+            continue
+        calls = {call.id: call for call in message.tool_calls}
+        if len(calls) != len(message.tool_calls):
+            raise HarnessResumeStateError("Assistant Tool Call batch contains duplicate IDs")
+        results = []
+        cursor = index + 1
+        while cursor < len(messages) and messages[cursor].role.value == "tool":
+            result = messages[cursor]
+            if not result.tool_call_id or result.tool_call_id not in calls:
+                raise HarnessResumeStateError("Tool result does not match its Assistant Tool Call batch")
+            if result.name != calls[result.tool_call_id].name:
+                raise HarnessResumeStateError("Tool result name does not match its Tool Call")
+            results.append(result.tool_call_id)
+            cursor += 1
+        if len(set(results)) != len(results):
+            raise HarnessResumeStateError("Tool batch contains duplicate Tool results")
+        batches.append((calls, set(results), cursor == len(messages)))
+    for calls, results, is_last in batches[:-1]:
+        if results != set(calls):
+            raise HarnessResumeStateError("A previous Tool Call batch is incomplete")
+    if batches and batches[-1][1] - set(batches[-1][0]):
+        raise HarnessResumeStateError("Tool batch contains an unknown result")
 
 class HarnessExecution:
     def __init__(self, runner: "HarnessRunner", request: HarnessRequest) -> None:
@@ -160,6 +187,7 @@ class HarnessRunner:
         state = state_from_checkpoint(checkpoint) if checkpoint.state.phase is HarnessPhase.BEFORE_MODEL else None
         if checkpoint.state.phase in {HarnessPhase.AFTER_MODEL, HarnessPhase.BEFORE_TOOL, HarnessPhase.AFTER_TOOL}:
             messages = checkpoint.state.messages
+            _validate_resume_batches(messages)
             assistants = [message for message in messages if message.role.value == "assistant"]
             if not assistants:
                 raise HarnessResumeStateError("Checkpoint has no resumable Assistant Tool Call batch")

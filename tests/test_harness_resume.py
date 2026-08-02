@@ -152,6 +152,20 @@ def test_resume_rejects_unknown_tool_result_in_batch():
     with pytest.raises(ValueError):
         HarnessCheckpoint.create(state, "run-invalid", 0)
 
+def test_resume_rejects_incomplete_previous_tool_batch():
+    first = ToolCall(id="call-a", name="echo", arguments={"text": "a"})
+    missing = ToolCall(id="call-b", name="echo", arguments={"text": "b"})
+    next_call = ToolCall(id="call-c", name="echo", arguments={"text": "c"})
+    state = HarnessState(messages=[
+        Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(first, missing)),
+        Message(role=MessageRole.TOOL, name="echo", tool_call_id="call-a", content="{}"),
+        Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(next_call,)),
+    ], model_turns=2, tool_calls_total=1, started_tool_call_ids={"call-a"},
+        executed_tool_call_ids={"call-a"}, phase=HarnessPhase.BEFORE_TOOL)
+    checkpoint = HarnessCheckpoint.create(state, "run-invalid", 0)
+    with pytest.raises(HarnessResumeStateError, match="previous Tool Call batch"):
+        HarnessRunner(FakeChatModel(["done"])).resume_execution(HarnessResumeRequest(checkpoint))
+
 def test_resume_before_tool_executes_pending_tool():
     async def run():
         call = ToolCall(id="call-1", name="echo", arguments={"text": "hi"})
