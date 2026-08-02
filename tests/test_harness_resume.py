@@ -4,7 +4,7 @@ import pytest
 from nexusmind.models.fake import FakeChatModel
 from nexusmind.runtime.harness import (
     CheckpointBoundary, HarnessCheckpoint, HarnessPhase, HarnessRequest,
-    HarnessResumeRequest, HarnessResumeStateError, HarnessRunner, HarnessState,
+    HarnessResumeCompatibilityError, HarnessResumeRequest, HarnessResumeStateError, HarnessRunner, HarnessState,
     HarnessStatus, StopReason,
 )
 from nexusmind.runtime.harness.limits import HarnessLimits
@@ -132,6 +132,14 @@ def test_resume_after_model_executes_pending_tool_without_model_replay():
         assert any(event.type.value == "tool_result" for event in events)
         assert execution.state.executed_tool_call_ids == {"call-1"}
     asyncio.run(run())
+
+def test_resume_rejects_missing_pending_tool_before_execution():
+    call = ToolCall(id="call-1", name="echo", arguments={"text": "hi"})
+    state = HarnessState(messages=[Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(call,))],
+        model_turns=1, phase=HarnessPhase.AFTER_MODEL)
+    checkpoint = HarnessCheckpoint.create(state, "run-tool", 0)
+    with pytest.raises(HarnessResumeCompatibilityError, match="missing tools"):
+        HarnessRunner(FakeChatModel(["done"])).resume_execution(HarnessResumeRequest(checkpoint))
 
 def test_resume_before_tool_executes_pending_tool():
     async def run():
