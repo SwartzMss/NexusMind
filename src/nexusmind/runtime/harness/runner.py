@@ -15,6 +15,24 @@ from nexusmind.runtime.harness.resume import HarnessResumeCompatibilityError, Ha
 from nexusmind.runtime.harness.checkpoint import CheckpointBoundary, HarnessCheckpoint, HarnessStateSnapshot
 from nexusmind.runtime.policy import ApprovalProvider, ToolApprovalSummarizer, ToolPolicy
 from nexusmind.tools.executor import ToolExecutorProtocol
+from nexusmind.tools.contracts import ToolCall
+
+class _ResumeToolBatchModel:
+    def __init__(self, original: ChatModel, calls: tuple[ToolCall, ...]) -> None:
+        self._original = original
+        self._calls = calls
+        self._first = True
+
+    async def stream(self, messages, tools=None):
+        if not self._first:
+            async for event in self._original.stream(messages, tools=tools):
+                yield event
+            return
+        self._first = False
+        yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+        for call in self._calls:
+            yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=deepcopy(call))
+        yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
 
 class HarnessExecution:
     def __init__(self, runner: "HarnessRunner", request: HarnessRequest) -> None:
@@ -115,9 +133,19 @@ class HarnessRunner:
         state = state_from_checkpoint(checkpoint) if checkpoint.state.phase is HarnessPhase.BEFORE_MODEL else None
         if checkpoint.state.phase is HarnessPhase.AFTER_MODEL:
             assistants = [message for message in checkpoint.state.messages if message.role.value == "assistant"]
-            if not assistants or assistants[-1] is not checkpoint.state.messages[-1] or assistants[-1].tool_calls:
+            if not assistants or assistants[-1] is not checkpoint.state.messages[-1]:
                 raise HarnessResumeStateError("AFTER_MODEL checkpoint has no uniquely resumable text completion")
             state = HarnessState(messages=deepcopy(list(checkpoint.state.messages)), model_turns=checkpoint.state.model_turns, tool_calls_total=checkpoint.state.tool_calls_total, tool_argument_bytes_total=checkpoint.state.tool_argument_bytes_total, tool_result_bytes_total=checkpoint.state.tool_result_bytes_total, started_tool_call_ids=set(checkpoint.state.started_tool_call_ids), executed_tool_call_ids=set(checkpoint.state.executed_tool_call_ids), status=checkpoint.state.status, phase=checkpoint.state.phase)
+            if assistants[-1].tool_calls:
+                state.messages.pop()
+                state.phase = HarnessPhase.BEFORE_MODEL
+                state.model_turns = max(0, state.model_turns - 1)
+                resume_runner = HarnessRunner(_ResumeToolBatchModel(self._model, assistants[-1].tool_calls), self._tool_executor, limits=self._default_limits, tool_policy=self._tool_policy, approval_provider=self._approval_provider, approval_summarizer=self._approval_summarizer)
+            else:
+                resume_runner = self
+            limits = request.limits or self._default_limits
+        else:
+            resume_runner = self
         if state is None:
             raise HarnessResumeStateError("Checkpoint phase is not safely resumable")
         limits = request.limits or self._default_limits
@@ -129,10 +157,10 @@ class HarnessRunner:
             limits=limits,
             metadata={"resumed": True, "checkpoint_id": request.checkpoint.checkpoint_id, "checkpoint_sequence": request.checkpoint.sequence},
         )
-        execution = HarnessExecution(self, harness_request)
+        execution = HarnessExecution(resume_runner, harness_request)
         execution.state = state
         execution._resume_source = checkpoint
-        execution._resume_complete = checkpoint.state.phase is HarnessPhase.AFTER_MODEL
+        execution._resume_complete = checkpoint.state.phase is HarnessPhase.AFTER_MODEL and not assistants[-1].tool_calls if checkpoint.state.phase is HarnessPhase.AFTER_MODEL else False
         return execution
 
     async def _stream(self, request: HarnessRequest, state: HarnessState) -> AsyncIterator[RuntimeEvent]:
