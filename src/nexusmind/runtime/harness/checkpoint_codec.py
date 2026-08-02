@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from typing import Any
+from collections import OrderedDict
 
 from nexusmind.runtime.harness.checkpoint import HarnessCheckpoint
 from nexusmind.runtime.harness.state import HarnessPhase, HarnessStatus
@@ -12,6 +13,16 @@ from nexusmind.tools.contracts import ToolCall
 
 class CheckpointDecodeError(ValueError):
     pass
+
+MAX_CODEC_PAYLOAD_BYTES = 4 * 1024 * 1024
+
+def _reject_duplicate_pairs(pairs):
+    result = OrderedDict()
+    for key, value in pairs:
+        if key in result:
+            raise CheckpointDecodeError("Checkpoint payload contains duplicate JSON fields")
+        result[key] = value
+    return result
 
 def _message_to_dict(message: Message) -> dict[str, Any]:
     return {"role": message.role.value, "content": message.content, "name": message.name, "tool_call_id": message.tool_call_id, "tool_calls": [{"id": c.id, "name": c.name, "arguments": c.arguments} for c in message.tool_calls], "metadata": message.metadata}
@@ -26,8 +37,10 @@ def checkpoint_from_json(payload: str) -> HarnessCheckpoint:
     try:
         if type(payload) is not str:
             raise CheckpointDecodeError("Checkpoint payload must be text")
-        data = json.loads(payload)
-        if type(data) is not dict or set(data) != {"schema_version", "checkpoint_id", "run_id", "sequence", "boundary", "created_at", "state"}:
+        if len(payload.encode("utf-8")) > MAX_CODEC_PAYLOAD_BYTES:
+            raise CheckpointDecodeError("Checkpoint payload exceeds maximum size")
+        data = json.loads(payload, object_pairs_hook=_reject_duplicate_pairs)
+        if not isinstance(data, dict) or set(data) != {"schema_version", "checkpoint_id", "run_id", "sequence", "boundary", "created_at", "state"}:
             raise CheckpointDecodeError("Invalid checkpoint fields")
         if type(data["schema_version"]) is not int or data["schema_version"] != 1:
             raise CheckpointDecodeError("Unsupported checkpoint schema version")
@@ -35,7 +48,7 @@ def checkpoint_from_json(payload: str) -> HarnessCheckpoint:
             raise CheckpointDecodeError("Invalid checkpoint sequence")
         raw = data["state"]
         required = {"messages", "model_turns", "tool_calls_total", "tool_argument_bytes_total", "tool_result_bytes_total", "started_tool_call_ids", "executed_tool_call_ids", "status", "stop_reason", "phase"}
-        if type(raw) is not dict or set(raw) != required:
+        if not isinstance(raw, dict) or set(raw) != required:
             raise CheckpointDecodeError("Invalid checkpoint state fields")
         if type(raw["messages"]) is not list:
             raise CheckpointDecodeError("Checkpoint messages must be an array")
@@ -46,7 +59,7 @@ def checkpoint_from_json(payload: str) -> HarnessCheckpoint:
                 raise CheckpointDecodeError(f"Checkpoint {field} contains invalid IDs")
         messages = []
         for item in raw["messages"]:
-            if type(item) is not dict or set(item) != {"role", "content", "name", "tool_call_id", "tool_calls", "metadata"}:
+            if not isinstance(item, dict) or set(item) != {"role", "content", "name", "tool_call_id", "tool_calls", "metadata"}:
                 raise CheckpointDecodeError("Invalid message fields")
             if type(item["tool_calls"]) is not list or type(item["metadata"]) is not dict:
                 raise CheckpointDecodeError("Invalid message value types")
@@ -58,7 +71,7 @@ def checkpoint_from_json(payload: str) -> HarnessCheckpoint:
                 raise CheckpointDecodeError("Invalid tool call id type")
             calls_data = []
             for call in item["tool_calls"]:
-                if type(call) is not dict or set(call) != {"id", "name", "arguments"} or type(call["id"]) is not str or type(call["name"]) is not str or type(call["arguments"]) is not dict:
+                if not isinstance(call, dict) or set(call) != {"id", "name", "arguments"} or type(call["id"]) is not str or type(call["name"]) is not str or type(call["arguments"]) is not dict:
                     raise CheckpointDecodeError("Invalid tool call fields")
                 calls_data.append(ToolCall(id=call["id"], name=call["name"], arguments=call["arguments"]))
             calls = tuple(calls_data)
