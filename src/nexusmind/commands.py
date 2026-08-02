@@ -1141,7 +1141,19 @@ async def _cleanup_process(
     stderr = await _finish_reader(stderr_task)
     if guard is not None:
         tree_terminated = guard.close() and tree_terminated
+    _close_process_transport(process)
     return _CleanupResult(stdout, stderr, root_reaped, tree_terminated)
+
+
+def _close_process_transport(process: asyncio.subprocess.Process | None) -> None:
+    if process is None or process.returncode is None:
+        return
+    transport = getattr(process, "_transport", None)
+    if transport is not None:
+        try:
+            transport.close()
+        except (OSError, RuntimeError):
+            pass
 
 
 async def _wait_for_process(
