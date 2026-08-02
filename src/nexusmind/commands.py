@@ -288,6 +288,7 @@ async def _run_profile(
     status_write_fd: int | None = None
     cleanup_result: _CleanupResult | None = None
     cleanup_task: asyncio.Task[_CleanupResult] | None = None
+    lifecycle: asyncio.Future | None = None
     supervisor_status: _SupervisorStatus | None = None
     supervisor_status_error: CommandCleanupError | None = None
     original_exception: BaseException | None = None
@@ -389,6 +390,9 @@ async def _run_profile(
             await ensure_cleanup_once(force=True)
     except asyncio.CancelledError as exc:
         original_exception = exc
+        if lifecycle is not None and not lifecycle.done():
+            lifecycle.cancel()
+            await asyncio.gather(lifecycle, return_exceptions=True)
         if process is not None:
             await ensure_cleanup_once(force=True)
     except OSError as exc:
