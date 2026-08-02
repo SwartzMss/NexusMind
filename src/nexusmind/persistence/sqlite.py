@@ -15,7 +15,7 @@ def _async_db_error(fn):
         except BaseException as exc:
             try: self.db.rollback()
             except BaseException: pass
-            if isinstance(exc, (StateStoreError, asyncio.CancelledError)): raise
+            if isinstance(exc, (StateStoreError, asyncio.CancelledError, ValueError)): raise
             raise StateStoreError("Run store operation failed") from exc
     return wrapped
 def _sync_db_error(fn):
@@ -25,7 +25,7 @@ def _sync_db_error(fn):
         except BaseException as exc:
             try: self.db.rollback()
             except BaseException: pass
-            if isinstance(exc, (StateStoreError, asyncio.CancelledError)): raise
+            if isinstance(exc, (StateStoreError, asyncio.CancelledError, ValueError)): raise
             raise StateStoreError("Run store operation failed") from exc
     return wrapped
 def _now(): return datetime.now(timezone.utc).isoformat()
