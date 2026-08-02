@@ -7,5 +7,7 @@ from .stop import StopReason
 from .state import HarnessPhase
 from .checkpoint import CheckpointBoundary, HarnessCheckpoint, HarnessStateSnapshot
 from .checkpoint_store import CheckpointStore, InMemoryCheckpointStore
+from .checkpoint_codec import checkpoint_from_json, checkpoint_to_json
+from .sqlite_checkpoint_store import SQLiteCheckpointStore
 
-__all__ = ["CheckpointBoundary", "CheckpointStore", "HarnessCheckpoint", "HarnessExecution", "HarnessLimits", "HarnessPhase", "HarnessRequest", "HarnessRunner", "HarnessState", "HarnessStateSnapshot", "HarnessStatus", "InMemoryCheckpointStore", "StopReason"]
+__all__ = ["CheckpointBoundary", "CheckpointStore", "HarnessCheckpoint", "HarnessExecution", "HarnessLimits", "HarnessPhase", "HarnessRequest", "HarnessRunner", "HarnessState", "HarnessStateSnapshot", "HarnessStatus", "InMemoryCheckpointStore", "SQLiteCheckpointStore", "StopReason", "checkpoint_from_json", "checkpoint_to_json"]
