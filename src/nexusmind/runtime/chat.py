@@ -198,6 +198,7 @@ class ChatRuntime:
                                 metadata={
                                     **event.metadata,
                                     "argument_bytes": arguments_size,
+                                    **_tool_audit_metadata(safe_tool_call, tool_definitions.get(safe_tool_call.name)),
                                 },
                             )
                         elif event.type == RuntimeEventType.MODEL_TURN_COMPLETED:
@@ -272,7 +273,7 @@ class ChatRuntime:
                             yield RuntimeEvent(
                                 RuntimeEventType.TOOL_APPROVAL_REQUIRED,
                                 tool_approval=policy_result.approval_required,
-                                metadata=_tool_audit_metadata(call),
+                                metadata=_tool_audit_metadata(call, definition),
                             )
                             try:
                                 decision = await self._approval_provider.request(
@@ -297,7 +298,7 @@ class ChatRuntime:
                             yield RuntimeEvent(
                                 RuntimeEventType.TOOL_APPROVAL_RESOLVED,
                                 tool_approval=resolved,
-                                metadata=_tool_audit_metadata(call),
+                                metadata=_tool_audit_metadata(call, definition),
                             )
                             if decision == ApprovalDecision.DENY:
                                 result = _permission_denied_result(call)
@@ -726,9 +727,13 @@ def _valid_tool_result(result: ToolResult) -> bool:
     )
 
 
-def _tool_audit_metadata(call: ToolCall) -> dict[str, object]:
-    if call.name == "run_command" and type(call.arguments.get("profile")) is str:
-        return {"profile": call.arguments["profile"]}
+def _tool_audit_metadata(call: ToolCall, definition: ToolDefinition | None) -> dict[str, object]:
+    if call.name == "run_command" and definition is not None:
+        profile = call.arguments.get("profile")
+        schema = definition.input_schema
+        allowed = schema.get("properties", {}).get("profile", {}).get("enum", []) if isinstance(schema, dict) else []
+        if type(profile) is str and isinstance(allowed, list) and profile in allowed:
+            return {"profile": profile}
     return {}
 
 

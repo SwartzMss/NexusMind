@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib, json, sqlite3, uuid, urllib.parse
+import hashlib, json, sqlite3, uuid, urllib.parse, os
 import asyncio
 from functools import wraps
 from datetime import datetime, timezone, timedelta
@@ -7,11 +7,15 @@ from pathlib import Path
 from .contracts import RunKind, RunStartContext, RunStatus, RunTraceEvent
 
 MAX_EVENT_BYTES=64*1024; MAX_EVENTS=10000; MAX_FINAL_TEXT=1024*1024
+_PROCESS_EXECUTION_ID = uuid.uuid4().hex
 class StateStoreError(RuntimeError): pass
 def _async_db_error(fn):
     @wraps(fn)
     async def wrapped(self, *args, **kwargs):
-        try: return await fn(self, *args, **kwargs)
+        try:
+            result = await fn(self, *args, **kwargs)
+            self._secure_files()
+            return result
         except asyncio.CancelledError:
             try: self.db.rollback()
             except BaseException: pass
@@ -28,7 +32,10 @@ def _async_db_error(fn):
 def _sync_db_error(fn):
     @wraps(fn)
     def wrapped(self, *args, **kwargs):
-        try: return fn(self, *args, **kwargs)
+        try:
+            result = fn(self, *args, **kwargs)
+            self._secure_files()
+            return result
         except asyncio.CancelledError:
             try: self.db.rollback()
             except BaseException: pass
@@ -45,10 +52,16 @@ def _sync_db_error(fn):
 def _now(): return datetime.now(timezone.utc).isoformat()
 class SQLiteRunStore:
     def __init__(self, path: str | Path, *, execution_id: str | None = None, recover_abandoned: bool = False, read_only: bool = False, create: bool = True):
-        self.path=Path(path); self.execution_id=execution_id or uuid.uuid4().hex
+        self.path=Path(path); self.execution_id=execution_id or _PROCESS_EXECUTION_ID; self.read_only=read_only
         try:
             if create:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
+                parent_existed = self.path.parent.exists()
+                self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                if os.name != "nt" and not parent_existed:
+                    os.chmod(self.path.parent, 0o700)
+                if not self.path.exists():
+                    fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+                    os.close(fd)
             if not create and not self.path.exists():
                 raise StateStoreError("Run store does not exist")
             if read_only:
@@ -58,11 +71,13 @@ class SQLiteRunStore:
                 self._validate_existing_schema()
             else:
                 uri = "file:" + urllib.parse.quote(str(self.path.resolve()), safe="/\\:") + "?mode=rw" if not create else str(self.path)
-                self.db=sqlite3.connect(uri, uri=not create, timeout=0.5); self.db.execute("PRAGMA busy_timeout=500"); self.db.execute("PRAGMA foreign_keys=ON")
+                self.db=sqlite3.connect(uri, uri=not create, timeout=2.0); self.db.execute("PRAGMA busy_timeout=2000"); self.db.execute("PRAGMA foreign_keys=ON")
+                self.db.execute("PRAGMA journal_mode=WAL")
                 if create:
                     self._schema()
                 else:
                     self._validate_existing_schema()
+                self._secure_files()
             if recover_abandoned: self.recover_abandoned()
         except BaseException as exc:
             try: self.db.close()
@@ -103,6 +118,13 @@ class SQLiteRunStore:
         if row is None or row[0] != "1":
             raise StateStoreError("Unsupported state database schema version")
         self._validate_v1_schema()
+
+    def _secure_files(self):
+        if os.name == "nt" or self.read_only:
+            return
+        for path in (self.path, Path(str(self.path) + "-wal"), Path(str(self.path) + "-shm")):
+            if path.exists():
+                os.chmod(path, 0o600)
 
     def _validate_v1_schema(self):
         required = {

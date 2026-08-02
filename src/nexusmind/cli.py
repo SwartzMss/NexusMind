@@ -33,6 +33,16 @@ from nexusmind.workspace import Workspace, WorkspaceError, resolve_workspace_cre
 from nexusmind.persistence import SQLiteRunStore, StateStoreError, RunKind, RunStartContext, RunStatus, RunTraceEvent
 from datetime import datetime, timezone
 
+AUDIT_EVENT_TYPES = {
+    RuntimeEventType.MODEL_STARTED: "model_turn_started",
+    RuntimeEventType.MODEL_TURN_COMPLETED: "model_turn_completed",
+    RuntimeEventType.MODEL_FAILED: "model_failed",
+    RuntimeEventType.TOOL_CALL_COMPLETED: "tool_call_requested",
+    RuntimeEventType.TOOL_RESULT: "tool_result_recorded",
+    RuntimeEventType.TOOL_APPROVAL_REQUIRED: "tool_approval_required",
+    RuntimeEventType.TOOL_APPROVAL_RESOLVED: "tool_approval_resolved",
+}
+
 async def _best_effort_cancel(store, run_id, *, trace_complete=None, error_code="cancelled", error_message=None, final_text=None) -> None:
     task = None
     try:
@@ -60,6 +70,11 @@ def _best_effort_close(store) -> None:
 
 def _truncate_utf8(value: str, limit: int) -> str:
     return value.encode("utf-8")[:limit].decode("utf-8", "ignore")
+
+def _append_bounded_utf8(buffer: bytearray, value: str, limit: int) -> None:
+    remaining = limit - len(buffer)
+    if remaining > 0:
+        buffer.extend(value.encode("utf-8")[:remaining])
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -364,7 +379,7 @@ async def _run_chat(
         limits=limits,
     )
     tools = registry.list_definitions() if tools is None else tools
-    failed = False; failure_message = None; trace_complete = True; final_text = []; current_text = []; current_text_bytes = 0
+    failed = False; failure_message = None; trace_complete = True; final_text = []; current_text = bytearray(); current_text_bytes = 0
     stream_kwargs = {"tools": tools}
     if system_prompt is not None:
         stream_kwargs["system_prompt"] = system_prompt
@@ -388,18 +403,22 @@ async def _run_chat(
                             if hasattr(tool, "server_id"): projected.update(server_id=tool.server_id, remote_tool_name=tool.remote_name)
                         except Exception: pass
                     if event.type == RuntimeEventType.MODEL_TURN_COMPLETED: projected["text_bytes"] = current_text_bytes
-                    await store.append_event(run_id, RunTraceEvent(event.type.value, datetime.now(timezone.utc), projected))
+                    audit_event_type = AUDIT_EVENT_TYPES.get(event.type)
+                    if audit_event_type is not None:
+                        await store.append_event(run_id, RunTraceEvent(audit_event_type, datetime.now(timezone.utc), projected))
                 except StateStoreError:
                     finalized = await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="trace_persist_failed", error_message="Run trace could not be persisted", trace_complete=False)
                     failure_sink.update(error_code="trace_persist_failed", message="Run trace could not be persisted", trace_complete=False, already_finalized=finalized)
                     message = "Run trace could not be persisted after tool execution" if event.type == RuntimeEventType.TOOL_RESULT else "Run trace could not be persisted"
                     print(message, file=sys.stderr); return 1
             if event.type == RuntimeEventType.TEXT_DELTA and event.text:
-                current_text.append(event.text); current_text_bytes += len(event.text.encode())
+                current_text_bytes += len(event.text.encode())
+                if record_content and store and run_id:
+                    _append_bounded_utf8(current_text, event.text, 1024 * 1024)
                 print(event.text, end="", flush=True)
             elif event.type == RuntimeEventType.MODEL_TURN_COMPLETED and event.finish_reason != "tool_calls":
                 if record_content and store and run_id:
-                    current=_truncate_utf8(''.join(current_text), 1024*1024); final_text.clear(); final_text.append(current)
+                    current=bytes(current_text).decode("utf-8", "ignore"); final_text.clear(); final_text.append(current)
                     if final_text_sink is not None: final_text_sink.clear(); final_text_sink.append(current)
             elif event.type == RuntimeEventType.RUN_FAILED:
                 failed = True; failure_message = _safe_cli_field(event.error or "Runtime execution failed", max_length=1024)
@@ -466,8 +485,8 @@ def project_runtime_event(event) -> dict:
     if event.finish_reason: payload["finish_reason"] = event.finish_reason
     if event.tool_call is not None:
         call = event.tool_call; payload.update(call_id=call.id, tool_name=call.name, risk_level=event.metadata.get("risk_level", "unspecified"), argument_bytes=int(event.metadata.get("argument_bytes", len(json.dumps(call.arguments, ensure_ascii=False, separators=(",", ":")).encode()))))
-        if call.name == "run_command" and type(call.arguments.get("profile")) is str:
-            payload["profile"] = call.arguments["profile"]
+        if call.name == "run_command" and type(event.metadata.get("profile")) is str:
+            payload["profile"] = event.metadata["profile"]
     if event.tool_approval is not None:
         approval = event.tool_approval
         summary = "command profile approval" if approval.tool_name == "run_command" else _safe_cli_field(approval.summary, max_length=512)
