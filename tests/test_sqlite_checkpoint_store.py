@@ -199,6 +199,33 @@ def test_closed_sqlite_store_rejects_operations(tmp_path) -> None:
     asyncio.run(run())
 
 
+def test_two_stores_preserve_monotonic_sequences(tmp_path) -> None:
+    async def run():
+        path = tmp_path / "concurrent.db"
+        stores = [SQLiteCheckpointStore(path), SQLiteCheckpointStore(path)]
+        await asyncio.gather(*(store.initialize() for store in stores))
+        for index in range(6):
+            await stores[index % 2].save(_checkpoint(index))
+        loaded = await stores[0].list("run-1")
+        assert [item.sequence for item in loaded] == list(range(6))
+    asyncio.run(run())
+
+
+def test_sqlite_store_rejects_v1_schema_without_query_index(tmp_path) -> None:
+    path = tmp_path / "missing-index.db"
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE harness_checkpoints (checkpoint_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence >= 0), checkpoint_schema_version INTEGER NOT NULL, boundary TEXT NOT NULL, created_at TEXT NOT NULL, payload_json TEXT NOT NULL, payload_sha256 TEXT NOT NULL, UNIQUE(run_id, sequence))")
+        db.execute("PRAGMA user_version = 1")
+    async def run():
+        try:
+            await SQLiteCheckpointStore(path).initialize()
+        except Exception as exc:
+            assert "index" in str(exc)
+        else:
+            raise AssertionError("missing query index must be rejected")
+    asyncio.run(run())
+
+
 def test_sqlite_store_rejects_unknown_checkpoint_schema(tmp_path) -> None:
     async def run():
         path = tmp_path / "schema.db"
