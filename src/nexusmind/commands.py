@@ -390,9 +390,6 @@ async def _run_profile(
             await ensure_cleanup_once(force=True)
     except asyncio.CancelledError as exc:
         original_exception = exc
-        if lifecycle is not None and not lifecycle.done():
-            lifecycle.cancel()
-            await asyncio.gather(lifecycle, return_exceptions=True)
         if process is not None:
             await ensure_cleanup_once(force=True)
     except OSError as exc:
@@ -405,6 +402,8 @@ async def _run_profile(
             if process is not None and cleanup_result is None:
                 await ensure_cleanup_once(force=not completed_normally)
         finally:
+            if lifecycle is not None and not lifecycle.done():
+                await asyncio.gather(lifecycle, return_exceptions=True)
             _cleanup_private_temp(gate_path, gate_dir)
             try:
                 if process is not None:
