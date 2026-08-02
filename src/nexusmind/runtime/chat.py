@@ -93,7 +93,7 @@ class AgentLoopLimits:
             raise ValueError("Agent loop limits must allow a minimal tool result envelope")
 
 
-class ChatRuntime:
+class _LegacyHarnessRuntime:
     def __init__(
         self,
         model: ChatModel,
@@ -1000,4 +1000,49 @@ def _validate_event_payload_shape(event: RuntimeEvent) -> str | None:
         if field_name not in allowed_fields and value is not None:
             return "Model emitted an event with conflicting payload fields"
     return None
+
+
+class ChatRuntime:
+    """Chat-to-harness adapter kept compatible with the existing CLI API."""
+
+    def __init__(
+        self,
+        model: ChatModel,
+        tool_executor: ToolExecutorProtocol | None = None,
+        limits: AgentLoopLimits | None = None,
+        tool_policy: ToolPolicy | None = None,
+        approval_provider: ApprovalProvider | None = None,
+        approval_summarizer: ToolApprovalSummarizer | None = None,
+    ) -> None:
+        from nexusmind.runtime.harness.runner import HarnessRunner
+
+        self._harness = HarnessRunner(
+            model,
+            tool_executor=tool_executor,
+            limits=limits,
+            tool_policy=tool_policy,
+            approval_provider=approval_provider,
+            approval_summarizer=approval_summarizer,
+        )
+
+    async def stream_user_message(
+        self,
+        content: str,
+        *,
+        system_prompt: str | None = None,
+        tools: list[ToolDefinition] | None = None,
+    ) -> AsyncIterator[RuntimeEvent]:
+        from nexusmind.runtime.harness.context import HarnessRequest
+
+        messages: list[Message] = []
+        if system_prompt:
+            messages.append(Message(role=MessageRole.SYSTEM, content=system_prompt))
+        messages.append(Message(role=MessageRole.USER, content=content))
+        request = HarnessRequest(
+            messages=tuple(messages),
+            tools=tuple(tools or ()),
+            limits=self._harness.limits,
+        )
+        async for event in self._harness.stream(request):
+            yield event
 
