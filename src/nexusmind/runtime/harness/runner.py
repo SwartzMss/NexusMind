@@ -1,9 +1,12 @@
 from __future__ import annotations
+import asyncio
 from collections.abc import AsyncIterator
 from nexusmind.models.base import ChatModel
 from nexusmind.runtime.chat import AgentLoopLimits, _LegacyHarnessRuntime
 from nexusmind.runtime.events import RuntimeEvent
 from nexusmind.runtime.harness.context import HarnessRequest
+from nexusmind.runtime.harness.state import HarnessState, HarnessStatus
+from nexusmind.runtime.harness.stop import StopReason
 from nexusmind.runtime.policy import ApprovalProvider, ToolApprovalSummarizer, ToolPolicy
 from nexusmind.tools.executor import ToolExecutorProtocol
 
@@ -13,13 +16,54 @@ class HarnessRunner:
                  limits: AgentLoopLimits | None = None, tool_policy: ToolPolicy | None = None,
                  approval_provider: ApprovalProvider | None = None,
                  approval_summarizer: ToolApprovalSummarizer | None = None) -> None:
-        self.limits = limits or AgentLoopLimits()
-        self._runtime = _LegacyHarnessRuntime(model, tool_executor=tool_executor, limits=self.limits,
-                                    tool_policy=tool_policy, approval_provider=approval_provider,
-                                    approval_summarizer=approval_summarizer)
+        self._model = model
+        self._tool_executor = tool_executor
+        self._default_limits = limits or AgentLoopLimits()
+        self._tool_policy = tool_policy
+        self._approval_provider = approval_provider
+        self._approval_summarizer = approval_summarizer
+        self.state: HarnessState | None = None
+        self.stop_reason: StopReason | None = None
+
+    @property
+    def limits(self) -> AgentLoopLimits:
+        return self._default_limits
 
     async def stream(self, request: HarnessRequest) -> AsyncIterator[RuntimeEvent]:
-        system = next((m.content for m in request.messages if m.role.value == "system"), None)
+        limits = request.limits or self._default_limits
+        runtime = _LegacyHarnessRuntime(
+            self._model,
+            tool_executor=self._tool_executor,
+            limits=limits,
+            tool_policy=self._tool_policy,
+            approval_provider=self._approval_provider,
+            approval_summarizer=self._approval_summarizer,
+        )
+        self.state = HarnessState(messages=list(request.messages))
+        self.stop_reason = None
         user = next((m.content for m in reversed(request.messages) if m.role.value == "user"), "")
-        async for event in self._runtime.stream_user_message(user or "", system_prompt=system, tools=list(request.tools)):
-            yield event
+        try:
+            async for event in runtime.stream_user_message(
+                user or "",
+                tools=list(request.tools),
+                _initial_messages=list(request.messages),
+            ):
+                if event.type.value == "model_started":
+                    self.state.model_turns += 1
+                elif event.type.value == "tool_call_completed":
+                    self.state.tool_calls_total += 1
+                elif event.type.value == "tool_result":
+                    self.state.executed_tool_call_ids.add(event.tool_result.call_id)
+                elif event.type.value == "run_completed":
+                    self.state.status = HarnessStatus.COMPLETED
+                    self.stop_reason = StopReason.MODEL_COMPLETED
+                elif event.type.value == "run_failed":
+                    self.state.status = HarnessStatus.FAILED
+                    self.stop_reason = StopReason.RUNTIME_ERROR
+                elif event.type.value == "model_failed":
+                    self.stop_reason = StopReason.MODEL_FAILED
+                yield event
+        except asyncio.CancelledError:
+            self.state.status = HarnessStatus.CANCELLED
+            self.stop_reason = StopReason.CANCELLED
+            raise

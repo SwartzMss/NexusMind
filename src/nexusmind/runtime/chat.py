@@ -116,11 +116,13 @@ class _LegacyHarnessRuntime:
         *,
         system_prompt: str | None = None,
         tools: list[ToolDefinition] | None = None,
+        _initial_messages: list[Message] | None = None,
     ) -> AsyncIterator[RuntimeEvent]:
-        messages: list[Message] = []
-        if system_prompt:
-            messages.append(Message(role=MessageRole.SYSTEM, content=system_prompt))
-        messages.append(Message(role=MessageRole.USER, content=content))
+        messages: list[Message] = list(_initial_messages or [])
+        if _initial_messages is None:
+            if system_prompt:
+                messages.append(Message(role=MessageRole.SYSTEM, content=system_prompt))
+            messages.append(Message(role=MessageRole.USER, content=content))
 
         yield RuntimeEvent(RuntimeEventType.RUN_STARTED)
         try:
