@@ -191,6 +191,25 @@ class HarnessRunner:
             executed_batch_ids = set(checkpoint.state.executed_tool_call_ids) & set(batch_calls)
             if set(result_ids) != executed_batch_ids:
                 raise HarnessResumeStateError("Tool results do not match executed Tool Call IDs")
+            transcript_call_ids = [
+                call.id
+                for message in messages
+                if message.role.value == "assistant"
+                for call in message.tool_calls
+            ]
+            transcript_result_ids = [
+                message.tool_call_id
+                for message in messages
+                if message.role.value == "tool" and message.tool_call_id
+            ]
+            if len(set(transcript_call_ids)) != len(transcript_call_ids):
+                raise HarnessResumeStateError("Checkpoint transcript contains duplicate Tool Call IDs")
+            if not set(checkpoint.state.started_tool_call_ids).issubset(set(transcript_call_ids)):
+                raise HarnessResumeStateError("Started Tool Call IDs do not match the transcript")
+            if len(transcript_result_ids) != checkpoint.state.tool_calls_total:
+                raise HarnessResumeStateError("Tool call count does not match the transcript")
+            if set(checkpoint.state.executed_tool_call_ids) != set(transcript_result_ids):
+                raise HarnessResumeStateError("Executed Tool Call IDs do not match the transcript")
             if pending:
                 requested_tool_names = [tool.name for tool in request.tools]
                 if len(set(requested_tool_names)) != len(requested_tool_names):
