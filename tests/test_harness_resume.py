@@ -67,3 +67,19 @@ def test_resume_at_model_limit_emits_limit_failure():
         assert execution.stop_reason is StopReason.LIMIT_EXCEEDED
         assert execution.state.phase is HarnessPhase.TERMINAL
     asyncio.run(run())
+
+def test_resume_after_tool_with_completed_batch_continues_model():
+    async def run():
+        call = ToolCall(id="call-1", name="echo", arguments={"text": "hi"})
+        state = HarnessState(messages=[
+            Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(call,)),
+            Message(role=MessageRole.TOOL, name="echo", tool_call_id="call-1", content='{"ok":true}'),
+        ], model_turns=1, tool_calls_total=1, started_tool_call_ids={"call-1"},
+            executed_tool_call_ids={"call-1"}, status=HarnessStatus.RUNNING,
+            phase=HarnessPhase.AFTER_TOOL)
+        checkpoint = HarnessCheckpoint.create(state, "run-tool", 0)
+        execution = HarnessRunner(FakeChatModel(["done"])).resume_execution(HarnessResumeRequest(checkpoint))
+        events = [event async for event in execution.stream()]
+        assert events[-1].type.value == "run_completed"
+        assert execution.state.executed_tool_call_ids == {"call-1"}
+    asyncio.run(run())
