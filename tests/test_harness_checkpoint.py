@@ -36,9 +36,9 @@ def test_checkpoint_store_enforces_sequence_and_latest() -> None:
         store = InMemoryCheckpointStore()
         state = HarnessState(messages=[])
         first = HarnessCheckpoint.create(state, "run-1", 0, CheckpointBoundary.BEFORE_MODEL)
-            state.status = HarnessStatus.COMPLETED
-            state.stop_reason = StopReason.MODEL_COMPLETED
-            second = HarnessCheckpoint.create(state, "run-1", 1, CheckpointBoundary.RUN_TERMINAL)
+        state.status = HarnessStatus.COMPLETED
+        state.stop_reason = StopReason.MODEL_COMPLETED
+        second = HarnessCheckpoint.create(state, "run-1", 1, CheckpointBoundary.RUN_TERMINAL)
         await store.save(first)
         await store.save(second)
         assert await store.load_latest("run-1") == second
