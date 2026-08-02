@@ -253,8 +253,6 @@ class _LegacyHarnessRuntime:
                 state.tool_argument_bytes_total += turn.tool_arguments_size
                 for call in turn.tool_calls:
                     state.phase = HarnessPhase.BEFORE_TOOL
-                    state.phase = HarnessPhase.TOOL_RUNNING
-                    state.started_tool_call_ids.add(call.id)
                     remaining_result_bytes = self._limits.max_tool_result_bytes_total - state.tool_result_bytes_total
                     result_budget = _result_budget(self._limits, remaining_result_bytes)
                     if not result_budget.satisfies(_PERMISSION_DENIED_REQUIREMENTS):
@@ -348,6 +346,7 @@ class _LegacyHarnessRuntime:
                                     if not _executor_definition_matches(self._tool_executor, call.name, definition):
                                         yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                                         return
+                                    state.phase = HarnessPhase.TOOL_RUNNING
                                     state.started_tool_call_ids.add(call.id)
                                     try:
                                         result = await self._tool_executor.execute_with_result_budget(
@@ -379,6 +378,7 @@ class _LegacyHarnessRuntime:
                             if result_budget is None:
                                 yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
                                 return
+                            state.phase = HarnessPhase.TOOL_RUNNING
                             state.started_tool_call_ids.add(call.id)
                             try:
                                 result = await self._tool_executor.execute_with_result_budget(
@@ -393,6 +393,8 @@ class _LegacyHarnessRuntime:
                             except Exception:
                                 yield _tool_failure_after_start(call, _RUNTIME_ERROR)
                                 return
+                    if call.id not in state.started_tool_call_ids:
+                        state.started_tool_call_ids.add(call.id)
                     if (
                         not isinstance(result, ToolResult)
                         or type(result.call_id) is not str

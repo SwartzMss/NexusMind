@@ -55,6 +55,8 @@ class HarnessStateSnapshot:
             raise ValueError("Checkpoint executed tool call IDs must be unique")
         if not set(self.executed_tool_call_ids).issubset(self.started_tool_call_ids):
             raise ValueError("Checkpoint executed tool calls must have started")
+        if self.tool_calls_total != len(self.executed_tool_call_ids):
+            raise ValueError("Checkpoint tool call count does not match completed tool calls")
 
     @classmethod
     def from_state(cls, state: HarnessState, stop_reason: StopReason | None = None) -> "HarnessStateSnapshot":

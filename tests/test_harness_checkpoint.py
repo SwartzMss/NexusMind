@@ -68,7 +68,7 @@ def test_terminal_checkpoint_contains_stop_reason() -> None:
 
 
 def test_checkpoint_allows_after_tool_when_previous_tools_are_complete() -> None:
-    state = HarnessState(messages=[], started_tool_call_ids={"call-1"}, executed_tool_call_ids={"call-1"}, phase=HarnessPhase.AFTER_TOOL)
+    state = HarnessState(messages=[], tool_calls_total=1, started_tool_call_ids={"call-1"}, executed_tool_call_ids={"call-1"}, phase=HarnessPhase.AFTER_TOOL)
     checkpoint = HarnessCheckpoint.create(state, "run-tool", 0, CheckpointBoundary.AFTER_TOOL)
     assert checkpoint.boundary is CheckpointBoundary.AFTER_TOOL
 
