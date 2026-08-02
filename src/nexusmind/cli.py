@@ -40,7 +40,8 @@ async def _best_effort_cancel(store, run_id) -> None:
             task = asyncio.create_task(store.finish_run(run_id, RunStatus.CANCELLED, error_code="cancelled"))
             await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
     except BaseException:
-        if task is not None and not task.done(): task.cancel()
+        if task is not None and not task.done():
+            task.cancel(); await asyncio.gather(task, return_exceptions=True)
     finally:
         if store:
             try: store.close()
@@ -307,7 +308,8 @@ async def _run_chat_with_mcp(
         return 1
     if store and run_id:
         try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED, final_text=''.join(text_sink) if record_content else None)
-        except StateStoreError: return_code = 1
+        except StateStoreError:
+            print("State error: Run final status could not be persisted", file=sys.stderr); return_code = 1
         _best_effort_close(store)
     return return_code
 
@@ -371,7 +373,8 @@ async def _run_chat(
         if not failed: print()
         if store and run_id and owns_store:
             try: await store.finish_run(run_id, RunStatus.FAILED if failed else RunStatus.COMPLETED, final_text=''.join(final_text) if record_content else None)
-            except StateStoreError: return 1
+            except StateStoreError:
+                print("State error: Run final status could not be persisted", file=sys.stderr); return 1
         return 1 if failed else 0
     except asyncio.CancelledError:
         await _best_effort_cancel(store, run_id)
@@ -417,9 +420,9 @@ def project_runtime_event(event) -> dict:
     payload = {"text_bytes": len((event.text or '').encode()), "error": _safe_cli_field(event.error or '', max_length=1024)}
     if event.finish_reason: payload["finish_reason"] = event.finish_reason
     if event.tool_call is not None:
-        call = event.tool_call; payload.update(call_id=call.id, tool_name=call.name, argument_bytes=len(json.dumps(call.arguments, ensure_ascii=False).encode()))
+        call = event.tool_call; payload.update(call_id=call.id, tool_name=call.name, risk_level=event.metadata.get("risk_level", "unspecified"), argument_bytes=len(json.dumps(call.arguments, ensure_ascii=False).encode()))
     if event.tool_approval is not None:
-        approval = event.tool_approval; payload.update(call_id=approval.call_id, tool_name=approval.tool_name, decision=getattr(approval.decision, 'value', approval.decision), summary=_safe_cli_field(approval.summary, max_length=512))
+        approval = event.tool_approval; payload.update(request_id=approval.request_id, call_id=approval.call_id, tool_name=approval.tool_name, risk_level=approval.risk_level.value, decision=getattr(approval.decision, 'value', approval.decision), summary=_safe_cli_field(approval.summary, max_length=512))
     if event.tool_result is not None:
         result = event.tool_result; output = result.output
         payload.update(call_id=result.call_id, tool_name=result.name, ok=result.error is None, result_bytes=len(json.dumps(output, ensure_ascii=False, default=str).encode()), error_code=getattr(result.error.code, 'value', None) if result.error else None)

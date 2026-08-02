@@ -31,7 +31,7 @@ class SQLiteRunStore:
         self.path=Path(path); self.execution_id=execution_id or uuid.uuid4().hex
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.db=sqlite3.connect(self.path); self.db.execute("PRAGMA foreign_keys=ON")
+            self.db=sqlite3.connect(self.path, timeout=0.5); self.db.execute("PRAGMA busy_timeout=500"); self.db.execute("PRAGMA foreign_keys=ON")
             self._schema()
             if recover_abandoned: self.recover_abandoned()
         except (OSError, sqlite3.Error) as exc: raise StateStoreError("Run store could not be initialized") from exc
