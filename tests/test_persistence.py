@@ -73,3 +73,18 @@ def test_prune_deletes_old_terminal_runs_but_keeps_running(tmp_path):
     assert store.show_run(old_id) is None
     assert store.show_run(running_id) is not None
     store.close()
+
+def test_terminal_run_rejects_events_and_running_finish(tmp_path):
+    store = SQLiteRunStore(tmp_path / "state.db")
+    run_id = run(store.start_run(RunStartContext(RunKind.CHAT)))
+    run(store.finish_run(run_id, RunStatus.COMPLETED))
+    with pytest.raises(StateStoreError):
+        run(store.append_event(run_id, RunTraceEvent("late", datetime.now(timezone.utc), {})))
+    with pytest.raises(StateStoreError):
+        run(store.finish_run(run_id, RunStatus.RUNNING))
+    store.close()
+
+def test_schema_metadata_without_core_tables_is_rejected(tmp_path):
+    path = tmp_path / "state.db"
+    db = sqlite3.connect(path); db.execute("CREATE TABLE schema_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)"); db.execute("INSERT INTO schema_metadata VALUES('version','1')"); db.commit(); db.close()
+    with pytest.raises(StateStoreError): SQLiteRunStore(path)
