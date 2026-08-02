@@ -147,6 +147,10 @@ class HarnessRunner:
 
     def resume_execution(self, request: HarnessResumeRequest) -> HarnessExecution:
         checkpoint = request.checkpoint
+        try:
+            checkpoint.validate()
+        except ValueError as exc:
+            raise HarnessResumeStateError("Checkpoint is not valid for resume") from exc
         state = state_from_checkpoint(checkpoint) if checkpoint.state.phase is HarnessPhase.BEFORE_MODEL else None
         if checkpoint.state.phase in {HarnessPhase.AFTER_MODEL, HarnessPhase.BEFORE_TOOL, HarnessPhase.AFTER_TOOL}:
             messages = checkpoint.state.messages
