@@ -456,8 +456,8 @@ async def _tools(args: argparse.Namespace) -> int:
         return 0
     return 2
 
-def _open_store(path: str):
-    try: return SQLiteRunStore(path)
+def _open_store(path: str, *, read_only: bool = False):
+    try: return SQLiteRunStore.open_existing_ro(path) if read_only else SQLiteRunStore.open_existing_rw(path)
     except StateStoreError:
         print("State error: Run store could not be initialized", file=sys.stderr); return None
 
@@ -465,12 +465,15 @@ def project_runtime_event(event) -> dict:
     payload = {"text_bytes": len((event.text or '').encode()), "error": _safe_cli_field(event.error or '', max_length=1024)}
     if event.finish_reason: payload["finish_reason"] = event.finish_reason
     if event.tool_call is not None:
-        call = event.tool_call; payload.update(call_id=call.id, tool_name=call.name, risk_level=event.metadata.get("risk_level", "unspecified"), argument_bytes=len(json.dumps(call.arguments, ensure_ascii=False).encode()))
+        call = event.tool_call; payload.update(call_id=call.id, tool_name=call.name, risk_level=event.metadata.get("risk_level", "unspecified"), argument_bytes=int(event.metadata.get("argument_bytes", len(json.dumps(call.arguments, ensure_ascii=False, separators=(",", ":")).encode()))))
     if event.tool_approval is not None:
-        approval = event.tool_approval; payload.update(request_id=approval.request_id, call_id=approval.call_id, tool_name=approval.tool_name, risk_level=approval.risk_level.value, decision=getattr(approval.decision, 'value', approval.decision), summary=_safe_cli_field(approval.summary, max_length=512))
+        approval = event.tool_approval
+        summary = "command profile approval" if approval.tool_name == "run_command" else _safe_cli_field(approval.summary, max_length=512)
+        payload.update(request_id=approval.request_id, call_id=approval.call_id, tool_name=approval.tool_name, risk_level=approval.risk_level.value, decision=getattr(approval.decision, 'value', approval.decision), summary=summary)
     if event.tool_result is not None:
         result = event.tool_result; output = result.output
-        payload.update(call_id=result.call_id, tool_name=result.name, ok=result.error is None, result_bytes=len(json.dumps(output, ensure_ascii=False, default=str).encode()), result_truncated=bool(getattr(result, "metadata", {}).get("result_truncated", False)), error_code=getattr(result.error.code, 'value', None) if result.error else None)
+        result_metadata = getattr(result, "metadata", {})
+        payload.update(call_id=result.call_id, tool_name=result.name, ok=result.error is None, result_bytes=int(result_metadata.get("result_bytes", len(json.dumps(output, ensure_ascii=False, default=str, separators=(",", ":")).encode()))), result_truncated=bool(result_metadata.get("result_truncated", False)), error_code=getattr(result.error.code, 'value', None) if result.error else None)
         if result.name == "run_command" and isinstance(output, dict):
             payload.update(profile=output.get("profile"), cwd=output.get("cwd"), exit_code=output.get("exit_code"), timed_out=output.get("timed_out"), duration_ms=output.get("duration_ms"), stdout_bytes=int(output.get("stdout_bytes", len(str(output.get("stdout", "")).encode()))), stderr_bytes=int(output.get("stderr_bytes", len(str(output.get("stderr", "")).encode()))), stdout_truncated=output.get("stdout_truncated"), stderr_truncated=output.get("stderr_truncated"))
         if result.name in {"write_file", "replace_text"} and isinstance(output, dict):
@@ -479,7 +482,7 @@ def project_runtime_event(event) -> dict:
     return payload
 
 def _runs(args: argparse.Namespace) -> int:
-    store=_open_store(args.state_db)
+    store=_open_store(args.state_db, read_only=args.runs_command in {"list", "show"})
     if store is None:return 2
     try:
         if args.runs_command == "list":

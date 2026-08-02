@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib, json, sqlite3, uuid
+import hashlib, json, sqlite3, uuid, urllib.parse
 import asyncio
 from functools import wraps
 from datetime import datetime, timezone, timedelta
@@ -44,12 +44,22 @@ def _sync_db_error(fn):
     return wrapped
 def _now(): return datetime.now(timezone.utc).isoformat()
 class SQLiteRunStore:
-    def __init__(self, path: str | Path, *, execution_id: str | None = None, recover_abandoned: bool = False):
+    def __init__(self, path: str | Path, *, execution_id: str | None = None, recover_abandoned: bool = False, read_only: bool = False, create: bool = True):
         self.path=Path(path); self.execution_id=execution_id or uuid.uuid4().hex
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.db=sqlite3.connect(self.path, timeout=0.5); self.db.execute("PRAGMA busy_timeout=500"); self.db.execute("PRAGMA foreign_keys=ON")
-            self._schema()
+            if create:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+            if not create and not self.path.exists():
+                raise StateStoreError("Run store does not exist")
+            if read_only:
+                uri = "file:" + urllib.parse.quote(str(self.path.resolve()), safe="/\\:") + "?mode=ro"
+                self.db=sqlite3.connect(uri, uri=True, timeout=0.5)
+                self.db.execute("PRAGMA foreign_keys=ON")
+                self._validate_v1_schema()
+            else:
+                uri = "file:" + urllib.parse.quote(str(self.path.resolve()), safe="/\\:") + "?mode=rw" if not create else str(self.path)
+                self.db=sqlite3.connect(uri, uri=not create, timeout=0.5); self.db.execute("PRAGMA busy_timeout=500"); self.db.execute("PRAGMA foreign_keys=ON")
+                self._schema()
             if recover_abandoned: self.recover_abandoned()
         except BaseException as exc:
             try: self.db.close()
@@ -57,6 +67,12 @@ class SQLiteRunStore:
             if isinstance(exc, StateStoreError): raise
             if isinstance(exc, (OSError, sqlite3.Error)): raise StateStoreError("Run store could not be initialized") from exc
             raise
+    @classmethod
+    def open_existing_rw(cls, path, **kwargs):
+        return cls(path, create=False, **kwargs)
+    @classmethod
+    def open_existing_ro(cls, path, **kwargs):
+        return cls(path, create=False, read_only=True, **kwargs)
     def _schema(self):
         self.db.execute("BEGIN IMMEDIATE")
         try:
