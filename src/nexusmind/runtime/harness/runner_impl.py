@@ -10,7 +10,7 @@ from typing import cast
 from nexusmind.models.base import ChatModel
 from nexusmind.models.tool_calls import ToolCallDelta
 from nexusmind.runtime.events import RuntimeEvent, RuntimeEventType
-from nexusmind.runtime.harness.state import HarnessState
+from nexusmind.runtime.harness.state import HarnessPhase, HarnessState
 from nexusmind.runtime.messages import Message, MessageRole
 from nexusmind.runtime.policy import (
     ApprovalDecision,
@@ -137,10 +137,12 @@ class _LegacyHarnessRuntime:
             model_tools = list(tool_definitions.values())
             allowed_tool_names = set(tool_definitions)
             while True:
+                state.phase = HarnessPhase.BEFORE_MODEL
                 if state.model_turns >= self._limits.max_model_turns:
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
                     return
                 state.model_turns += 1
+                state.phase = HarnessPhase.MODEL_RUNNING
                 turn = _ModelTurn()
                 try:
                     async for event in self._model.stream(
@@ -218,8 +220,19 @@ class _LegacyHarnessRuntime:
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=terminal_error)
                     return
                 completed_event = cast(RuntimeEvent, turn.completed_event)
+                assistant_content = "".join(turn.text_parts) or None
+                if assistant_content is not None or turn.tool_calls:
+                    assistant_message = Message(
+                        role=MessageRole.ASSISTANT,
+                        content=assistant_content,
+                        tool_calls=tuple(turn.tool_calls),
+                    )
+                    messages.append(assistant_message)
+                    state.messages.append(assistant_message)
+                state.phase = HarnessPhase.AFTER_MODEL
                 yield completed_event
                 if turn.finish_reason != "tool_calls":
+                    state.phase = HarnessPhase.TERMINAL
                     yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
                     return
                 if state.model_turns >= self._limits.max_model_turns:
@@ -231,21 +244,15 @@ class _LegacyHarnessRuntime:
                 if _has_duplicate_call_ids(turn.tool_calls):
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                     return
-                if any(call.id in state.executed_tool_call_ids for call in turn.tool_calls):
+                if any(call.id in state.started_tool_call_ids for call in turn.tool_calls):
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                     return
                 if any(call.name not in allowed_tool_names for call in turn.tool_calls):
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                     return
                 state.tool_argument_bytes_total += turn.tool_arguments_size
-                assistant_message = Message(
-                        role=MessageRole.ASSISTANT,
-                        content="".join(turn.text_parts) or None,
-                        tool_calls=tuple(turn.tool_calls),
-                )
-                messages.append(assistant_message)
-                state.messages.append(assistant_message)
                 for call in turn.tool_calls:
+                    state.phase = HarnessPhase.BEFORE_TOOL
                     remaining_result_bytes = self._limits.max_tool_result_bytes_total - state.tool_result_bytes_total
                     result_budget = _result_budget(self._limits, remaining_result_bytes)
                     if not result_budget.satisfies(_PERMISSION_DENIED_REQUIREMENTS):
@@ -304,8 +311,7 @@ class _LegacyHarnessRuntime:
                             else:
                                 remaining_result_bytes = self._limits.max_tool_result_bytes_total - state.tool_result_bytes_total
                                 if (
-                                    call.id in state.started_tool_call_ids
-                                    or call.id in state.executed_tool_call_ids
+                                    call.id in state.executed_tool_call_ids
                                     or call.name not in allowed_tool_names
                                     or call.name not in tool_definitions
                                     or not _tool_call_matches_snapshot(call, approval_call_snapshot)
@@ -340,6 +346,7 @@ class _LegacyHarnessRuntime:
                                     if not _executor_definition_matches(self._tool_executor, call.name, definition):
                                         yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                                         return
+                                    state.phase = HarnessPhase.TOOL_RUNNING
                                     state.started_tool_call_ids.add(call.id)
                                     try:
                                         result = await self._tool_executor.execute_with_result_budget(
@@ -355,9 +362,6 @@ class _LegacyHarnessRuntime:
                                         yield _tool_failure_after_start(call, _RUNTIME_ERROR)
                                         return
                         else:
-                            if call.id in state.started_tool_call_ids:
-                                yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
-                                return
                             if not _executor_definition_matches(self._tool_executor, call.name, definition):
                                 yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                                 return
@@ -374,6 +378,7 @@ class _LegacyHarnessRuntime:
                             if result_budget is None:
                                 yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
                                 return
+                            state.phase = HarnessPhase.TOOL_RUNNING
                             state.started_tool_call_ids.add(call.id)
                             try:
                                 result = await self._tool_executor.execute_with_result_budget(
@@ -388,6 +393,8 @@ class _LegacyHarnessRuntime:
                             except Exception:
                                 yield _tool_failure_after_start(call, _RUNTIME_ERROR)
                                 return
+                    if call.id not in state.started_tool_call_ids:
+                        state.started_tool_call_ids.add(call.id)
                     if (
                         not isinstance(result, ToolResult)
                         or type(result.call_id) is not str
@@ -418,8 +425,6 @@ class _LegacyHarnessRuntime:
                         yield _tool_failure_after_start(call, _RUNTIME_ERROR)
                         return
                     state.tool_result_bytes_total += size
-                    state.tool_calls_total += 1
-                    state.executed_tool_call_ids.add(call.id)
                     result = replace(
                         result,
                         metadata={
@@ -427,7 +432,6 @@ class _LegacyHarnessRuntime:
                             "result_bytes": size,
                         },
                     )
-                    yield RuntimeEvent(RuntimeEventType.TOOL_RESULT, tool_result=result)
                     tool_message = Message(
                             role=MessageRole.TOOL,
                             name=result.name,
@@ -436,6 +440,10 @@ class _LegacyHarnessRuntime:
                     )
                     messages.append(tool_message)
                     state.messages.append(tool_message)
+                    state.tool_calls_total += 1
+                    state.executed_tool_call_ids.add(call.id)
+                    state.phase = HarnessPhase.AFTER_TOOL
+                    yield RuntimeEvent(RuntimeEventType.TOOL_RESULT, tool_result=result)
                 continue
         except asyncio.CancelledError:
             raise

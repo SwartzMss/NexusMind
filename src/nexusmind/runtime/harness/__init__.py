@@ -4,5 +4,8 @@ from .limits import HarnessLimits
 from .runner import HarnessExecution, HarnessRunner
 from .state import HarnessState, HarnessStatus
 from .stop import StopReason
+from .state import HarnessPhase
+from .checkpoint import CheckpointBoundary, HarnessCheckpoint, HarnessStateSnapshot
+from .checkpoint_store import CheckpointStore, InMemoryCheckpointStore
 
-__all__ = ["HarnessExecution", "HarnessLimits", "HarnessRequest", "HarnessRunner", "HarnessState", "HarnessStatus", "StopReason"]
+__all__ = ["CheckpointBoundary", "CheckpointStore", "HarnessCheckpoint", "HarnessExecution", "HarnessLimits", "HarnessPhase", "HarnessRequest", "HarnessRunner", "HarnessState", "HarnessStateSnapshot", "HarnessStatus", "InMemoryCheckpointStore", "StopReason"]
