@@ -39,17 +39,17 @@ class HarnessExecution:
             elif event.type.value == "model_failed" and self.stop_reason is None:
                 self.stop_reason = StopReason.MODEL_FAILED
                 self.state.stop_reason = self.stop_reason
-            elif event.type.value == "run_failed" and self.stop_reason is None:
-                reason = event.metadata.get("stop_reason")
-                if reason in StopReason._value2member_map_:
-                    self.stop_reason = StopReason(reason)
-                elif event.metadata.get("tool_execution_started"):
-                    self.stop_reason = StopReason.TOOL_FAILED
-                elif event.error == "Agent loop limit exceeded":
-                    self.stop_reason = StopReason.LIMIT_EXCEEDED
-                else:
-                    self.stop_reason = StopReason.RUNTIME_ERROR
             elif event.type.value == "run_failed":
+                if self.stop_reason is None:
+                    reason = event.metadata.get("stop_reason")
+                    if reason in StopReason._value2member_map_:
+                        self.stop_reason = StopReason(reason)
+                    elif event.metadata.get("tool_execution_started"):
+                        self.stop_reason = StopReason.TOOL_FAILED
+                    elif event.error == "Agent loop limit exceeded":
+                        self.stop_reason = StopReason.LIMIT_EXCEEDED
+                    else:
+                        self.stop_reason = StopReason.RUNTIME_ERROR
                 self.state.stop_reason = self.stop_reason
                 self.state.status = HarnessStatus.FAILED
                 self.state.phase = HarnessPhase.TERMINAL

@@ -244,7 +244,7 @@ class _LegacyHarnessRuntime:
                 if _has_duplicate_call_ids(turn.tool_calls):
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                     return
-                if any(call.id in state.executed_tool_call_ids for call in turn.tool_calls):
+                if any(call.id in state.started_tool_call_ids for call in turn.tool_calls):
                     yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                     return
                 if any(call.name not in allowed_tool_names for call in turn.tool_calls):
@@ -254,6 +254,7 @@ class _LegacyHarnessRuntime:
                 for call in turn.tool_calls:
                     state.phase = HarnessPhase.BEFORE_TOOL
                     state.phase = HarnessPhase.TOOL_RUNNING
+                    state.started_tool_call_ids.add(call.id)
                     remaining_result_bytes = self._limits.max_tool_result_bytes_total - state.tool_result_bytes_total
                     result_budget = _result_budget(self._limits, remaining_result_bytes)
                     if not result_budget.satisfies(_PERMISSION_DENIED_REQUIREMENTS):
@@ -312,8 +313,7 @@ class _LegacyHarnessRuntime:
                             else:
                                 remaining_result_bytes = self._limits.max_tool_result_bytes_total - state.tool_result_bytes_total
                                 if (
-                                    call.id in state.started_tool_call_ids
-                                    or call.id in state.executed_tool_call_ids
+                                    call.id in state.executed_tool_call_ids
                                     or call.name not in allowed_tool_names
                                     or call.name not in tool_definitions
                                     or not _tool_call_matches_snapshot(call, approval_call_snapshot)
@@ -363,9 +363,6 @@ class _LegacyHarnessRuntime:
                                         yield _tool_failure_after_start(call, _RUNTIME_ERROR)
                                         return
                         else:
-                            if call.id in state.started_tool_call_ids:
-                                yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
-                                return
                             if not _executor_definition_matches(self._tool_executor, call.name, definition):
                                 yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                                 return
