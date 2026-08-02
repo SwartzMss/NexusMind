@@ -13,7 +13,7 @@ from nexusmind.mcp import MCPClientGroup, MCPError, MCPStdioClient, load_mcp_ser
 from nexusmind.models.openai_compatible import OpenAICompatibleChatModel
 from nexusmind.runtime.chat import AgentLoopLimits
 from nexusmind.runtime.policy import ApprovalDecision, ApprovalRequest, DefaultToolApprovalSummarizer
-from nexusmind.runtime.chat import ChatRuntime
+from nexusmind.runtime.chat import ChatRuntime, ToolExecutionCancelled
 from nexusmind.runtime.events import RuntimeEventType
 from nexusmind.skills import SkillError, discover_skills, load_skill, resolve_skill_tool_references
 from nexusmind.skills.resolver import (
@@ -299,7 +299,9 @@ async def _run_chat_with_mcp(
 
     try:
         await client.__aexit__(None, None, None)
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as cancellation:
+        if isinstance(cancellation, ToolExecutionCancelled):
+            failure_sink.update(trace_complete=False, error_code="tool_execution_cancelled", message="Tool execution was cancelled")
         await _best_effort_cancel(store, run_id)
         raise
     except MCPError as exc:

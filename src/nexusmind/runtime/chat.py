@@ -46,6 +46,12 @@ _FINISH_REASONS = {
     "null",
 }
 _RUNTIME_ERROR = "Runtime state machine failed"
+
+class ToolExecutionCancelled(asyncio.CancelledError):
+    def __init__(self, call_id: str, tool_name: str):
+        super().__init__("Tool execution cancelled")
+        self.call_id = call_id
+        self.tool_name = tool_name
 _LIMIT_ERROR = "Agent loop limit exceeded"
 _MIN_TOOL_RESULT_ENVELOPE_BYTES = len('{"ok":true,"output":0}'.encode("utf-8"))
 _MIN_TOOL_RESULT_ENVELOPE_NODES = 3
@@ -331,7 +337,7 @@ class ChatRuntime:
                                             result_budget=result_budget,
                                         )
                                     except asyncio.CancelledError:
-                                        raise
+                                        raise ToolExecutionCancelled(call.id, call.name)
                                     except ToolResultBudgetError:
                                         yield _tool_failure_after_start(call, _LIMIT_ERROR)
                                         return
@@ -365,7 +371,7 @@ class ChatRuntime:
                                     result_budget=result_budget,
                                 )
                             except asyncio.CancelledError:
-                                raise
+                                raise ToolExecutionCancelled(call.id, call.name)
                             except ToolResultBudgetError:
                                 yield _tool_failure_after_start(call, _LIMIT_ERROR)
                                 return
