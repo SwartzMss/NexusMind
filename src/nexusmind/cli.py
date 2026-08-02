@@ -344,7 +344,7 @@ async def _run_chat(
         limits=limits,
     )
     tools = registry.list_definitions() if tools is None else tools
-    failed = False; final_text = []; current_text = []; current_text_bytes = 0
+    failed = False; failure_message = None; final_text = []; current_text = []; current_text_bytes = 0
     stream_kwargs = {"tools": tools}
     if system_prompt is not None:
         stream_kwargs["system_prompt"] = system_prompt
@@ -381,10 +381,11 @@ async def _run_chat(
                 if record_content and store and run_id:
                     current=_truncate_utf8(''.join(current_text), 1024*1024); final_text.clear(); final_text.append(current)
                     if final_text_sink is not None: final_text_sink.clear(); final_text_sink.append(current)
-            elif event.type == RuntimeEventType.RUN_FAILED: failed = True; print(f"\nModel error: {event.error}", file=sys.stderr)
+            elif event.type == RuntimeEventType.RUN_FAILED:
+                failed = True; failure_message = _safe_cli_field(event.error or "Runtime execution failed", max_length=1024); print(f"\nModel error: {failure_message}", file=sys.stderr)
         if not failed: print()
         if store and run_id and owns_store:
-            try: await store.finish_run(run_id, RunStatus.FAILED if failed else RunStatus.COMPLETED, final_text=''.join(final_text) if record_content else None)
+            try: await store.finish_run(run_id, RunStatus.FAILED if failed else RunStatus.COMPLETED, error_code="runtime_failed" if failed else None, error_message=failure_message, final_text=''.join(final_text) if record_content else None)
             except StateStoreError:
                 print("State error: Run final status could not be persisted", file=sys.stderr); return 1
         return 1 if failed else 0

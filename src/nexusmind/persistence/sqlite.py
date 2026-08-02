@@ -12,20 +12,34 @@ def _async_db_error(fn):
     @wraps(fn)
     async def wrapped(self, *args, **kwargs):
         try: return await fn(self, *args, **kwargs)
-        except BaseException as exc:
+        except asyncio.CancelledError:
             try: self.db.rollback()
             except BaseException: pass
-            if isinstance(exc, (StateStoreError, asyncio.CancelledError, ValueError)): raise
+            raise
+        except (StateStoreError, ValueError):
+            try: self.db.rollback()
+            except BaseException: pass
+            raise
+        except Exception as exc:
+            try: self.db.rollback()
+            except BaseException: pass
             raise StateStoreError("Run store operation failed") from exc
     return wrapped
 def _sync_db_error(fn):
     @wraps(fn)
     def wrapped(self, *args, **kwargs):
         try: return fn(self, *args, **kwargs)
-        except BaseException as exc:
+        except asyncio.CancelledError:
             try: self.db.rollback()
             except BaseException: pass
-            if isinstance(exc, (StateStoreError, asyncio.CancelledError, ValueError)): raise
+            raise
+        except (StateStoreError, ValueError):
+            try: self.db.rollback()
+            except BaseException: pass
+            raise
+        except Exception as exc:
+            try: self.db.rollback()
+            except BaseException: pass
             raise StateStoreError("Run store operation failed") from exc
     return wrapped
 def _now(): return datetime.now(timezone.utc).isoformat()
