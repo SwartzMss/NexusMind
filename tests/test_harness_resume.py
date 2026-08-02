@@ -10,6 +10,9 @@ from nexusmind.runtime.harness import (
 from nexusmind.runtime.harness.limits import HarnessLimits
 from nexusmind.runtime.messages import Message, MessageRole
 from nexusmind.tools.contracts import ToolCall, ToolDefinition, ToolResult
+from nexusmind.tools.builtin import EchoTool
+from nexusmind.tools.executor import ToolExecutor
+from nexusmind.tools.registry import ToolRegistry
 
 def _before_model_checkpoint():
     state = HarnessState(messages=[Message(role=MessageRole.USER, content="hello")], phase=HarnessPhase.BEFORE_MODEL)
@@ -81,5 +84,21 @@ def test_resume_after_tool_with_completed_batch_continues_model():
         execution = HarnessRunner(FakeChatModel(["done"])).resume_execution(HarnessResumeRequest(checkpoint))
         events = [event async for event in execution.stream()]
         assert events[-1].type.value == "run_completed"
+        assert execution.state.executed_tool_call_ids == {"call-1"}
+    asyncio.run(run())
+
+def test_resume_after_model_executes_pending_tool_without_model_replay():
+    async def run():
+        call = ToolCall(id="call-1", name="echo", arguments={"text": "hi"})
+        state = HarnessState(messages=[Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(call,))],
+            model_turns=1, status=HarnessStatus.RUNNING, phase=HarnessPhase.AFTER_MODEL)
+        checkpoint = HarnessCheckpoint.create(state, "run-tool", 0)
+        registry = ToolRegistry()
+        registry.register(EchoTool())
+        execution = HarnessRunner(FakeChatModel(["done"]), tool_executor=ToolExecutor(registry)).resume_execution(
+            HarnessResumeRequest(checkpoint, tools=(EchoTool().definition,))
+        )
+        events = [event async for event in execution.stream()]
+        assert any(event.type.value == "tool_result" for event in events)
         assert execution.state.executed_tool_call_ids == {"call-1"}
     asyncio.run(run())
