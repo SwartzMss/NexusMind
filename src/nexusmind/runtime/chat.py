@@ -192,6 +192,14 @@ class ChatRuntime:
                                 return
                             turn.tool_calls.append(safe_tool_call)
                             turn.tool_arguments_size += arguments_size
+                            event = replace(
+                                event,
+                                tool_call=safe_tool_call,
+                                metadata={
+                                    **event.metadata,
+                                    "argument_bytes": arguments_size,
+                                },
+                            )
                         elif event.type == RuntimeEventType.MODEL_TURN_COMPLETED:
                             turn.completed = True
                             turn.finish_reason = event.finish_reason
@@ -410,6 +418,13 @@ class ChatRuntime:
                     tool_result_bytes_total += size
                     tool_calls_total += 1
                     executed_tool_call_ids.add(call.id)
+                    result = replace(
+                        result,
+                        metadata={
+                            **getattr(result, "metadata", {}),
+                            "result_bytes": size,
+                        },
+                    )
                     yield RuntimeEvent(RuntimeEventType.TOOL_RESULT, tool_result=result)
                     messages.append(
                         Message(
