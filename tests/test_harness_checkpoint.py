@@ -46,3 +46,19 @@ def test_terminal_checkpoint_contains_stop_reason() -> None:
     state = HarnessState(messages=[], status=__import__("nexusmind.runtime.harness.state", fromlist=["HarnessStatus"]).HarnessStatus.COMPLETED)
     checkpoint = HarnessCheckpoint.create(state, "run-terminal", 0, CheckpointBoundary.RUN_TERMINAL)
     assert checkpoint.state.status.value == "completed"
+
+
+def test_checkpoint_allows_after_tool_when_previous_tools_are_complete() -> None:
+    state = HarnessState(messages=[], started_tool_call_ids={"call-1"}, executed_tool_call_ids={"call-1"})
+    checkpoint = HarnessCheckpoint.create(state, "run-tool", 0, CheckpointBoundary.AFTER_TOOL)
+    assert checkpoint.boundary is CheckpointBoundary.AFTER_TOOL
+
+
+def test_checkpoint_rejects_active_tool() -> None:
+    state = HarnessState(messages=[], started_tool_call_ids={"call-1"})
+    try:
+        HarnessCheckpoint.create(state, "run-tool", 0, CheckpointBoundary.AFTER_TOOL)
+    except ValueError as exc:
+        assert "incomplete" in str(exc)
+    else:
+        raise AssertionError("active tool must not be checkpointed as after_tool")

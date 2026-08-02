@@ -72,9 +72,10 @@ class HarnessCheckpoint:
 
     @classmethod
     def create(cls, state: HarnessState, run_id: str, sequence: int, boundary: CheckpointBoundary) -> "HarnessCheckpoint":
-        if boundary is CheckpointBoundary.BEFORE_TOOL and state.started_tool_call_ids:
+        active_tools = state.started_tool_call_ids - state.executed_tool_call_ids
+        if boundary is CheckpointBoundary.BEFORE_TOOL and active_tools:
             raise ValueError("Cannot checkpoint before a tool while a tool may be running")
-        if boundary is CheckpointBoundary.AFTER_TOOL and state.started_tool_call_ids != state.executed_tool_call_ids:
+        if boundary is CheckpointBoundary.AFTER_TOOL and active_tools:
             raise ValueError("Cannot checkpoint after a tool with an incomplete tool call")
         return cls(1, uuid4().hex, run_id, sequence, boundary, HarnessStateSnapshot.from_state(state), datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
 
