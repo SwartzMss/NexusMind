@@ -1,4 +1,5 @@
 import asyncio
+import math
 from copy import deepcopy
 
 from nexusmind.runtime.harness import (
@@ -8,14 +9,26 @@ from nexusmind.runtime.harness import (
     HarnessStateSnapshot,
     InMemoryCheckpointStore,
 )
+from nexusmind.runtime.harness.state import HarnessStatus
+from nexusmind.runtime.harness.stop import StopReason
 from nexusmind.runtime.messages import Message, MessageRole
 
 
 def test_checkpoint_snapshot_isolated_and_serializable() -> None:
-    state = HarnessState(messages=[Message(role=MessageRole.USER, content="hello")])
+    state = HarnessState(messages=[Message(role=MessageRole.USER, content="hello", metadata={"files": ["a.c", "b.c"]})])
     snapshot = HarnessStateSnapshot.from_state(state)
     state.messages[0].metadata["changed"] = True
-    assert snapshot.messages[0].metadata == {}
+    assert snapshot.messages[0].metadata == {"files": ["a.c", "b.c"]}
+
+
+def test_checkpoint_rejects_non_finite_numbers() -> None:
+    state = HarnessState(messages=[Message(role=MessageRole.USER, content="hello", metadata={"value": math.nan})])
+    try:
+        HarnessStateSnapshot.from_state(state)
+    except ValueError as exc:
+        assert "non-finite" in str(exc)
+    else:
+        raise AssertionError("non-finite numbers must not be checkpointed")
 
 
 def test_checkpoint_store_enforces_sequence_and_latest() -> None:
@@ -23,11 +36,16 @@ def test_checkpoint_store_enforces_sequence_and_latest() -> None:
         store = InMemoryCheckpointStore()
         state = HarnessState(messages=[])
         first = HarnessCheckpoint.create(state, "run-1", 0, CheckpointBoundary.BEFORE_MODEL)
-        second = HarnessCheckpoint.create(state, "run-1", 1, CheckpointBoundary.RUN_TERMINAL)
+            state.status = HarnessStatus.COMPLETED
+            state.stop_reason = StopReason.MODEL_COMPLETED
+            second = HarnessCheckpoint.create(state, "run-1", 1, CheckpointBoundary.RUN_TERMINAL)
         await store.save(first)
         await store.save(second)
         assert await store.load_latest("run-1") == second
         assert len(await store.list("run-1")) == 2
+        second.state.messages[0].metadata["mutated"] = True
+        loaded = await store.load_latest("run-1")
+        assert loaded.state.messages[0].metadata.get("mutated") is None
 
     asyncio.run(run())
 
@@ -43,7 +61,7 @@ def test_checkpoint_rejects_secret_like_metadata() -> None:
 
 
 def test_terminal_checkpoint_contains_stop_reason() -> None:
-    state = HarnessState(messages=[], status=__import__("nexusmind.runtime.harness.state", fromlist=["HarnessStatus"]).HarnessStatus.COMPLETED)
+    state = HarnessState(messages=[], status=HarnessStatus.COMPLETED, stop_reason=StopReason.MODEL_COMPLETED)
     checkpoint = HarnessCheckpoint.create(state, "run-terminal", 0, CheckpointBoundary.RUN_TERMINAL)
     assert checkpoint.state.status.value == "completed"
 
@@ -59,6 +77,6 @@ def test_checkpoint_rejects_active_tool() -> None:
     try:
         HarnessCheckpoint.create(state, "run-tool", 0, CheckpointBoundary.AFTER_TOOL)
     except ValueError as exc:
-        assert "incomplete" in str(exc)
+        assert "safe checkpoint" in str(exc)
     else:
         raise AssertionError("active tool must not be checkpointed as after_tool")

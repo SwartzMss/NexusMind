@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+from copy import deepcopy
 from typing import Protocol
 from .checkpoint import HarnessCheckpoint
 
@@ -18,12 +19,12 @@ class InMemoryCheckpointStore:
             items = self._items.setdefault(checkpoint.run_id, [])
             if items and checkpoint.sequence <= items[-1].sequence:
                 raise ValueError("Checkpoint sequence must increase")
-            items.append(checkpoint)
+            items.append(deepcopy(checkpoint))
 
     async def load_latest(self, run_id: str) -> HarnessCheckpoint | None:
         async with self._lock:
-            return self._items.get(run_id, [])[-1] if self._items.get(run_id) else None
+            return deepcopy(self._items.get(run_id, [])[-1]) if self._items.get(run_id) else None
 
     async def list(self, run_id: str) -> tuple[HarnessCheckpoint, ...]:
         async with self._lock:
-            return tuple(self._items.get(run_id, ()))
+            return tuple(deepcopy(item) for item in self._items.get(run_id, ()))

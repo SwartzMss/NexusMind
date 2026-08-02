@@ -71,27 +71,31 @@ class HarnessCheckpoint:
         _ensure_json_size(self)
 
     @classmethod
-    def create(cls, state: HarnessState, run_id: str, sequence: int, boundary: CheckpointBoundary) -> "HarnessCheckpoint":
+    def create(cls, state: HarnessState, run_id: str, sequence: int, boundary: CheckpointBoundary, stop_reason: StopReason | None = None) -> "HarnessCheckpoint":
         active_tools = state.started_tool_call_ids - state.executed_tool_call_ids
-        if boundary is CheckpointBoundary.BEFORE_TOOL and active_tools:
-            raise ValueError("Cannot checkpoint before a tool while a tool may be running")
-        if boundary is CheckpointBoundary.AFTER_TOOL and active_tools:
-            raise ValueError("Cannot checkpoint after a tool with an incomplete tool call")
-        return cls(1, uuid4().hex, run_id, sequence, boundary, HarnessStateSnapshot.from_state(state), datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+        if active_tools:
+            raise ValueError("Cannot create a safe checkpoint while a tool may be running")
+        effective_reason = stop_reason if stop_reason is not None else state.stop_reason
+        if boundary is CheckpointBoundary.RUN_TERMINAL:
+            if state.status is HarnessStatus.RUNNING or effective_reason is None:
+                raise ValueError("Terminal checkpoint requires a terminal status and stop reason")
+        return cls(1, uuid4().hex, run_id, sequence, boundary, HarnessStateSnapshot.from_state(state, effective_reason), datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
 
 def _jsonable(value: Any) -> Any:
     if isinstance(value, Enum): return value.value
-    if isinstance(value, tuple): return [_jsonable(item) for item in value]
+    if isinstance(value, (tuple, list)): return [_jsonable(item) for item in value]
     if isinstance(value, Message): return {"role": value.role.value, "content": value.content, "name": value.name, "tool_call_id": value.tool_call_id, "tool_calls": [_jsonable(call) for call in value.tool_calls], "metadata": _jsonable(value.metadata)}
     if hasattr(value, "__dataclass_fields__"): return {name: _jsonable(getattr(value, name)) for name in value.__dataclass_fields__}
     if isinstance(value, dict): return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, float) and not __import__("math").isfinite(value):
+        raise ValueError("Checkpoint contains a non-finite number")
     if isinstance(value, (str, int, float, bool)) or value is None: return value
     raise ValueError("Checkpoint contains unsupported value")
 
 def _ensure_json_size(value: Any) -> None:
     payload = _jsonable(value)
     _reject_secrets(payload)
-    if len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()) > MAX_CHECKPOINT_BYTES:
+    if len(json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()) > MAX_CHECKPOINT_BYTES:
         raise ValueError("Checkpoint exceeds maximum size")
 
 def _reject_secrets(value: Any) -> None:

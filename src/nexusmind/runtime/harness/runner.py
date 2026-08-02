@@ -22,14 +22,12 @@ class HarnessExecution:
         self.stop_reason: StopReason | None = None
 
     def create_checkpoint(self, run_id: str, sequence: int, boundary: CheckpointBoundary) -> HarnessCheckpoint:
-        return HarnessCheckpoint(
-            schema_version=1,
-            checkpoint_id=uuid4().hex,
+        return HarnessCheckpoint.create(
+            state=self.state,
             run_id=run_id,
             sequence=sequence,
             boundary=boundary,
-            state=HarnessStateSnapshot.from_state(self.state, self.stop_reason),
-            created_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            stop_reason=self.stop_reason,
         )
 
     async def stream(self) -> AsyncIterator[RuntimeEvent]:
