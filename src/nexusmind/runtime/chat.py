@@ -333,17 +333,17 @@ class ChatRuntime:
                                     except asyncio.CancelledError:
                                         raise
                                     except ToolResultBudgetError:
-                                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
+                                        yield _tool_failure_after_start(call, _LIMIT_ERROR)
                                         return
                                     except Exception:
-                                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                                        yield _tool_failure_after_start(call, _RUNTIME_ERROR)
                                         return
                         else:
                             if call.id in started_tool_call_ids:
                                 yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                                 return
                             if not _executor_definition_matches(self._tool_executor, call.name, definition):
-                                yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                                yield _tool_failure_after_start(call, _RUNTIME_ERROR)
                                 return
                             try:
                                 result_budget = _result_budget_for_call(
@@ -353,7 +353,7 @@ class ChatRuntime:
                                     remaining_result_bytes,
                                 )
                             except RuntimeError:
-                                yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                                yield _tool_failure_after_start(call, _RUNTIME_ERROR)
                                 return
                             if result_budget is None:
                                 yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
@@ -367,10 +367,10 @@ class ChatRuntime:
                             except asyncio.CancelledError:
                                 raise
                             except ToolResultBudgetError:
-                                yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_LIMIT_ERROR)
+                                yield _tool_failure_after_start(call, _LIMIT_ERROR)
                                 return
                             except Exception:
-                                yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                                yield _tool_failure_after_start(call, _RUNTIME_ERROR)
                                 return
                     if (
                         not isinstance(result, ToolResult)
@@ -379,13 +379,13 @@ class ChatRuntime:
                         or type(result.name) is not str
                         or not result.name
                     ):
-                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                        yield _tool_failure_after_start(call, _RUNTIME_ERROR)
                         return
                     if str.__ne__(result.call_id, call.id) or str.__ne__(result.name, call.name):
-                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                        yield _tool_failure_after_start(call, _RUNTIME_ERROR)
                         return
                     if not _valid_tool_result(result):
-                        yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
+                        yield _tool_failure_after_start(call, _RUNTIME_ERROR)
                         return
                     try:
                         content_json, size = _tool_result_message_content(
@@ -685,6 +685,9 @@ def _snapshot_tool_call(
         raise RuntimeError("Tool call arguments are not a JSON object")
     return ToolCall(id=call.id, name=call.name, arguments=arguments), size
 
+
+def _tool_failure_after_start(call: ToolCall, error: str) -> RuntimeEvent:
+    return RuntimeEvent(RuntimeEventType.RUN_FAILED, error=error, metadata={"tool_execution_started": True, "call_id": call.id, "tool_name": call.name})
 
 def _valid_tool_result(result: ToolResult) -> bool:
     if type(result.metadata) is not dict:
