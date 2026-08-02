@@ -194,7 +194,7 @@ class ChatRuntime:
                             turn.tool_arguments_size += arguments_size
                             event = replace(
                                 event,
-                                tool_call=safe_tool_call,
+                                tool_call=deepcopy(safe_tool_call),
                                 metadata={
                                     **event.metadata,
                                     "argument_bytes": arguments_size,
