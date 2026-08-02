@@ -773,7 +773,7 @@ async def _run_skill_with_mcp(
     try:
         await group.__aenter__()
     except asyncio.CancelledError:
-        await _best_effort_cancel(store, run_id)
+        await _best_effort_cancel(store, run_id, trace_complete=failure_sink.get("trace_complete"), error_code=failure_sink.get("error_code", "cancelled"), error_message=failure_sink.get("message"), final_text=''.join(text_sink) if record_content else None)
         raise
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
@@ -827,7 +827,7 @@ async def _run_skill_with_mcp(
     try:
         await group.__aexit__(None, None, None)
     except asyncio.CancelledError:
-        await _best_effort_cancel(store, run_id)
+        await _best_effort_cancel(store, run_id, trace_complete=failure_sink.get("trace_complete"), error_code=failure_sink.get("error_code", "cancelled"), error_message=failure_sink.get("message"), final_text=''.join(text_sink) if record_content else None)
         raise
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
