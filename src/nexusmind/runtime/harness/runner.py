@@ -73,6 +73,7 @@ class HarnessExecution:
         self._resume_complete = False
         self._resume_source = None
         self._resume_limit_exceeded = False
+        self._resume_cursor_pending = False
 
     def create_checkpoint(self, run_id: str | None = None, sequence: int | None = None, boundary: CheckpointBoundary | None = None) -> HarnessCheckpoint:
         if self._resume_cursor_pending:
@@ -97,7 +98,6 @@ class HarnessExecution:
         )
 
     async def stream(self) -> AsyncIterator[RuntimeEvent]:
-        self._resume_cursor_pending = False
         if self._resume_complete:
             yield RuntimeEvent(RuntimeEventType.RUN_STARTED, metadata={"resumed": True, "checkpoint_id": self._resume_source.checkpoint_id, "checkpoint_sequence": self._resume_source.sequence, "checkpoint_boundary": self._resume_source.boundary.value})
             self.state.status = HarnessStatus.COMPLETED

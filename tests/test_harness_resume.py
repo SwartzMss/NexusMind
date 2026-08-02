@@ -163,6 +163,45 @@ def test_resume_rejects_checkpoint_before_pending_cursor_advances():
     with pytest.raises(HarnessResumeStateError, match="resume cursor"):
         execution.create_checkpoint(sequence=1)
 
+def test_resume_cursor_stays_blocked_after_run_started():
+    async def run():
+        call = ToolCall(id="call-pending", name="echo", arguments={"text": "hi"})
+        state = HarnessState(messages=[Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(call,))],
+            model_turns=1, phase=HarnessPhase.AFTER_MODEL)
+        checkpoint = HarnessCheckpoint.create(state, "run-cursor-started", 0)
+        registry = ToolRegistry()
+        registry.register(EchoTool())
+        execution = HarnessRunner(FakeChatModel(["done"]), tool_executor=ToolExecutor(registry)).resume_execution(
+            HarnessResumeRequest(checkpoint, tools=(EchoTool().definition,))
+        )
+        stream = execution.stream()
+        first = await anext(stream)
+        assert first.type.value == "run_started"
+        with pytest.raises(HarnessResumeStateError, match="resume cursor"):
+            execution.create_checkpoint(sequence=1)
+        await stream.aclose()
+    asyncio.run(run())
+
+def test_resume_after_model_executes_multiple_pending_tools():
+    async def run():
+        calls = (
+            ToolCall(id="call-1", name="echo", arguments={"text": "one"}),
+            ToolCall(id="call-2", name="echo", arguments={"text": "two"}),
+        )
+        state = HarnessState(messages=[Message(role=MessageRole.ASSISTANT, content=None, tool_calls=calls)],
+            model_turns=1, phase=HarnessPhase.AFTER_MODEL)
+        checkpoint = HarnessCheckpoint.create(state, "run-multiple", 0)
+        registry = ToolRegistry()
+        registry.register(EchoTool())
+        execution = HarnessRunner(FakeChatModel(["done"]), tool_executor=ToolExecutor(registry)).resume_execution(
+            HarnessResumeRequest(checkpoint, tools=(EchoTool().definition,))
+        )
+        events = [event async for event in execution.stream()]
+        results = [event.tool_result.call_id for event in events if event.type.value == "tool_result"]
+        assert results == ["call-1", "call-2"]
+        assert execution.state.executed_tool_call_ids == {"call-1", "call-2"}
+    asyncio.run(run())
+
 def test_resume_rejects_missing_pending_tool_before_execution():
     call = ToolCall(id="call-1", name="echo", arguments={"text": "hi"})
     state = HarnessState(messages=[Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(call,))],
