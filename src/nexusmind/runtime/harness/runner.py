@@ -217,7 +217,13 @@ class HarnessRunner:
             messages=tuple(state.messages),
             tools=tuple(deepcopy(request.tools)),
             limits=limits,
-            metadata={"resumed": True, "checkpoint_id": request.checkpoint.checkpoint_id, "checkpoint_sequence": request.checkpoint.sequence, "checkpoint_boundary": request.checkpoint.boundary.value},
+            metadata={
+                **deepcopy(request.metadata),
+                "resumed": True,
+                "checkpoint_id": request.checkpoint.checkpoint_id,
+                "checkpoint_sequence": request.checkpoint.sequence,
+                "checkpoint_boundary": request.checkpoint.boundary.value,
+            },
         )
         if checkpoint.state.phase is HarnessPhase.BEFORE_TOOL or (
             checkpoint.state.phase is HarnessPhase.AFTER_TOOL and bool(pending)

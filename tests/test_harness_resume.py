@@ -51,6 +51,25 @@ def test_resume_after_model_text_completes_without_model_call():
         assert execution.state.status is HarnessStatus.COMPLETED
     asyncio.run(run())
 
+def test_two_resumes_are_isolated_from_each_other_and_checkpoint():
+    async def run():
+        source_message = Message(role=MessageRole.USER, content="hello", metadata={"nested": {"value": 1}})
+        state = HarnessState(messages=[source_message], model_turns=3, tool_calls_total=2,
+            tool_argument_bytes_total=10, tool_result_bytes_total=20,
+            started_tool_call_ids={"call-1", "call-2"},
+            executed_tool_call_ids={"call-1", "call-2"},
+            phase=HarnessPhase.BEFORE_MODEL)
+        checkpoint = HarnessCheckpoint.create(state, "run-isolated", 4)
+        runner = HarnessRunner(FakeChatModel(["done"]))
+        first = runner.resume_execution(HarnessResumeRequest(checkpoint))
+        second = runner.resume_execution(HarnessResumeRequest(checkpoint))
+        first.state.messages[0].metadata["nested"]["value"] = 99
+        assert second.state.messages[0].metadata["nested"]["value"] == 1
+        assert checkpoint.state.messages[0].metadata["nested"]["value"] == 1
+        assert first.state.model_turns == second.state.model_turns == 3
+        assert first.state.tool_calls_total == second.state.tool_calls_total == 2
+    asyncio.run(run())
+
 def test_resume_after_model_rejects_trailing_transcript():
     state = HarnessState(messages=[
         Message(role=MessageRole.ASSISTANT, content="answer"),
