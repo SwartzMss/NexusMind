@@ -1,4 +1,5 @@
 import asyncio
+import json
 import pytest
 
 from nexusmind.models.fake import FakeChatModel
@@ -13,6 +14,9 @@ from nexusmind.tools.contracts import ToolCall, ToolDefinition, ToolResult
 from nexusmind.tools.builtin import EchoTool
 from nexusmind.tools.executor import ToolExecutor
 from nexusmind.tools.registry import ToolRegistry
+
+def _argument_bytes(*calls):
+    return sum(len(json.dumps(call.arguments, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) for call in calls)
 
 def _before_model_checkpoint():
     state = HarnessState(messages=[Message(role=MessageRole.USER, content="hello")], phase=HarnessPhase.BEFORE_MODEL)
@@ -31,6 +35,22 @@ def test_resume_rejects_terminal_checkpoint():
     checkpoint = HarnessCheckpoint.create(state, "run-1", 0)
     with pytest.raises(HarnessResumeStateError):
         HarnessRunner(FakeChatModel(["done"])).resume_execution(HarnessResumeRequest(checkpoint))
+
+def test_resume_rejects_internal_metadata_controls():
+    with pytest.raises(HarnessResumeStateError, match="reserved"):
+        HarnessRunner(FakeChatModel(["done"])).resume_execution(
+            HarnessResumeRequest(_before_model_checkpoint(), metadata={"resume_tool_batch": True})
+        )
+
+def test_execution_stream_is_single_use():
+    async def run():
+        execution = HarnessRunner(FakeChatModel(["done"])).create_execution(
+            HarnessRequest(messages=(Message(role=MessageRole.USER, content="hello"),))
+        )
+        [event async for event in execution.stream()]
+        with pytest.raises(RuntimeError, match="only be streamed once"):
+            [event async for event in execution.stream()]
+    asyncio.run(run())
 
 def test_resume_after_model_text_completes_without_model_call():
     class CountingModel(FakeChatModel):
@@ -107,7 +127,8 @@ def test_resume_after_tool_with_completed_batch_continues_model():
         state = HarnessState(messages=[
             Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(call,)),
             Message(role=MessageRole.TOOL, name="echo", tool_call_id="call-1", content='{"ok":true}'),
-        ], model_turns=1, tool_calls_total=1, started_tool_call_ids={"call-1"},
+            ], model_turns=1, tool_calls_total=1, tool_argument_bytes_total=_argument_bytes(call),
+                tool_result_bytes_total=len('{"ok":true}'.encode("utf-8")), started_tool_call_ids={"call-1"},
             executed_tool_call_ids={"call-1"}, status=HarnessStatus.RUNNING,
             phase=HarnessPhase.AFTER_TOOL)
         checkpoint = HarnessCheckpoint.create(state, "run-tool", 0)
@@ -161,10 +182,11 @@ def test_resume_tool_phase_at_model_limit_executes_pending_tool(phase):
         kwargs = {}
         if phase is HarnessPhase.AFTER_TOOL:
             messages.append(Message(role=MessageRole.TOOL, name="echo", tool_call_id="call-done", content="{}"))
-            kwargs = {"tool_calls_total": 1, "started_tool_call_ids": {"call-done"}, "executed_tool_call_ids": {"call-done"}}
+            kwargs = {"tool_calls_total": 1, "tool_result_bytes_total": len("{}".encode("utf-8")), "started_tool_call_ids": {"call-done"}, "executed_tool_call_ids": {"call-done"}}
         else:
             messages = [Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(pending,))]
-        state = HarnessState(messages=messages, model_turns=1, phase=phase, **kwargs)
+        accounted = (pending,) if phase is HarnessPhase.BEFORE_TOOL else (first, pending)
+        state = HarnessState(messages=messages, model_turns=1, tool_argument_bytes_total=_argument_bytes(*accounted), phase=phase, **kwargs)
         checkpoint = HarnessCheckpoint.create(state, "run-phase-limit", 0)
         registry = ToolRegistry()
         registry.register(EchoTool())
@@ -281,7 +303,7 @@ def test_resume_before_tool_executes_pending_tool():
     async def run():
         call = ToolCall(id="call-1", name="echo", arguments={"text": "hi"})
         state = HarnessState(messages=[Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(call,))],
-            model_turns=1, status=HarnessStatus.RUNNING, phase=HarnessPhase.BEFORE_TOOL)
+            model_turns=1, tool_argument_bytes_total=_argument_bytes(call), status=HarnessStatus.RUNNING, phase=HarnessPhase.BEFORE_TOOL)
         checkpoint = HarnessCheckpoint.create(state, "run-before-tool", 0)
         registry = ToolRegistry()
         registry.register(EchoTool())
@@ -300,7 +322,8 @@ def test_resume_after_tool_executes_only_remaining_calls():
         state = HarnessState(messages=[
             Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(first, second)),
             Message(role=MessageRole.TOOL, name="echo", tool_call_id="call-1", content='{"ok":true}'),
-        ], model_turns=1, tool_calls_total=1, started_tool_call_ids={"call-1"},
+        ], model_turns=1, tool_calls_total=1, tool_argument_bytes_total=_argument_bytes(first, second),
+            tool_result_bytes_total=len('{"ok":true}'.encode("utf-8")), started_tool_call_ids={"call-1"},
             executed_tool_call_ids={"call-1"}, phase=HarnessPhase.AFTER_TOOL)
         checkpoint = HarnessCheckpoint.create(state, "run-partial-tool", 0)
         registry = ToolRegistry()

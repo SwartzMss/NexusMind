@@ -19,6 +19,11 @@ from nexusmind.runtime.policy import ApprovalProvider, ToolApprovalSummarizer, T
 from nexusmind.tools.executor import ToolExecutorProtocol
 from nexusmind.tools.contracts import ToolCall
 
+_RESERVED_RESUME_METADATA = {
+    "resume_tool_batch", "resume_existing_assistant", "resume_internal",
+    "resumed", "checkpoint_id", "checkpoint_sequence", "checkpoint_boundary",
+}
+
 class _ResumeToolBatchModel:
     def __init__(self, original: ChatModel, calls: tuple[ToolCall, ...]) -> None:
         self._original = original
@@ -74,6 +79,7 @@ class HarnessExecution:
         self._resume_source = None
         self._resume_limit_exceeded = False
         self._resume_cursor_pending = False
+        self._stream_started = False
 
     def create_checkpoint(self, run_id: str | None = None, sequence: int | None = None, boundary: CheckpointBoundary | None = None) -> HarnessCheckpoint:
         if self._resume_cursor_pending:
@@ -98,6 +104,9 @@ class HarnessExecution:
         )
 
     async def stream(self) -> AsyncIterator[RuntimeEvent]:
+        if self._stream_started:
+            raise RuntimeError("HarnessExecution can only be streamed once")
+        self._stream_started = True
         if self._resume_complete:
             yield RuntimeEvent(RuntimeEventType.RUN_STARTED, metadata={"resumed": True, "checkpoint_id": self._resume_source.checkpoint_id, "checkpoint_sequence": self._resume_source.sequence, "checkpoint_boundary": self._resume_source.boundary.value})
             self.state.status = HarnessStatus.COMPLETED
@@ -178,6 +187,8 @@ class HarnessRunner:
         return HarnessExecution(self, request)
 
     def resume_execution(self, request: HarnessResumeRequest) -> HarnessExecution:
+        if _RESERVED_RESUME_METADATA & set(request.metadata):
+            raise HarnessResumeStateError("Resume metadata contains reserved internal fields")
         checkpoint = request.checkpoint
         try:
             checkpoint.validate()
@@ -223,6 +234,9 @@ class HarnessRunner:
                 result_ids.append(message.tool_call_id)
             if len(set(result_ids)) != len(result_ids):
                 raise HarnessResumeStateError("Tool batch contains duplicate Tool results")
+            ordered_call_ids = [call.id for call in assistants[-1].tool_calls]
+            if result_ids != ordered_call_ids[:len(result_ids)]:
+                raise HarnessResumeStateError("Tool results are not an ordered prefix of the Tool Call batch")
             executed_batch_ids = set(checkpoint.state.executed_tool_call_ids) & set(batch_calls)
             if set(result_ids) != executed_batch_ids:
                 raise HarnessResumeStateError("Tool results do not match executed Tool Call IDs")
@@ -245,6 +259,26 @@ class HarnessRunner:
                 raise HarnessResumeStateError("Tool call count does not match the transcript")
             if set(checkpoint.state.executed_tool_call_ids) != set(transcript_result_ids):
                 raise HarnessResumeStateError("Executed Tool Call IDs do not match the transcript")
+            accounted_calls = transcript_call_ids
+            if checkpoint.state.phase is HarnessPhase.AFTER_MODEL:
+                accounted_calls = transcript_call_ids[:-len(assistants[-1].tool_calls)] if assistants[-1].tool_calls else transcript_call_ids
+            calls_by_id = {
+                call.id: call
+                for message in messages if message.role.value == "assistant"
+                for call in message.tool_calls
+            }
+            required_argument_bytes = sum(
+                len(json.dumps(calls_by_id[call_id].arguments, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+                for call_id in accounted_calls
+            )
+            required_result_bytes = sum(
+                len((message.content or "").encode("utf-8"))
+                for message in messages if message.role.value == "tool"
+            )
+            if checkpoint.state.tool_argument_bytes_total < required_argument_bytes:
+                raise HarnessResumeStateError("Tool argument byte counter is below transcript consumption")
+            if checkpoint.state.tool_result_bytes_total < required_result_bytes:
+                raise HarnessResumeStateError("Tool result byte counter is below transcript consumption")
             if pending:
                 requested_tool_names = [tool.name for tool in request.tools]
                 if len(set(requested_tool_names)) != len(requested_tool_names):
