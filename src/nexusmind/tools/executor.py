@@ -179,6 +179,8 @@ class ToolExecutor:
             )
 
         truncated = isinstance(output, dict) and bool(output.get("truncated") or output.get("stdout_truncated") or output.get("stderr_truncated"))
+        if result_budget is not None and not result_budget.satisfies(_result_requirements(ToolResult(call_id=call.id, name=call.name, output=output))):
+            output, truncated = _truncate_string_output(output, call, result_budget)
         return _return_with_budget(
             ToolResult(call_id=call.id, name=call.name, output=output, metadata={"result_truncated": truncated}),
             result_budget,
@@ -193,6 +195,18 @@ def _return_with_budget(result: ToolResult, budget: ToolResultBudget | None) -> 
     if budget is not None and not budget.satisfies(_result_requirements(result)):
         raise ToolResultBudgetError("Tool result budget is too small")
     return result
+
+def _truncate_string_output(output: Any, call: ToolCall, budget: ToolResultBudget) -> tuple[Any, bool]:
+    if not isinstance(output, str):
+        raise ToolResultBudgetError("Tool result budget is too small")
+    low, high = 0, len(output)
+    while low < high:
+        middle = (low + high + 1) // 2
+        candidate = ToolResult(call_id=call.id, name=call.name, output=output[:middle])
+        if budget.satisfies(_result_requirements(candidate)): low = middle
+        else: high = middle - 1
+    if low == 0: raise ToolResultBudgetError("Tool result budget is too small")
+    return output[:low], True
 
 
 def _default_result_requirements() -> ToolResultRequirements:
