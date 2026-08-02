@@ -236,7 +236,7 @@ async def _run_chat_with_mcp(
     model_config: ModelConfig,
     state_db: str | None = None, record_content: bool = False,
 ) -> int:
-    store = None; run_id = None; text_sink: list[str] = []; return_code = 1; runtime_started = False
+    store = None; run_id = None; text_sink: list[str] = []; failure_sink = {}; return_code = 1; runtime_started = False
     try:
         if state_db:
             store = SQLiteRunStore(state_db)
@@ -285,7 +285,7 @@ async def _run_chat_with_mcp(
                 executor_timeout=config.request_timeout,
                 workspace=_registry_workspace(registry),
                 state_db=state_db, record_content=record_content,
-                external_store=store, external_run_id=run_id, final_text_sink=text_sink,
+                external_store=store, external_run_id=run_id, final_text_sink=text_sink, failure_sink=failure_sink,
             )
     except BaseException as exc:
         try:
@@ -304,11 +304,11 @@ async def _run_chat_with_mcp(
         raise
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
-        await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_cleanup_failed", error_message="MCP server cleanup failed")
+        await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_cleanup_failed", error_message="MCP server cleanup failed", final_text=''.join(text_sink) if record_content else None)
         _best_effort_close(store)
         return 1
     if store and run_id and runtime_started:
-        try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED, final_text=''.join(text_sink) if record_content else None)
+        try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED, error_code=failure_sink.get("error_code"), error_message=failure_sink.get("message"), trace_complete=failure_sink.get("trace_complete"), final_text=''.join(text_sink) if record_content else None)
         except StateStoreError:
             print("State error: Run final status could not be persisted", file=sys.stderr); return_code = 1
         _best_effort_close(store)
@@ -327,7 +327,7 @@ async def _run_chat(
     workspace: Workspace | None = None,
     state_db: str | None = None, record_content: bool = False, run_kind: RunKind = RunKind.CHAT,
     skill_name: str | None = None,
-    external_store=None, external_run_id: str | None = None, final_text_sink=None,
+    external_store=None, external_run_id: str | None = None, final_text_sink=None, failure_sink=None,
 ) -> int:
     store = external_store; run_id = external_run_id; owns_store = store is None
     if state_db and store is None:
@@ -385,6 +385,7 @@ async def _run_chat(
             elif event.type == RuntimeEventType.RUN_FAILED:
                 failed = True; failure_message = _safe_cli_field(event.error or "Runtime execution failed", max_length=1024)
                 if event.metadata.get("tool_execution_started"): trace_complete = False
+                if failure_sink is not None: failure_sink.update(error_code="tool_result_unavailable" if not trace_complete else "runtime_failed", message=failure_message, trace_complete=trace_complete)
                 print(f"\nModel error: {failure_message}", file=sys.stderr)
         if not failed: print()
         if store and run_id and owns_store:
@@ -750,7 +751,7 @@ async def _run_skill_with_mcp(
     limits: AgentLoopLimits,
     state_db: str | None = None, record_content: bool = False,
 ) -> int:
-    store = None; run_id = None; text_sink: list[str] = []; return_code = 1
+    store = None; run_id = None; text_sink: list[str] = []; failure_sink = {}; return_code = 1
     try:
         if state_db:
             store = SQLiteRunStore(state_db)
@@ -802,7 +803,7 @@ async def _run_skill_with_mcp(
                 limits=limits,
                 workspace=_registry_workspace(registry),
                 state_db=state_db, record_content=record_content, run_kind=RunKind.SKILL, skill_name=skill.name,
-                external_store=store, external_run_id=run_id, final_text_sink=text_sink,
+                external_store=store, external_run_id=run_id, final_text_sink=text_sink, failure_sink=failure_sink,
             )
     except BaseException as exc:
         try:
@@ -822,11 +823,11 @@ async def _run_skill_with_mcp(
         raise
     except MCPError as exc:
         print(f"MCP error: {_safe_cli_field(str(exc), max_length=240)}", file=sys.stderr)
-        await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_cleanup_failed", error_message="MCP server cleanup failed")
+        await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="mcp_cleanup_failed", error_message="MCP server cleanup failed", final_text=''.join(text_sink) if record_content else None)
         _best_effort_close(store)
         return 1
     if store and run_id and "tools" in locals():
-        try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED, final_text=''.join(text_sink) if record_content else None)
+        try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED, error_code=failure_sink.get("error_code"), error_message=failure_sink.get("message"), trace_complete=failure_sink.get("trace_complete"), final_text=''.join(text_sink) if record_content else None)
         except StateStoreError:
             print("State error: Run final status could not be persisted", file=sys.stderr); return_code = 1
         _best_effort_close(store)
