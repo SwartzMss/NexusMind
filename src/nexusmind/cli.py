@@ -458,7 +458,9 @@ def _runs(args: argparse.Namespace) -> int:
             if item is None: print("Run error: run not found",file=sys.stderr); return 2
             if args.json: print(json.dumps(item,default=str,ensure_ascii=False)); return 0
             print("Run ID\t"+str(item["run"]["id"])); print("Status\t"+str(item["run"]["status"])); print("Events\t"+str(len(item["events"])))
-            for e in item["events"]: print(f"{e['sequence']}\t{e['event_type']}\t{e['occurred_at']}")
+            for e in item["events"]:
+                p=e["payload"]; summary=" ".join(f"{k}={p[k]}" for k in ("tool_name","risk_level","decision","path","committed","exit_code","server_id","remote_tool_name") if k in p)
+                print(f"{e['sequence']}\t{e['event_type']}\t{e['occurred_at']}" + (f"\t{summary}" if summary else ""))
             return 0
         if args.runs_command == "recover":
             store.recover_abandoned(); print("Recovered abandoned runs"); return 0

@@ -49,7 +49,7 @@ CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC); CREATE 
     def _recover_abandoned(self):
         now=_now(); rows=self.db.execute("SELECT id FROM runs WHERE status='running' AND execution_id<>?",(self.execution_id,)).fetchall()
         for (run_id,) in rows:
-            cur=self.db.execute("UPDATE runs SET status='abandoned',updated_at=?,finished_at=?,error_message=? WHERE id=? AND status='running'",(now,now,"Previous NexusMind process ended before the run reached a terminal state",run_id))
+            cur=self.db.execute("UPDATE runs SET status='abandoned',trace_complete=0,error_code='process_abandoned',updated_at=?,finished_at=?,error_message=? WHERE id=? AND status='running'",(now,now,"Previous NexusMind process ended before the run reached a terminal state",run_id))
             if cur.rowcount == 0: continue
             seq=self.db.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM run_events WHERE run_id=?",(run_id,)).fetchone()[0]
             payload=json.dumps({"reason":"previous_process"})
@@ -64,6 +64,7 @@ CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC); CREATE 
         payload=json.dumps({"kind":context.kind.value},separators=(',',':')); self.db.execute("INSERT INTO run_events VALUES(?,?,?,?,?,?)",(run_id,1,"run_started",now,payload,len(payload))); self.db.commit(); return run_id
     @_async_db_error
     async def append_event(self, run_id, event: RunTraceEvent):
+        if self.db.execute("SELECT status FROM runs WHERE id=?",(run_id,)).fetchone() != ("running",): raise StateStoreError("Run is not running")
         raw=json.dumps(event.payload,ensure_ascii=False,allow_nan=False,separators=(',',':')).encode()
         if len(raw)>MAX_EVENT_BYTES: raise StateStoreError("Run event payload exceeds limit")
         row=self.db.execute("SELECT event_count FROM runs WHERE id=?",(run_id,)).fetchone()
@@ -71,6 +72,7 @@ CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC); CREATE 
         seq=row[0]+1; self.db.execute("INSERT INTO run_events VALUES(?,?,?,?,?,?)",(run_id,seq,event.event_type,event.occurred_at.isoformat(),raw.decode(),len(raw))); self.db.execute("UPDATE runs SET event_count=?,updated_at=? WHERE id=?",(seq,_now(),run_id)); self.db.commit()
     @_async_db_error
     async def finish_run(self, run_id, status, *, error_code=None, error_message=None, trace_complete=None, final_text=None):
+        if status is RunStatus.RUNNING: raise StateStoreError("Run finish status must be terminal")
         bounded=(final_text or '').encode('utf-8')[:MAX_FINAL_TEXT].decode('utf-8','ignore') or None
         now=_now(); cur=self.db.execute("UPDATE runs SET status=?,error_code=?,error_message=?,trace_complete=COALESCE(?,trace_complete),final_text=COALESCE(?,final_text),updated_at=?,finished_at=? WHERE id=? AND status='running'",(status.value,error_code,(error_message or '')[:1024] or None, None if trace_complete is None else int(trace_complete), bounded,now,now,run_id))
         if cur.rowcount: 
