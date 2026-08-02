@@ -58,7 +58,7 @@ CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC); CREATE 
     @_async_db_error
     async def start_run(self, context: RunStartContext):
         run_id=uuid.uuid4().hex; now=_now(); digest=hashlib.sha256((context.input_text or '').encode()).hexdigest()
-        preview=(context.input_text or '')[:512] if context.record_content else None
+        preview=(context.input_text or '').encode('utf-8')[:512].decode('utf-8','ignore') if context.record_content else None
         self.db.execute("INSERT INTO runs(id,schema_version,execution_id,kind,status,skill_name,model_name,input_preview,input_sha256,started_at,updated_at,event_count) VALUES(?,?,?,?,?,?,?,?,?,?,?,1)",(run_id,1,self.execution_id,context.kind.value,'running',context.skill_name,context.model_name,preview,digest,now,now))
         payload=json.dumps({"kind":context.kind.value},separators=(',',':')); self.db.execute("INSERT INTO run_events VALUES(?,?,?,?,?,?)",(run_id,1,"run_started",now,payload,len(payload))); self.db.commit(); return run_id
     @_async_db_error

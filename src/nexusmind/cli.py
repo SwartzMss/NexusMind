@@ -55,6 +55,9 @@ def _best_effort_close(store) -> None:
         try: store.close()
         except StateStoreError: pass
 
+def _truncate_utf8(value: str, limit: int) -> str:
+    return value.encode("utf-8")[:limit].decode("utf-8", "ignore")
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="nexusmind")
@@ -278,7 +281,7 @@ async def _run_chat_with_mcp(
                 executor_timeout=config.request_timeout,
                 workspace=_registry_workspace(registry),
                 state_db=state_db, record_content=record_content,
-                external_store=store, external_run_id=run_id,
+                external_store=store, external_run_id=run_id, final_text_sink=(text_sink := []),
             )
     except BaseException as exc:
         try:
@@ -301,7 +304,7 @@ async def _run_chat_with_mcp(
         _best_effort_close(store)
         return 1
     if store and run_id:
-        try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED)
+        try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED, final_text=''.join(text_sink) if record_content else None)
         except StateStoreError: return_code = 1
         _best_effort_close(store)
     return return_code
@@ -319,7 +322,7 @@ async def _run_chat(
     workspace: Workspace | None = None,
     state_db: str | None = None, record_content: bool = False, run_kind: RunKind = RunKind.CHAT,
     skill_name: str | None = None,
-    external_store=None, external_run_id: str | None = None,
+    external_store=None, external_run_id: str | None = None, final_text_sink=None,
 ) -> int:
     store = external_store; run_id = external_run_id; owns_store = store is None
     if state_db and store is None:
@@ -343,14 +346,17 @@ async def _run_chat(
         stream_kwargs["system_prompt"] = system_prompt
     try:
         async for event in runtime.stream_user_message(message, **stream_kwargs):
-            if store and run_id and event.type not in {RuntimeEventType.RUN_STARTED, RuntimeEventType.RUN_COMPLETED, RuntimeEventType.RUN_FAILED}:
+            if store and run_id and event.type not in {RuntimeEventType.RUN_STARTED, RuntimeEventType.RUN_COMPLETED, RuntimeEventType.RUN_FAILED, RuntimeEventType.TEXT_DELTA, RuntimeEventType.TOOL_CALL_DELTA}:
                 try: await store.append_event(run_id, RunTraceEvent(event.type.value, datetime.now(timezone.utc), project_runtime_event(event)))
                 except StateStoreError:
                     try: await store.finish_run(run_id, RunStatus.FAILED, error_code="trace_persist_failed", error_message="Run trace could not be persisted", trace_complete=False)
                     except StateStoreError: pass
                     return 1
             if event.type == RuntimeEventType.TEXT_DELTA and event.text:
-                final_text.append(event.text); print(event.text, end="", flush=True)
+                if record_content and store and run_id:
+                    current=_truncate_utf8(''.join(final_text)+event.text, 1024*1024); final_text.clear(); final_text.append(current)
+                    if final_text_sink is not None: final_text_sink.clear(); final_text_sink.append(current)
+                print(event.text, end="", flush=True)
             elif event.type == RuntimeEventType.RUN_FAILED: failed = True; print(f"\nModel error: {event.error}", file=sys.stderr)
         if not failed: print()
         if store and run_id and owns_store:
@@ -409,6 +415,9 @@ def project_runtime_event(event) -> dict:
         payload.update(call_id=result.call_id, tool_name=result.name, ok=result.error is None, result_bytes=len(json.dumps(output, ensure_ascii=False, default=str).encode()), error_code=getattr(result.error.code, 'value', None) if result.error else None)
         if result.name == "run_command" and isinstance(output, dict):
             payload.update(profile=output.get("profile"), cwd=output.get("cwd"), exit_code=output.get("exit_code"), timed_out=output.get("timed_out"), duration_ms=output.get("duration_ms"), stdout_bytes=len(str(output.get("stdout", "")).encode()), stderr_bytes=len(str(output.get("stderr", "")).encode()), stdout_truncated=output.get("stdout_truncated"), stderr_truncated=output.get("stderr_truncated"))
+        if result.name in {"write_file", "replace_text"} and isinstance(output, dict):
+            for key in ("path", "operation", "previous_sha256", "sha256", "bytes_written", "replacements", "committed", "cleanup_warning"):
+                if key in output: payload[key] = output[key]
     return payload
 
 def _runs(args: argparse.Namespace) -> int:
@@ -762,7 +771,7 @@ async def _run_skill_with_mcp(
                 limits=limits,
                 workspace=_registry_workspace(registry),
                 state_db=state_db, record_content=record_content, run_kind=RunKind.SKILL, skill_name=skill.name,
-                external_store=store, external_run_id=run_id,
+                external_store=store, external_run_id=run_id, final_text_sink=(text_sink := []),
             )
     except BaseException as exc:
         try:
@@ -786,7 +795,7 @@ async def _run_skill_with_mcp(
         _best_effort_close(store)
         return 1
     if store and run_id:
-        try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED)
+        try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED, final_text=''.join(text_sink) if record_content else None)
         except StateStoreError: return_code = 1
         _best_effort_close(store)
     return return_code
