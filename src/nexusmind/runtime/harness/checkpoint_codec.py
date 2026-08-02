@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from typing import Any
-from collections import OrderedDict
 
 from nexusmind.runtime.harness.checkpoint import HarnessCheckpoint
 from nexusmind.runtime.harness.state import HarnessPhase, HarnessStatus
@@ -17,7 +16,7 @@ class CheckpointDecodeError(ValueError):
 MAX_CODEC_PAYLOAD_BYTES = 4 * 1024 * 1024
 
 def _reject_duplicate_pairs(pairs):
-    result = OrderedDict()
+    result = {}
     for key, value in pairs:
         if key in result:
             raise CheckpointDecodeError("Checkpoint payload contains duplicate JSON fields")

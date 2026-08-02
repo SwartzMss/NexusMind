@@ -71,7 +71,7 @@ class SQLiteCheckpointStore:
             columns = [item[2] for item in db.execute(f'PRAGMA index_info("{safe_index_name}")')]
             if is_unique == 1 and is_partial == 0 and columns == ["run_id", "sequence"]:
                 unique_run_sequence = True
-            if index_name == "idx_harness_checkpoints_run_sequence" and columns == ["run_id", "sequence"]:
+            if index_name == "idx_harness_checkpoints_run_sequence" and is_partial == 0 and columns == ["run_id", "sequence"]:
                 query_index = True
         if not unique_run_sequence:
             raise CheckpointStoreError("Checkpoint database is missing the run sequence uniqueness constraint")

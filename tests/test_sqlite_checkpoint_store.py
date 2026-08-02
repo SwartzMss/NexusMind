@@ -16,6 +16,7 @@ from nexusmind.runtime.harness import (
 from nexusmind.runtime.harness.checkpoint_codec import CheckpointDecodeError, checkpoint_from_json
 from nexusmind.models.fake import FakeChatModel
 from nexusmind.runtime.messages import Message, MessageRole
+from nexusmind.tools.contracts import ToolCall
 
 
 def _checkpoint(sequence: int) -> HarnessCheckpoint:
@@ -208,6 +209,27 @@ def test_two_stores_preserve_monotonic_sequences(tmp_path) -> None:
             await stores[index % 2].save(_checkpoint(index))
         loaded = await stores[0].list("run-1")
         assert [item.sequence for item in loaded] == list(range(6))
+    asyncio.run(run())
+
+
+def test_tool_call_checkpoint_round_trip(tmp_path) -> None:
+    async def run():
+        state = HarnessState(
+            messages=[Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(ToolCall(id="call-1", name="write_file", arguments={"path": "a.txt"}),)), Message(role=MessageRole.TOOL, content='{"ok":true}', name="write_file", tool_call_id="call-1")],
+            model_turns=1,
+            tool_calls_total=1,
+            started_tool_call_ids={"call-1"},
+            executed_tool_call_ids={"call-1"},
+            status=HarnessStatus.COMPLETED,
+            stop_reason=StopReason.MODEL_COMPLETED,
+            phase=HarnessPhase.TERMINAL,
+        )
+        store = SQLiteCheckpointStore(tmp_path / "tool.db")
+        await store.initialize()
+        await store.save(HarnessCheckpoint.create(state, "tool-run", 0))
+        loaded = await store.load_latest("tool-run")
+        call = loaded.state.messages[0].tool_calls[0]
+        assert (call.id, call.name, call.arguments) == ("call-1", "write_file", {"path": "a.txt"})
     asyncio.run(run())
 
 
