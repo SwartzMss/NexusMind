@@ -355,6 +355,18 @@ async def _run_chat(
             if store and run_id and event.type not in {RuntimeEventType.RUN_STARTED, RuntimeEventType.RUN_COMPLETED, RuntimeEventType.RUN_FAILED, RuntimeEventType.TEXT_DELTA, RuntimeEventType.TOOL_CALL_DELTA}:
                 try:
                     projected = project_runtime_event(event)
+                    if event.tool_call is not None:
+                        try: definition = registry.definition(event.tool_call.name); projected["risk_level"] = definition.risk_level.value
+                        except Exception: projected["risk_level"] = "unspecified"
+                        try:
+                            tool = registry.get(event.tool_call.name)
+                            if hasattr(tool, "server_id"): projected.update(server_id=tool.server_id, remote_tool_name=tool.remote_name)
+                        except Exception: pass
+                    if event.tool_result is not None:
+                        try:
+                            tool = registry.get(event.tool_result.name)
+                            if hasattr(tool, "server_id"): projected.update(server_id=tool.server_id, remote_tool_name=tool.remote_name)
+                        except Exception: pass
                     if event.type == RuntimeEventType.MODEL_TURN_COMPLETED: projected["text_bytes"] = current_text_bytes
                     await store.append_event(run_id, RunTraceEvent(event.type.value, datetime.now(timezone.utc), projected))
                 except StateStoreError:
@@ -809,7 +821,8 @@ async def _run_skill_with_mcp(
         return 1
     if store and run_id:
         try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED, final_text=''.join(text_sink) if record_content else None)
-        except StateStoreError: return_code = 1
+        except StateStoreError:
+            print("State error: Run final status could not be persisted", file=sys.stderr); return_code = 1
         _best_effort_close(store)
     return return_code
 
