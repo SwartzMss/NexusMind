@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import json
 from copy import deepcopy
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -146,6 +147,8 @@ class HarnessRunner:
                 raise HarnessResumeStateError("Checkpoint has no pending Tool Call")
             elif pending:
                 state = HarnessState(messages=deepcopy(list(checkpoint.state.messages)), model_turns=checkpoint.state.model_turns, tool_calls_total=checkpoint.state.tool_calls_total, tool_argument_bytes_total=checkpoint.state.tool_argument_bytes_total, tool_result_bytes_total=checkpoint.state.tool_result_bytes_total, started_tool_call_ids=set(checkpoint.state.started_tool_call_ids), executed_tool_call_ids=set(checkpoint.state.executed_tool_call_ids), status=checkpoint.state.status, phase=checkpoint.state.phase)
+                pending_argument_bytes = sum(len(json.dumps(call.arguments, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) for call in pending)
+                state.tool_argument_bytes_total = max(0, state.tool_argument_bytes_total - pending_argument_bytes)
                 state.messages.pop()
                 state.phase = HarnessPhase.BEFORE_MODEL
                 state.model_turns = max(0, state.model_turns - 1)
