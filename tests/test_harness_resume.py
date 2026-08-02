@@ -26,3 +26,22 @@ def test_resume_rejects_terminal_checkpoint():
     checkpoint = HarnessCheckpoint.create(state, "run-1", 0)
     with pytest.raises(HarnessResumeStateError):
         HarnessRunner(FakeChatModel(["done"])).resume_execution(HarnessResumeRequest(checkpoint))
+
+def test_resume_after_model_text_completes_without_model_call():
+    class CountingModel(FakeChatModel):
+        def __init__(self):
+            super().__init__(["unexpected"])
+            self.calls = 0
+        async def stream(self, messages, tools=None):
+            self.calls += 1
+            async for event in super().stream(messages, tools=tools):
+                yield event
+    async def run():
+        state = HarnessState(messages=[Message(role=MessageRole.ASSISTANT, content="answer")], model_turns=1, status=HarnessStatus.RUNNING, phase=HarnessPhase.AFTER_MODEL)
+        checkpoint = HarnessCheckpoint.create(state, "run-text", 0)
+        model = CountingModel()
+        execution = HarnessRunner(model).resume_execution(HarnessResumeRequest(checkpoint))
+        [event async for event in execution.stream()]
+        assert model.calls == 0
+        assert execution.state.status is HarnessStatus.COMPLETED
+    asyncio.run(run())
