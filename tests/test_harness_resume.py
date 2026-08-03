@@ -6,7 +6,7 @@ from nexusmind.models.fake import FakeChatModel
 from nexusmind.runtime.harness import (
     CheckpointBoundary, HarnessCheckpoint, HarnessPhase, HarnessRequest,
     HarnessResumeCompatibilityError, HarnessResumeRequest, HarnessResumeStateError, HarnessRunner, HarnessState,
-    HarnessStatus, StopReason,
+    HarnessStatus, SQLiteCheckpointStore, StopReason,
 )
 from nexusmind.runtime.harness.limits import HarnessLimits
 from nexusmind.runtime.messages import Message, MessageRole
@@ -367,6 +367,71 @@ def test_resume_before_tool_executes_pending_tool():
         events = [event async for event in execution.stream()]
         assert any(event.type.value == "tool_result" for event in events)
         assert execution.state.executed_tool_call_ids == {"call-1"}
+    asyncio.run(run())
+
+def test_resume_before_tool_mid_batch_executes_only_remaining_call():
+    async def run():
+        first = ToolCall(id="call-1", name="echo", arguments={"text": "one"})
+        second = ToolCall(id="call-2", name="echo", arguments={"text": "two"})
+        state = HarnessState(messages=[
+            Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(first, second)),
+            Message(role=MessageRole.TOOL, name="echo", tool_call_id="call-1", content="{}"),
+        ], model_turns=1, tool_calls_total=1, tool_argument_bytes_total=_argument_bytes(first, second),
+            tool_result_bytes_total=2, started_tool_call_ids={"call-1"}, executed_tool_call_ids={"call-1"},
+            phase=HarnessPhase.BEFORE_TOOL)
+        checkpoint = HarnessCheckpoint.create(state, "run-before-second", 0)
+        registry = ToolRegistry(); registry.register(EchoTool())
+        execution = HarnessRunner(FakeChatModel(["done"]), tool_executor=ToolExecutor(registry)).resume_execution(
+            HarnessResumeRequest(checkpoint, tools=(EchoTool().definition,))
+        )
+        events = [event async for event in execution.stream()]
+        assert [event.tool_result.call_id for event in events if event.type.value == "tool_result"] == ["call-2"]
+        assert [message.tool_call_id for message in execution.state.messages if message.role is MessageRole.TOOL] == ["call-1", "call-2"]
+    asyncio.run(run())
+
+def test_sqlite_load_latest_resume_partial_tool_batch(tmp_path):
+    class RecordingExecutor(ToolExecutor):
+        def __init__(self, registry):
+            super().__init__(registry); self.calls = []
+        async def execute_with_result_budget(self, call, *, result_budget):
+            self.calls.append(call.id)
+            return await super().execute_with_result_budget(call, result_budget=result_budget)
+
+    async def run():
+        path = tmp_path / "resume.db"
+        calls = (
+            ToolCall(id="call-1", name="echo", arguments={"text": "one"}),
+            ToolCall(id="call-2", name="echo", arguments={"text": "two"}),
+        )
+        source = HarnessCheckpoint.create(HarnessState(
+            messages=[Message(role=MessageRole.ASSISTANT, content=None, tool_calls=calls)],
+            model_turns=1, phase=HarnessPhase.AFTER_MODEL,
+        ), "sqlite-run", 0)
+        store = SQLiteCheckpointStore(path); await store.initialize(); await store.save(source); await store.close()
+        reopened = SQLiteCheckpointStore(path); await reopened.initialize(); loaded = await reopened.load_latest("sqlite-run")
+        registry = ToolRegistry(); registry.register(EchoTool())
+        first_executor = RecordingExecutor(registry)
+        execution = HarnessRunner(FakeChatModel(["done"]), tool_executor=first_executor).resume_execution(
+            HarnessResumeRequest(loaded, tools=(EchoTool().definition,))
+        )
+        stream = execution.stream()
+        async for event in stream:
+            if event.type.value == "tool_result":
+                partial = execution.create_checkpoint(sequence=1)
+                await reopened.save(partial); await stream.aclose(); break
+        await reopened.close()
+        assert first_executor.calls == ["call-1"]
+        final_store = SQLiteCheckpointStore(path); await final_store.initialize(); partial_loaded = await final_store.load_latest("sqlite-run")
+        second_executor = RecordingExecutor(registry)
+        final_execution = HarnessRunner(FakeChatModel(["done"]), tool_executor=second_executor).resume_execution(
+            HarnessResumeRequest(partial_loaded, tools=(EchoTool().definition,))
+        )
+        [event async for event in final_execution.stream()]
+        assert second_executor.calls == ["call-2"]
+        final = final_execution.create_checkpoint(sequence=2); await final_store.save(final); await final_store.close()
+        verify = SQLiteCheckpointStore(path); await verify.initialize(); latest = await verify.load_latest("sqlite-run"); await verify.close()
+        assert latest.sequence == 2 and latest.run_id == "sqlite-run"
+        assert set(latest.state.executed_tool_call_ids) == {"call-1", "call-2"}
     asyncio.run(run())
 
 def test_resume_after_tool_executes_only_remaining_calls():
