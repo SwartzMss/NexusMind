@@ -18,6 +18,11 @@ from nexusmind.tools.registry import ToolRegistry
 def _argument_bytes(*calls):
     return sum(len(json.dumps(call.arguments, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) for call in calls)
 
+def _echo_executor():
+    registry = ToolRegistry()
+    registry.register(EchoTool())
+    return ToolExecutor(registry)
+
 def _before_model_checkpoint():
     state = HarnessState(messages=[Message(role=MessageRole.USER, content="hello")], phase=HarnessPhase.BEFORE_MODEL)
     return HarnessCheckpoint.create(state, "run-1", 3)
@@ -51,7 +56,7 @@ def test_resumed_execution_preserves_source_phase_before_stream():
         model_turns=1, phase=HarnessPhase.BEFORE_TOOL,
         tool_argument_bytes_total=_argument_bytes(call))
     checkpoint = HarnessCheckpoint.create(state, "run-phase", 0)
-    execution = HarnessRunner(FakeChatModel(["done"])).resume_execution(
+    execution = HarnessRunner(FakeChatModel(["done"]), tool_executor=_echo_executor()).resume_execution(
         HarnessResumeRequest(checkpoint, tools=(EchoTool().definition,))
     )
     assert execution.state.phase is HarnessPhase.BEFORE_TOOL
@@ -113,6 +118,18 @@ def test_resumed_checkpoint_defaults_to_source_run_id():
         execution.create_checkpoint(sequence=3)
     with pytest.raises(HarnessResumeStateError):
         execution.create_checkpoint(run_id="other-run", sequence=5)
+
+def test_resumed_execution_requires_monotonic_checkpoint_sequences():
+    checkpoint = _before_model_checkpoint()
+    execution = HarnessRunner(FakeChatModel(["done"])).resume_execution(HarnessResumeRequest(checkpoint))
+    first = execution.create_checkpoint(sequence=4)
+    assert first.sequence == 4
+    with pytest.raises(HarnessResumeStateError, match="monotonically"):
+        execution.create_checkpoint(sequence=4)
+    second = execution.create_checkpoint(sequence=5)
+    assert second.sequence == 5
+    with pytest.raises(HarnessResumeStateError, match="monotonically"):
+        execution.create_checkpoint(sequence=4)
 
 def test_two_resumes_are_isolated_from_each_other_and_checkpoint():
     async def run():
@@ -234,7 +251,7 @@ def test_resume_rejects_checkpoint_before_pending_cursor_advances():
     state = HarnessState(messages=[Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(call,))],
         model_turns=1, phase=HarnessPhase.AFTER_MODEL)
     checkpoint = HarnessCheckpoint.create(state, "run-cursor", 0)
-    execution = HarnessRunner(FakeChatModel(["done"])).resume_execution(
+    execution = HarnessRunner(FakeChatModel(["done"]), tool_executor=_echo_executor()).resume_execution(
         HarnessResumeRequest(checkpoint, tools=(EchoTool().definition,))
     )
     with pytest.raises(HarnessResumeStateError, match="resume cursor"):

@@ -8,7 +8,7 @@ from uuid import uuid4
 from collections.abc import AsyncIterator
 from nexusmind.models.base import ChatModel
 from nexusmind.runtime.harness.limits import HarnessLimits
-from nexusmind.runtime.harness.runner_impl import _LegacyHarnessRuntime
+from nexusmind.runtime.harness.runner_impl import _LegacyHarnessRuntime, _snapshot_tool_call
 from nexusmind.runtime.events import RuntimeEvent, RuntimeEventType
 from nexusmind.runtime.harness.context import HarnessRequest
 from nexusmind.runtime.harness.state import HarnessPhase, HarnessState, HarnessStatus
@@ -134,6 +134,7 @@ class HarnessExecution:
         self._stream_started = False
         self._resume_tool_batch = False
         self._skip_assistant_once = False
+        self._last_checkpoint_sequence: int | None = None
 
     def create_checkpoint(self, run_id: str | None = None, sequence: int | None = None, boundary: CheckpointBoundary | None = None) -> HarnessCheckpoint:
         if self._resume_cursor_pending:
@@ -149,13 +150,17 @@ class HarnessExecution:
                 raise HarnessResumeStateError("Resumed checkpoint sequence must increase")
         elif run_id is None or sequence is None:
             raise ValueError("Checkpoint run_id and sequence are required")
-        return HarnessCheckpoint.create(
+        if self._last_checkpoint_sequence is not None and sequence <= self._last_checkpoint_sequence:
+            raise HarnessResumeStateError("Checkpoint sequence must increase monotonically")
+        checkpoint = HarnessCheckpoint.create(
             state=self.state,
             run_id=run_id,
             sequence=sequence,
             boundary=boundary,
             stop_reason=self.stop_reason,
         )
+        self._last_checkpoint_sequence = sequence
+        return checkpoint
 
     async def stream(self) -> AsyncIterator[RuntimeEvent]:
         if self._stream_started:
@@ -355,6 +360,22 @@ class HarnessRunner:
                     raise HarnessResumeCompatibilityError(
                         "Resume request is missing tools required by the checkpoint"
                     )
+                if self._tool_executor is None:
+                    raise HarnessResumeCompatibilityError("Resume requires a Tool executor")
+                requested_definitions = {tool.name: tool for tool in request.tools}
+                for call in pending:
+                    try:
+                        _snapshot_tool_call(
+                            call,
+                            max_bytes_per_call=(request.limits or self._default_limits).max_tool_arguments_bytes_per_call,
+                            remaining_total_bytes=(request.limits or self._default_limits).max_tool_arguments_bytes_total,
+                            max_nodes=(request.limits or self._default_limits).max_json_nodes_per_payload,
+                            max_depth=(request.limits or self._default_limits).max_json_depth,
+                        )
+                    except Exception as exc:
+                        raise HarnessResumeStateError("Pending Tool Call is not valid for resume") from exc
+                    if self._tool_executor.definition(call.name) != requested_definitions[call.name]:
+                        raise HarnessResumeCompatibilityError("Executor Tool definition does not match the Resume request")
             if checkpoint.state.phase is HarnessPhase.AFTER_MODEL and not assistants[-1].tool_calls:
                 state = HarnessState(messages=deepcopy(list(checkpoint.state.messages)), model_turns=checkpoint.state.model_turns, tool_calls_total=checkpoint.state.tool_calls_total, tool_argument_bytes_total=checkpoint.state.tool_argument_bytes_total, tool_result_bytes_total=checkpoint.state.tool_result_bytes_total, started_tool_call_ids=set(checkpoint.state.started_tool_call_ids), executed_tool_call_ids=set(checkpoint.state.executed_tool_call_ids), status=checkpoint.state.status, phase=checkpoint.state.phase)
                 resume_runner = self
@@ -415,6 +436,7 @@ class HarnessRunner:
         execution = HarnessExecution(resume_runner, harness_request)
         execution.state = state
         execution._resume_source = checkpoint
+        execution._last_checkpoint_sequence = checkpoint.sequence
         execution._resume_limit_exceeded = execution_limit_exceeded
         execution._resume_cursor_pending = bool(pending)
         execution._resume_tool_batch = bool(pending)
