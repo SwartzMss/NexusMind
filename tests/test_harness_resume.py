@@ -50,6 +50,28 @@ def test_before_model_rejects_partial_tool_batch():
     with pytest.raises(HarnessResumeStateError, match="completed Tool batch"):
         HarnessRunner(FakeChatModel(["done"])).resume_execution(HarnessResumeRequest(checkpoint))
 
+def test_before_model_rejects_assistant_followed_by_system():
+    state = HarnessState(messages=[
+        Message(role=MessageRole.USER, content="go"),
+        Message(role=MessageRole.ASSISTANT, content="done"),
+        Message(role=MessageRole.SYSTEM, content="late"),
+    ], model_turns=1, phase=HarnessPhase.BEFORE_MODEL)
+    checkpoint = HarnessCheckpoint.create(state, "run-late-system", 0)
+    with pytest.raises(HarnessResumeStateError, match="completed Tool batch"):
+        HarnessRunner(FakeChatModel(["done"])).resume_execution(HarnessResumeRequest(checkpoint))
+
+@pytest.mark.parametrize("call_id,name", [("", "echo"), ("call-1", "")])
+def test_resume_rejects_empty_tool_identity_before_executor(call_id, name):
+    call = ToolCall(id=call_id, name=name, arguments={"text": "hello"})
+    state = HarnessState(messages=[Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(call,))],
+        model_turns=1, phase=HarnessPhase.AFTER_MODEL)
+    checkpoint = HarnessCheckpoint.create(state, "run-empty-identity", 0)
+    executor = _echo_executor()
+    with pytest.raises(HarnessResumeStateError, match="Tool Call"):
+        HarnessRunner(FakeChatModel(["done"]), tool_executor=executor).resume_execution(
+            HarnessResumeRequest(checkpoint, tools=(EchoTool().definition,))
+        )
+
 def test_resumed_execution_preserves_source_phase_before_stream():
     call = ToolCall(id="call-phase", name="echo", arguments={"text": "hi"})
     state = HarnessState(messages=[Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(call,))],

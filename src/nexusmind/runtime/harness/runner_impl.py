@@ -169,7 +169,10 @@ class _LegacyHarnessRuntime:
                             turn.text_parts.append(cast(str, event.text))
                         elif event.type == RuntimeEventType.TOOL_CALL_COMPLETED:
                             tool_call = cast(ToolCall, event.tool_call)
-                            if type(tool_call.id) is not str or type(tool_call.name) is not str:
+                            if (
+                                type(tool_call.id) is not str or not tool_call.id
+                                or type(tool_call.name) is not str or not tool_call.name
+                            ):
                                 yield RuntimeEvent(RuntimeEventType.MODEL_FAILED, error=_RUNTIME_ERROR)
                                 yield RuntimeEvent(RuntimeEventType.RUN_FAILED, error=_RUNTIME_ERROR)
                                 return
@@ -709,6 +712,11 @@ def _snapshot_tool_call(
     max_nodes: int,
     max_depth: int,
 ) -> tuple[ToolCall, int]:
+    if (
+        type(call.id) is not str or not call.id
+        or type(call.name) is not str or not call.name
+    ):
+        raise RuntimeError("Tool Call ID and name must be non-empty strings")
     try:
         arguments_json, size = _bounded_json(
             call.arguments,

@@ -77,8 +77,11 @@ def _validate_run_consumption(checkpoint: HarnessCheckpoint) -> None:
     _validate_resume_batches(run_messages)
     if checkpoint.state.phase is HarnessPhase.BEFORE_MODEL and run_messages:
         last = run_messages[-1]
-        if last.role.value == "assistant":
-            raise HarnessResumeStateError("BEFORE_MODEL cannot follow an Assistant message")
+        has_assistant = any(message.role.value == "assistant" for message in run_messages)
+        if has_assistant and last.role.value != "tool":
+            raise HarnessResumeStateError(
+                "BEFORE_MODEL with Model history must end with a completed Tool batch"
+            )
         if last.role.value == "tool":
             assistant_index = next(
                 (index for index in range(len(run_messages) - 1, -1, -1)
@@ -352,6 +355,12 @@ class HarnessRunner:
             if checkpoint.state.tool_result_bytes_total < required_result_bytes:
                 raise HarnessResumeStateError("Tool result byte counter is below transcript consumption")
             if pending:
+                if any(
+                    type(call.id) is not str or not call.id
+                    or type(call.name) is not str or not call.name
+                    for call in pending
+                ):
+                    raise HarnessResumeStateError("Pending Tool Call ID and name must be non-empty strings")
                 requested_tool_names = [tool.name for tool in request.tools]
                 if len(set(requested_tool_names)) != len(requested_tool_names):
                     raise HarnessResumeCompatibilityError("Resume request contains duplicate tool definitions")
