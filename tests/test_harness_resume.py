@@ -60,6 +60,30 @@ def test_before_model_rejects_assistant_followed_by_system():
     with pytest.raises(HarnessResumeStateError, match="completed Tool batch"):
         HarnessRunner(FakeChatModel(["done"])).resume_execution(HarnessResumeRequest(checkpoint))
 
+def test_resume_rejects_terminal_assistant_before_tool_batch():
+    call = ToolCall(id="call-1", name="echo", arguments={"text": "hi"})
+    state = HarnessState(messages=[
+        Message(role=MessageRole.USER, content="go"),
+        Message(role=MessageRole.ASSISTANT, content="final"),
+        Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(call,)),
+        Message(role=MessageRole.TOOL, name="echo", tool_call_id="call-1", content="{}"),
+    ], model_turns=2, tool_calls_total=1, tool_argument_bytes_total=_argument_bytes(call),
+        tool_result_bytes_total=2, started_tool_call_ids={"call-1"}, executed_tool_call_ids={"call-1"},
+        phase=HarnessPhase.BEFORE_MODEL)
+    checkpoint = HarnessCheckpoint.create(state, "run-terminal-trailing", 0)
+    with pytest.raises(HarnessResumeStateError, match="terminal Assistant"):
+        HarnessRunner(FakeChatModel(["done"])).resume_execution(HarnessResumeRequest(checkpoint))
+
+def test_resume_rejects_unhashable_tool_call_id():
+    call = ToolCall(id=[], name="echo", arguments={"text": "hi"})
+    state = HarnessState(messages=[Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(call,))],
+        model_turns=1, phase=HarnessPhase.AFTER_MODEL)
+    checkpoint = HarnessCheckpoint.create(state, "run-unhashable", 0)
+    with pytest.raises(HarnessResumeStateError, match="Tool Call ID"):
+        HarnessRunner(FakeChatModel(["done"]), tool_executor=_echo_executor()).resume_execution(
+            HarnessResumeRequest(checkpoint, tools=(EchoTool().definition,))
+        )
+
 @pytest.mark.parametrize("call_id,name", [("", "echo"), ("call-1", "")])
 def test_resume_rejects_empty_tool_identity_before_executor(call_id, name):
     call = ToolCall(id=call_id, name=name, arguments={"text": "hello"})

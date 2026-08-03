@@ -24,6 +24,13 @@ _RESERVED_RESUME_METADATA = {
     "resumed", "checkpoint_id", "checkpoint_sequence", "checkpoint_boundary",
 }
 
+def _validate_tool_call_identity(call: ToolCall) -> None:
+    if (
+        type(call.id) is not str or not call.id
+        or type(call.name) is not str or not call.name
+    ):
+        raise HarnessResumeStateError("Tool Call ID and name must be non-empty strings")
+
 class _ResumeToolBatchModel:
     def __init__(self, original: ChatModel, calls: tuple[ToolCall, ...]) -> None:
         self._original = original
@@ -47,6 +54,8 @@ def _validate_resume_batches(messages) -> None:
     for index, message in enumerate(messages):
         if message.role.value != "assistant" or not message.tool_calls:
             continue
+        for call in message.tool_calls:
+            _validate_tool_call_identity(call)
         calls = {call.id: call for call in message.tool_calls}
         if len(calls) != len(message.tool_calls):
             raise HarnessResumeStateError("Assistant Tool Call batch contains duplicate IDs")
@@ -74,6 +83,13 @@ def _validate_run_consumption(checkpoint: HarnessCheckpoint) -> None:
     messages = checkpoint.state.messages
     user_indexes = [index for index, message in enumerate(messages) if message.role.value == "user"]
     run_messages = messages[user_indexes[-1] + 1:] if user_indexes else messages
+    for index, message in enumerate(run_messages):
+        if (
+            message.role.value == "assistant"
+            and not message.tool_calls
+            and index != len(run_messages) - 1
+        ):
+            raise HarnessResumeStateError("A terminal Assistant message cannot have trailing Run messages")
     _validate_resume_batches(run_messages)
     if checkpoint.state.phase is HarnessPhase.BEFORE_MODEL and run_messages:
         last = run_messages[-1]
@@ -361,6 +377,8 @@ class HarnessRunner:
                     for call in pending
                 ):
                     raise HarnessResumeStateError("Pending Tool Call ID and name must be non-empty strings")
+                if any(type(tool.name) is not str or not tool.name for tool in request.tools):
+                    raise HarnessResumeCompatibilityError("Tool definition names must be non-empty strings")
                 requested_tool_names = [tool.name for tool in request.tools]
                 if len(set(requested_tool_names)) != len(requested_tool_names):
                     raise HarnessResumeCompatibilityError("Resume request contains duplicate tool definitions")
@@ -383,7 +401,11 @@ class HarnessRunner:
                         )
                     except Exception as exc:
                         raise HarnessResumeStateError("Pending Tool Call is not valid for resume") from exc
-                    if self._tool_executor.definition(call.name) != requested_definitions[call.name]:
+                    try:
+                        actual_definition = self._tool_executor.definition(call.name)
+                    except Exception as exc:
+                        raise HarnessResumeCompatibilityError("Unable to validate Tool executor") from exc
+                    if actual_definition != requested_definitions[call.name]:
                         raise HarnessResumeCompatibilityError("Executor Tool definition does not match the Resume request")
             if checkpoint.state.phase is HarnessPhase.AFTER_MODEL and not assistants[-1].tool_calls:
                 state = HarnessState(messages=deepcopy(list(checkpoint.state.messages)), model_turns=checkpoint.state.model_turns, tool_calls_total=checkpoint.state.tool_calls_total, tool_argument_bytes_total=checkpoint.state.tool_argument_bytes_total, tool_result_bytes_total=checkpoint.state.tool_result_bytes_total, started_tool_call_ids=set(checkpoint.state.started_tool_call_ids), executed_tool_call_ids=set(checkpoint.state.executed_tool_call_ids), status=checkpoint.state.status, phase=checkpoint.state.phase)
