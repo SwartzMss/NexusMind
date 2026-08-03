@@ -57,7 +57,7 @@ def test_before_model_rejects_assistant_followed_by_system():
         Message(role=MessageRole.SYSTEM, content="late"),
     ], model_turns=1, phase=HarnessPhase.BEFORE_MODEL)
     checkpoint = HarnessCheckpoint.create(state, "run-late-system", 0)
-    with pytest.raises(HarnessResumeStateError, match="completed Tool batch"):
+    with pytest.raises(HarnessResumeStateError, match="terminal Assistant"):
         HarnessRunner(FakeChatModel(["done"])).resume_execution(HarnessResumeRequest(checkpoint))
 
 def test_resume_rejects_terminal_assistant_before_tool_batch():
