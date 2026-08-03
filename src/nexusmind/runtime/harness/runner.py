@@ -75,6 +75,25 @@ def _validate_run_consumption(checkpoint: HarnessCheckpoint) -> None:
     user_indexes = [index for index, message in enumerate(messages) if message.role.value == "user"]
     run_messages = messages[user_indexes[-1] + 1:] if user_indexes else messages
     _validate_resume_batches(run_messages)
+    if checkpoint.state.phase is HarnessPhase.BEFORE_MODEL and run_messages:
+        last = run_messages[-1]
+        if last.role.value == "assistant":
+            raise HarnessResumeStateError("BEFORE_MODEL cannot follow an Assistant message")
+        if last.role.value == "tool":
+            assistant_index = next(
+                (index for index in range(len(run_messages) - 1, -1, -1)
+                 if run_messages[index].role.value == "assistant" and run_messages[index].tool_calls),
+                None,
+            )
+            if assistant_index is None:
+                raise HarnessResumeStateError("BEFORE_MODEL Tool result has no Tool Call batch")
+            call_ids = [call.id for call in run_messages[assistant_index].tool_calls]
+            result_ids = [
+                message.tool_call_id for message in run_messages[assistant_index + 1:]
+                if message.role.value == "tool"
+            ]
+            if result_ids != call_ids:
+                raise HarnessResumeStateError("BEFORE_MODEL requires a completed Tool batch")
     calls = [call for message in run_messages if message.role.value == "assistant" for call in message.tool_calls]
     results = [message for message in run_messages if message.role.value == "tool"]
     call_ids = [call.id for call in calls]
@@ -352,12 +371,11 @@ class HarnessRunner:
                     started_tool_call_ids=set(checkpoint.state.started_tool_call_ids),
                     executed_tool_call_ids=set(checkpoint.state.executed_tool_call_ids),
                     status=checkpoint.state.status,
-                    phase=HarnessPhase.BEFORE_MODEL,
+                    phase=checkpoint.state.phase,
                 )
                 resume_runner = self
             elif pending:
                 state = HarnessState(messages=deepcopy(list(checkpoint.state.messages)), model_turns=checkpoint.state.model_turns, tool_calls_total=checkpoint.state.tool_calls_total, tool_argument_bytes_total=checkpoint.state.tool_argument_bytes_total, tool_result_bytes_total=checkpoint.state.tool_result_bytes_total, started_tool_call_ids=set(checkpoint.state.started_tool_call_ids), executed_tool_call_ids=set(checkpoint.state.executed_tool_call_ids), status=checkpoint.state.status, phase=checkpoint.state.phase)
-                state.phase = HarnessPhase.BEFORE_MODEL
                 if checkpoint.state.phase is HarnessPhase.AFTER_MODEL:
                     pending_argument_bytes = sum(
                         len(json.dumps(call.arguments, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))

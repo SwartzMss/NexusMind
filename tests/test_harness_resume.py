@@ -30,6 +30,32 @@ def test_resume_before_model_preserves_state_and_isolated_messages():
         assert execution.state.messages[0].content == "hello"
     asyncio.run(run())
 
+def test_before_model_rejects_partial_tool_batch():
+    calls = (
+        ToolCall(id="call-a", name="echo", arguments={"text": "a"}),
+        ToolCall(id="call-b", name="echo", arguments={"text": "b"}),
+    )
+    result = Message(role=MessageRole.TOOL, name="echo", tool_call_id="call-a", content="{}")
+    state = HarnessState(messages=[Message(role=MessageRole.USER, content="go"),
+        Message(role=MessageRole.ASSISTANT, content=None, tool_calls=calls), result],
+        model_turns=1, tool_calls_total=1, tool_argument_bytes_total=_argument_bytes(*calls),
+        tool_result_bytes_total=2, started_tool_call_ids={"call-a"}, executed_tool_call_ids={"call-a"},
+        phase=HarnessPhase.BEFORE_MODEL)
+    checkpoint = HarnessCheckpoint.create(state, "run-partial-before-model", 0)
+    with pytest.raises(HarnessResumeStateError, match="completed Tool batch"):
+        HarnessRunner(FakeChatModel(["done"])).resume_execution(HarnessResumeRequest(checkpoint))
+
+def test_resumed_execution_preserves_source_phase_before_stream():
+    call = ToolCall(id="call-phase", name="echo", arguments={"text": "hi"})
+    state = HarnessState(messages=[Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(call,))],
+        model_turns=1, phase=HarnessPhase.BEFORE_TOOL,
+        tool_argument_bytes_total=_argument_bytes(call))
+    checkpoint = HarnessCheckpoint.create(state, "run-phase", 0)
+    execution = HarnessRunner(FakeChatModel(["done"])).resume_execution(
+        HarnessResumeRequest(checkpoint, tools=(EchoTool().definition,))
+    )
+    assert execution.state.phase is HarnessPhase.BEFORE_TOOL
+
 def test_resume_rejects_terminal_checkpoint():
     state = HarnessState(messages=[], status=HarnessStatus.COMPLETED, stop_reason=StopReason.MODEL_COMPLETED, phase=HarnessPhase.TERMINAL)
     checkpoint = HarnessCheckpoint.create(state, "run-1", 0)
