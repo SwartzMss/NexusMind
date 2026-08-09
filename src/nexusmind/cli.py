@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import re
 import sys
+from uuid import uuid4
 
 from nexusmind.commands import CommandConfig, CommandConfigError, RunCommandTool, command_profile_summary, load_command_config
 from nexusmind.config import ConfigError, ModelConfig, load_model_config_from_env
@@ -15,6 +16,8 @@ from nexusmind.runtime.chat import AgentLoopLimits
 from nexusmind.runtime.policy import ApprovalDecision, ApprovalRequest, DefaultToolApprovalSummarizer
 from nexusmind.runtime.chat import ChatRuntime, ToolExecutionCancelled
 from nexusmind.runtime.events import RuntimeEventType
+from nexusmind.runtime.harness import SQLiteCheckpointStore
+from nexusmind.runtime.harness.sqlite_checkpoint_store import CheckpointStoreError
 from nexusmind.skills import SkillError, discover_skills, load_skill, resolve_skill_tool_references
 from nexusmind.skills.resolver import (
     build_skill_loop_limits,
@@ -68,6 +71,14 @@ def _best_effort_close(store) -> None:
         try: store.close()
         except StateStoreError: pass
 
+
+async def _best_effort_close_checkpoint_store(store) -> None:
+    if store:
+        try:
+            await store.close()
+        except BaseException:
+            pass
+
 def _truncate_utf8(value: str, limit: int) -> str:
     return value.encode("utf-8")[:limit].decode("utf-8", "ignore")
 
@@ -89,6 +100,9 @@ def main(argv: list[str] | None = None) -> int:
     chat_parser.add_argument("--command-config")
     chat_parser.add_argument("--state-db")
     chat_parser.add_argument("--record-content", action="store_true")
+    chat_parser.add_argument("--checkpoint-db")
+    chat_parser.add_argument("--checkpoint-run-id")
+    chat_parser.add_argument("--no-terminal-checkpoint", action="store_true")
     chat_parser.add_argument("message", nargs="?")
     tools_parser = subparsers.add_parser("tools")
     tools_subparsers = tools_parser.add_subparsers(dest="tools_command", required=True)
@@ -129,6 +143,9 @@ def main(argv: list[str] | None = None) -> int:
     skill_run_parser.add_argument("--command-config")
     skill_run_parser.add_argument("--state-db")
     skill_run_parser.add_argument("--record-content", action="store_true")
+    skill_run_parser.add_argument("--checkpoint-db")
+    skill_run_parser.add_argument("--checkpoint-run-id")
+    skill_run_parser.add_argument("--no-terminal-checkpoint", action="store_true")
     skill_run_parser.add_argument("message", nargs="*")
 
     parse_argv, separator_message = _split_skill_run_separator_message(argv)
@@ -154,6 +171,8 @@ def main(argv: list[str] | None = None) -> int:
                 enable_workspace_exec=args.workspace_exec,
                 command_config_path=args.command_config,
                 state_db=args.state_db, record_content=args.record_content,
+                checkpoint_db=args.checkpoint_db, checkpoint_run_id=args.checkpoint_run_id,
+                save_terminal_checkpoint=not args.no_terminal_checkpoint,
             )
         )
     if args.command == "tools":
@@ -177,6 +196,8 @@ async def _chat(
     enable_workspace_exec: bool = False,
     command_config_path: str | None = None,
     state_db: str | None = None, record_content: bool = False,
+    checkpoint_db: str | None = None, checkpoint_run_id: str | None = None,
+    save_terminal_checkpoint: bool = True,
 ) -> int:
     if not message:
         message = input("> ").strip()
@@ -230,7 +251,17 @@ async def _chat(
         )
     )
     if mcp_config is None:
-        return await _run_chat(message, registry, model_config=model_config, workspace=workspace, state_db=state_db, record_content=record_content)
+        return await _run_chat(
+            message,
+            registry,
+            model_config=model_config,
+            workspace=workspace,
+            state_db=state_db,
+            record_content=record_content,
+            checkpoint_db=checkpoint_db,
+            checkpoint_run_id=checkpoint_run_id,
+            save_terminal_checkpoint=save_terminal_checkpoint,
+        )
 
     try:
         config = load_mcp_server_config(mcp_config, mcp_server)
@@ -240,7 +271,17 @@ async def _chat(
     except Exception:
         print("MCP error: MCP chat tool setup failed", file=sys.stderr)
         return 1
-    return await _run_chat_with_mcp(message, registry, config=config, model_config=model_config, state_db=state_db, record_content=record_content)
+    return await _run_chat_with_mcp(
+        message,
+        registry,
+        config=config,
+        model_config=model_config,
+        state_db=state_db,
+        record_content=record_content,
+        checkpoint_db=checkpoint_db,
+        checkpoint_run_id=checkpoint_run_id,
+        save_terminal_checkpoint=save_terminal_checkpoint,
+    )
 
 
 async def _run_chat_with_mcp(
@@ -250,6 +291,8 @@ async def _run_chat_with_mcp(
     config,
     model_config: ModelConfig,
     state_db: str | None = None, record_content: bool = False,
+    checkpoint_db: str | None = None, checkpoint_run_id: str | None = None,
+    save_terminal_checkpoint: bool = True,
 ) -> int:
     store = None; run_id = None; text_sink: list[str] = []; failure_sink = {}; return_code = 1; runtime_started = False
     try:
@@ -300,6 +343,8 @@ async def _run_chat_with_mcp(
                 executor_timeout=config.request_timeout,
                 workspace=_registry_workspace(registry),
                 state_db=state_db, record_content=record_content,
+                checkpoint_db=checkpoint_db, checkpoint_run_id=checkpoint_run_id,
+                save_terminal_checkpoint=save_terminal_checkpoint,
                 external_store=store, external_run_id=run_id, final_text_sink=text_sink, failure_sink=failure_sink,
             )
     except BaseException as exc:
@@ -359,11 +404,15 @@ async def _run_chat(
     limits: AgentLoopLimits | None = None,
     workspace: Workspace | None = None,
     state_db: str | None = None, record_content: bool = False, run_kind: RunKind = RunKind.CHAT,
+    checkpoint_db: str | None = None, checkpoint_run_id: str | None = None,
+    save_terminal_checkpoint: bool = True,
     skill_name: str | None = None,
     external_store=None, external_run_id: str | None = None, final_text_sink=None, failure_sink=None,
 ) -> int:
     failure_sink = failure_sink if failure_sink is not None else {}
     store = external_store; run_id = external_run_id; owns_store = store is None
+    checkpoint_store = None
+    owns_checkpoint_store = False
     if state_db and store is None:
         try:
             store = SQLiteRunStore(state_db)
@@ -371,12 +420,40 @@ async def _run_chat(
         except StateStoreError:
             _best_effort_close(store)
             print("State error: Run store could not be initialized", file=sys.stderr); return 2
+    if checkpoint_run_id and not checkpoint_db:
+        if owns_store and store:
+            await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="checkpoint_config_invalid", error_message="Checkpoint run ID requires --checkpoint-db")
+            _best_effort_close(store)
+        print("Checkpoint error: --checkpoint-run-id requires --checkpoint-db", file=sys.stderr)
+        return 2
+    if checkpoint_db:
+        if run_id and checkpoint_run_id and checkpoint_run_id != run_id:
+            if owns_store and store:
+                await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="checkpoint_config_invalid", error_message="Checkpoint run ID must match the Run History run ID")
+                _best_effort_close(store)
+            print("Checkpoint error: --checkpoint-run-id must match the Run History run ID", file=sys.stderr)
+            return 2
+        try:
+            checkpoint_store = SQLiteCheckpointStore(checkpoint_db)
+            await checkpoint_store.initialize()
+            checkpoint_run_id = checkpoint_run_id or run_id or uuid4().hex
+            owns_checkpoint_store = True
+        except (CheckpointStoreError, ValueError):
+            await _best_effort_close_checkpoint_store(checkpoint_store)
+            if owns_store and store:
+                await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="checkpoint_store_init_failed", error_message="Checkpoint store could not be initialized")
+                _best_effort_close(store)
+            print("Checkpoint error: Checkpoint store could not be initialized", file=sys.stderr)
+            return 2
     runtime = ChatRuntime(
         OpenAICompatibleChatModel(model_config),
         tool_executor=ToolExecutor(registry, timeout=executor_timeout),
         approval_provider=CLIApprovalProvider(),
         approval_summarizer=CLIApprovalSummarizer(workspace=workspace, command_config=_registry_command_config(registry)),
         limits=limits,
+        checkpoint_store=checkpoint_store,
+        checkpoint_run_id=checkpoint_run_id,
+        save_terminal_checkpoint=save_terminal_checkpoint,
     )
     tools = registry.list_definitions() if tools is None else tools
     failed = False; failure_message = None; trace_complete = True; final_text = []; current_text = bytearray(); current_text_bytes = 0
@@ -447,6 +524,8 @@ async def _run_chat(
         )
         raise
     finally:
+        if owns_checkpoint_store:
+            await _best_effort_close_checkpoint_store(checkpoint_store)
         if owns_store: _best_effort_close(store)
 
 
@@ -782,6 +861,8 @@ async def _skill_run(args: argparse.Namespace) -> int:
             limits=limits,
             workspace=workspace,
             state_db=args.state_db, record_content=args.record_content, run_kind=RunKind.SKILL, skill_name=skill.name,
+            checkpoint_db=args.checkpoint_db, checkpoint_run_id=args.checkpoint_run_id,
+            save_terminal_checkpoint=not args.no_terminal_checkpoint,
         )
     try:
         required_server_ids = skill_mcp_server_ids(skill)
@@ -795,7 +876,19 @@ async def _skill_run(args: argparse.Namespace) -> int:
     except Exception:
         print("MCP error: MCP skill tool setup failed", file=sys.stderr)
         return 1
-    return await _run_skill_with_mcp(message, skill, registry, configs=configs, model_config=model_config, limits=limits, state_db=args.state_db, record_content=args.record_content)
+    return await _run_skill_with_mcp(
+        message,
+        skill,
+        registry,
+        configs=configs,
+        model_config=model_config,
+        limits=limits,
+        state_db=args.state_db,
+        record_content=args.record_content,
+        checkpoint_db=args.checkpoint_db,
+        checkpoint_run_id=args.checkpoint_run_id,
+        save_terminal_checkpoint=not args.no_terminal_checkpoint,
+    )
 
 
 async def _run_skill_with_mcp(
@@ -807,6 +900,8 @@ async def _run_skill_with_mcp(
     model_config: ModelConfig,
     limits: AgentLoopLimits,
     state_db: str | None = None, record_content: bool = False,
+    checkpoint_db: str | None = None, checkpoint_run_id: str | None = None,
+    save_terminal_checkpoint: bool = True,
 ) -> int:
     store = None; run_id = None; text_sink: list[str] = []; failure_sink = {}; return_code = 1
     try:
@@ -860,6 +955,8 @@ async def _run_skill_with_mcp(
                 limits=limits,
                 workspace=_registry_workspace(registry),
                 state_db=state_db, record_content=record_content, run_kind=RunKind.SKILL, skill_name=skill.name,
+                checkpoint_db=checkpoint_db, checkpoint_run_id=checkpoint_run_id,
+                save_terminal_checkpoint=save_terminal_checkpoint,
                 external_store=store, external_run_id=run_id, final_text_sink=text_sink, failure_sink=failure_sink,
             )
     except BaseException as exc:
