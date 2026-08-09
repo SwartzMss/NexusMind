@@ -84,6 +84,24 @@ def test_resume_rejects_unhashable_tool_call_id():
             HarnessResumeRequest(checkpoint, tools=(EchoTool().definition,))
         )
 
+@pytest.mark.parametrize("tool_call_id,name", [
+    (["call-1"], "echo"),
+    ({"id": "call-1"}, "echo"),
+    ("call-1", ["echo"]),
+    ("call-1", ""),
+])
+def test_resume_rejects_invalid_tool_result_identity(tool_call_id, name):
+    call = ToolCall(id="call-1", name="echo", arguments={"text": "hi"})
+    state = HarnessState(messages=[
+        Message(role=MessageRole.ASSISTANT, content=None, tool_calls=(call,)),
+        Message(role=MessageRole.TOOL, name=name, tool_call_id=tool_call_id, content="{}"),
+    ], model_turns=1, phase=HarnessPhase.AFTER_TOOL, tool_result_bytes_total=2)
+    checkpoint = HarnessCheckpoint.create(state, "run-invalid-result", 0)
+    with pytest.raises(HarnessResumeStateError, match="Tool result"):
+        HarnessRunner(FakeChatModel(["done"]), tool_executor=_echo_executor()).resume_execution(
+            HarnessResumeRequest(checkpoint, tools=(EchoTool().definition,))
+        )
+
 @pytest.mark.parametrize("call_id,name", [("", "echo"), ("call-1", "")])
 def test_resume_rejects_empty_tool_identity_before_executor(call_id, name):
     call = ToolCall(id=call_id, name=name, arguments={"text": "hello"})

@@ -31,6 +31,13 @@ def _validate_tool_call_identity(call: ToolCall) -> None:
     ):
         raise HarnessResumeStateError("Tool Call ID and name must be non-empty strings")
 
+def _validate_tool_result_identity(message) -> None:
+    if (
+        type(message.tool_call_id) is not str or not message.tool_call_id
+        or type(message.name) is not str or not message.name
+    ):
+        raise HarnessResumeStateError("Tool result call ID and name must be non-empty strings")
+
 class _ResumeToolBatchModel:
     def __init__(self, original: ChatModel, calls: tuple[ToolCall, ...]) -> None:
         self._original = original
@@ -63,6 +70,7 @@ def _validate_resume_batches(messages) -> None:
         cursor = index + 1
         while cursor < len(messages) and messages[cursor].role.value == "tool":
             result = messages[cursor]
+            _validate_tool_result_identity(result)
             if not result.tool_call_id or result.tool_call_id not in calls:
                 raise HarnessResumeStateError("Tool result does not match its Assistant Tool Call batch")
             if result.name != calls[result.tool_call_id].name:
@@ -315,6 +323,7 @@ class HarnessRunner:
             for message in batch_results:
                 if message.role.value != "tool":
                     raise HarnessResumeStateError("Tool batch has an invalid trailing transcript entry")
+                _validate_tool_result_identity(message)
                 if not message.tool_call_id or message.tool_call_id not in batch_calls:
                     raise HarnessResumeStateError("Tool result does not match the current Assistant Tool Call batch")
                 if message.name != batch_calls[message.tool_call_id].name:
