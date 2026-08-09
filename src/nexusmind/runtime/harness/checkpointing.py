@@ -12,6 +12,24 @@ from .state import HarnessPhase, HarnessStatus
 from .stop import StopReason
 
 
+class CheckpointBarrierCancelled(asyncio.CancelledError):
+    """Cancellation delivered after an in-flight durability outcome is known."""
+
+    def __init__(
+        self,
+        boundary: CheckpointBoundary,
+        *,
+        checkpoint_saved: bool,
+        checkpoint_save_failed: bool = False,
+        checkpoint_commit_failed: bool = False,
+    ) -> None:
+        super().__init__(f"Cancelled during checkpoint barrier at {boundary.value}")
+        self.boundary = boundary
+        self.checkpoint_saved = checkpoint_saved
+        self.checkpoint_save_failed = checkpoint_save_failed
+        self.checkpoint_commit_failed = checkpoint_commit_failed
+
+
 _BARRIER_EVENTS = {
     RuntimeEventType.MODEL_TURN_COMPLETED: CheckpointBoundary.AFTER_MODEL,
     RuntimeEventType.TOOL_RESULT: CheckpointBoundary.AFTER_TOOL,
@@ -51,6 +69,7 @@ class CheckpointCoordinator:
         )
         self._save_terminal = save_terminal
         self._terminal_saved = False
+        self._cancelled_during_barrier = False
         self._stream_started = False
 
     @property
@@ -78,7 +97,7 @@ class CheckpointCoordinator:
                     yield self._creation_failure(boundary, event)
                     return
                 try:
-                    await self._save_checkpoint(checkpoint)
+                    await self._save_checkpoint(checkpoint, boundary)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -95,10 +114,15 @@ class CheckpointCoordinator:
         except asyncio.CancelledError:
             # HarnessExecution records cancellation and terminal phase before
             # re-raising. Save it only when no tool could be left in-flight.
-            if self._save_terminal and not self._terminal_saved and not self._has_active_tools():
+            if (
+                not self._cancelled_during_barrier
+                and self._save_terminal
+                and not self._terminal_saved
+                and not self._has_active_tools()
+            ):
                 try:
                     checkpoint = self._build_checkpoint(CheckpointBoundary.RUN_TERMINAL)
-                    await self._save_checkpoint(checkpoint)
+                    await self._save_checkpoint(checkpoint, CheckpointBoundary.RUN_TERMINAL)
                     self._commit_checkpoint(checkpoint)
                     self._terminal_saved = True
                 except asyncio.CancelledError:
@@ -119,8 +143,55 @@ class CheckpointCoordinator:
             commit=False,
         )
 
-    async def _save_checkpoint(self, checkpoint: HarnessCheckpoint) -> None:
-        await self._store.save(checkpoint)
+    async def _save_checkpoint(
+        self,
+        checkpoint: HarnessCheckpoint,
+        boundary: CheckpointBoundary,
+    ) -> None:
+        save_task = asyncio.create_task(self._store.save(checkpoint))
+        cancellation: asyncio.CancelledError | None = None
+        save_error: Exception | None = None
+
+        while not save_task.done():
+            try:
+                await asyncio.shield(save_task)
+            except asyncio.CancelledError as exc:
+                if save_task.cancelled():
+                    save_error = RuntimeError("Checkpoint store save was cancelled")
+                    break
+                if cancellation is None:
+                    cancellation = exc
+            except Exception:
+                break
+
+        if save_error is None:
+            try:
+                save_task.result()
+            except asyncio.CancelledError:
+                save_error = RuntimeError("Checkpoint store save was cancelled")
+            except Exception as exc:
+                save_error = exc
+
+        if cancellation is None:
+            if save_error is not None:
+                raise save_error
+            return
+
+        checkpoint_saved = save_error is None
+        commit_failed = False
+        if checkpoint_saved:
+            try:
+                self._commit_checkpoint(checkpoint)
+            except Exception:
+                commit_failed = True
+        self._mark_cancelled()
+        self._cancelled_during_barrier = True
+        raise CheckpointBarrierCancelled(
+            boundary,
+            checkpoint_saved=checkpoint_saved,
+            checkpoint_save_failed=save_error is not None,
+            checkpoint_commit_failed=commit_failed,
+        ) from cancellation
 
     def _commit_checkpoint(self, checkpoint: HarnessCheckpoint) -> None:
         # Only move both cursors after the store has accepted the checkpoint.
@@ -132,11 +203,14 @@ class CheckpointCoordinator:
         boundary: CheckpointBoundary,
         original_event: RuntimeEvent,
     ) -> RuntimeEvent:
+        metadata: dict[str, object] = {"checkpoint_creation_failed": True}
+        if boundary is CheckpointBoundary.AFTER_TOOL:
+            metadata.update(self._after_tool_durability_loss_metadata())
         return self._runtime_failure(
             boundary,
             original_event,
             error=f"Automatic checkpoint creation failed at {boundary.value}",
-            metadata={"checkpoint_creation_failed": True},
+            metadata=metadata,
         )
 
     def _commit_failure(
@@ -144,11 +218,14 @@ class CheckpointCoordinator:
         boundary: CheckpointBoundary,
         original_event: RuntimeEvent,
     ) -> RuntimeEvent:
+        metadata: dict[str, object] = {"checkpoint_commit_failed": True}
+        if boundary is CheckpointBoundary.AFTER_TOOL:
+            metadata.update(self._after_tool_trace_incomplete_metadata())
         return self._runtime_failure(
             boundary,
             original_event,
             error=f"Automatic checkpoint commit failed at {boundary.value}",
-            metadata={"checkpoint_commit_failed": True},
+            metadata=metadata,
         )
 
     def _persistence_failure(
@@ -158,17 +235,31 @@ class CheckpointCoordinator:
     ) -> RuntimeEvent:
         metadata: dict[str, object] = {"checkpoint_persistence_failed": True}
         if boundary is CheckpointBoundary.AFTER_TOOL:
-            metadata.update(
-                {
-                    "durability_lost_after_tool": True,
-                    "tool_execution_started": True,
-                    "trace_complete": False,
-                }
-            )
+            metadata.update(self._after_tool_durability_loss_metadata())
         error = f"Automatic checkpoint persistence failed at {boundary.value}"
         if original_event is not None and original_event.error:
             error = f"{error}: {original_event.error}"
         return self._runtime_failure(boundary, original_event, error=error, metadata=metadata)
+
+    @staticmethod
+    def _after_tool_trace_incomplete_metadata() -> dict[str, object]:
+        return {
+            "tool_execution_started": True,
+            "trace_complete": False,
+        }
+
+    @classmethod
+    def _after_tool_durability_loss_metadata(cls) -> dict[str, object]:
+        return {
+            **cls._after_tool_trace_incomplete_metadata(),
+            "durability_lost_after_tool": True,
+        }
+
+    def _mark_cancelled(self) -> None:
+        self._execution.state.status = HarnessStatus.CANCELLED
+        self._execution.state.phase = HarnessPhase.TERMINAL
+        self._execution.stop_reason = StopReason.CANCELLED
+        self._execution.state.stop_reason = StopReason.CANCELLED
 
     def _runtime_failure(
         self,
