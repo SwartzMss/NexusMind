@@ -177,6 +177,16 @@ class CheckpointCoordinator:
                 raise save_error
             return
 
+        if boundary is CheckpointBoundary.RUN_TERMINAL:
+            # RUN_COMPLETED / RUN_FAILED has already fixed the terminal state.
+            # A late cancellation must not make the persisted checkpoint,
+            # execution, and run history disagree. Let stream() commit and
+            # release the original terminal event after a successful save; a
+            # failed save follows the normal persistence-failure path.
+            if save_error is not None:
+                raise save_error from cancellation
+            return
+
         checkpoint_saved = save_error is None
         commit_failed = False
         if checkpoint_saved:

@@ -533,20 +533,23 @@ async def _run_chat(
     except asyncio.CancelledError as cancellation:
         if isinstance(cancellation, ToolExecutionCancelled):
             failure_sink.update(trace_complete=False, error_code="tool_execution_cancelled", message="Tool execution was cancelled; the tool may still be running")
-        elif isinstance(cancellation, CheckpointBarrierCancelled) and cancellation.boundary.value == "after_tool":
-            error_code = (
-                "checkpoint_persistence_failed_after_tool"
-                if cancellation.checkpoint_save_failed
-                else (
-                    "checkpoint_commit_failed_after_tool"
-                    if cancellation.checkpoint_commit_failed
-                    else "checkpoint_barrier_cancelled_after_tool"
+        elif isinstance(cancellation, CheckpointBarrierCancelled):
+            boundary = cancellation.boundary.value
+            error_code = f"checkpoint_barrier_cancelled_{boundary}"
+            if boundary == "after_tool":
+                error_code = (
+                    "checkpoint_persistence_failed_after_tool"
+                    if cancellation.checkpoint_save_failed
+                    else (
+                        "checkpoint_commit_failed_after_tool"
+                        if cancellation.checkpoint_commit_failed
+                        else "checkpoint_barrier_cancelled_after_tool"
+                    )
                 )
-            )
             failure_sink.update(
                 trace_complete=False,
                 error_code=error_code,
-                message="Run was cancelled during the AFTER_TOOL checkpoint barrier",
+                message=f"Run was cancelled during the {boundary.upper()} checkpoint barrier",
             )
         await _best_effort_cancel(store, run_id, trace_complete=failure_sink.get("trace_complete"), error_code=failure_sink.get("error_code", "cancelled"), error_message=failure_sink.get("message"), final_text=''.join(final_text) if record_content else None)
         raise

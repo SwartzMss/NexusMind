@@ -415,6 +415,251 @@ def test_terminal_save_failure_converts_completion_to_runtime_failure() -> None:
     asyncio.run(run())
 
 
+def test_cancel_during_completed_terminal_save_preserves_completed() -> None:
+    async def run() -> None:
+        class PausingStore(InMemoryCheckpointStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def save(self, checkpoint: HarnessCheckpoint) -> None:
+                if checkpoint.boundary is CheckpointBoundary.RUN_TERMINAL:
+                    self.started.set()
+                    await self.release.wait()
+                await super().save(checkpoint)
+
+        execution = HarnessRunner(ScriptedModel([_text_model()])).create_execution(
+            HarnessRequest(messages=(Message(MessageRole.USER, "hello"),))
+        )
+        store = PausingStore()
+        task = asyncio.create_task(
+            _collect(CheckpointCoordinator(execution, store, run_id="run-terminal-completed").stream())
+        )
+        await store.started.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        store.release.set()
+
+        events = await task
+        latest = await store.load_latest("run-terminal-completed")
+        assert events[-1].type is RuntimeEventType.RUN_COMPLETED
+        assert latest is not None
+        assert latest.boundary is CheckpointBoundary.RUN_TERMINAL
+        assert latest.state.status is HarnessStatus.COMPLETED
+        assert latest.state.stop_reason is StopReason.MODEL_COMPLETED
+        assert execution.state.status is HarnessStatus.COMPLETED
+        assert execution.stop_reason is StopReason.MODEL_COMPLETED
+
+    asyncio.run(run())
+
+
+def test_cancel_during_failed_terminal_save_preserves_failed() -> None:
+    async def run() -> None:
+        class PausingStore(InMemoryCheckpointStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def save(self, checkpoint: HarnessCheckpoint) -> None:
+                if checkpoint.boundary is CheckpointBoundary.RUN_TERMINAL:
+                    self.started.set()
+                    await self.release.wait()
+                await super().save(checkpoint)
+
+        failed_turn = [
+            RuntimeEvent(RuntimeEventType.MODEL_STARTED),
+            RuntimeEvent(RuntimeEventType.MODEL_FAILED, error="provider failed"),
+        ]
+        execution = HarnessRunner(ScriptedModel([failed_turn])).create_execution(
+            HarnessRequest(messages=(Message(MessageRole.USER, "hello"),))
+        )
+        store = PausingStore()
+        task = asyncio.create_task(
+            _collect(CheckpointCoordinator(execution, store, run_id="run-terminal-failed-cancel").stream())
+        )
+        await store.started.wait()
+        task.cancel()
+        store.release.set()
+
+        events = await task
+        latest = await store.load_latest("run-terminal-failed-cancel")
+        assert events[-1].type is RuntimeEventType.RUN_FAILED
+        assert latest is not None
+        assert latest.boundary is CheckpointBoundary.RUN_TERMINAL
+        assert latest.state.status is HarnessStatus.FAILED
+        assert latest.state.stop_reason is StopReason.MODEL_FAILED
+        assert execution.state.status is HarnessStatus.FAILED
+        assert execution.stop_reason is StopReason.MODEL_FAILED
+
+    asyncio.run(run())
+
+
+def test_cancel_during_failed_terminal_persistence_reports_checkpoint_failure() -> None:
+    async def run() -> None:
+        class PausingFailingStore(InMemoryCheckpointStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def save(self, checkpoint: HarnessCheckpoint) -> None:
+                if checkpoint.boundary is CheckpointBoundary.RUN_TERMINAL:
+                    self.started.set()
+                    await self.release.wait()
+                    raise RuntimeError("store unavailable")
+                await super().save(checkpoint)
+
+        execution = HarnessRunner(ScriptedModel([_text_model()])).create_execution(
+            HarnessRequest(messages=(Message(MessageRole.USER, "hello"),))
+        )
+        store = PausingFailingStore()
+        task = asyncio.create_task(
+            _collect(CheckpointCoordinator(execution, store, run_id="run-terminal-save-failed").stream())
+        )
+        await store.started.wait()
+        task.cancel()
+        store.release.set()
+
+        events = await task
+        latest = await store.load_latest("run-terminal-save-failed")
+        assert events[-1].type is RuntimeEventType.RUN_FAILED
+        assert events[-1].metadata["checkpoint_persistence_failed"] is True
+        assert events[-1].metadata["checkpoint_boundary"] == CheckpointBoundary.RUN_TERMINAL.value
+        assert execution.state.status is HarnessStatus.FAILED
+        assert execution.stop_reason is StopReason.RUNTIME_ERROR
+        assert latest is not None
+        assert latest.boundary is CheckpointBoundary.AFTER_MODEL
+
+    asyncio.run(run())
+
+
+def test_terminal_checkpoint_and_execution_status_never_diverge(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    class PausingStore(InMemoryCheckpointStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def initialize(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+        async def save(self, checkpoint: HarnessCheckpoint) -> None:
+            if checkpoint.boundary is CheckpointBoundary.RUN_TERMINAL:
+                self.started.set()
+                await self.release.wait()
+            await super().save(checkpoint)
+
+    async def run() -> tuple[int, PausingStore, ChatRuntime]:
+        store = PausingStore()
+        captured: dict[str, ChatRuntime] = {}
+
+        def runtime_factory(*args, **kwargs) -> ChatRuntime:
+            runtime = ChatRuntime(*args, **kwargs)
+            captured["runtime"] = runtime
+            return runtime
+
+        monkeypatch.setattr(cli, "OpenAICompatibleChatModel", lambda config: ScriptedModel([_text_model()]))
+        monkeypatch.setattr(cli, "SQLiteCheckpointStore", lambda path: store)
+        monkeypatch.setattr(cli, "ChatRuntime", runtime_factory)
+        task = asyncio.create_task(
+            cli._run_chat(
+                "hello",
+                cli.ToolRegistry(),
+                model_config=ModelConfig("https://example.test", "test-key", "fake"),
+                state_db=str(tmp_path / "terminal-runs.db"),
+                checkpoint_db=str(tmp_path / "terminal-checkpoints.db"),
+            )
+        )
+        await store.started.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        store.release.set()
+        return await task, store, captured["runtime"]
+
+    code, store, runtime = asyncio.run(run())
+    capsys.readouterr()
+    connection = sqlite3.connect(tmp_path / "terminal-runs.db")
+    run_id, history_status = connection.execute("SELECT id, status FROM runs LIMIT 1").fetchone()
+    connection.close()
+    latest = asyncio.run(store.load_latest(run_id))
+
+    assert code == 0
+    assert latest is not None
+    assert latest.state.status is HarnessStatus.COMPLETED
+    assert runtime._harness.state.status is HarnessStatus.COMPLETED
+    assert history_status == "completed"
+
+
+def test_after_model_barrier_cancellation_marks_run_history_trace_incomplete(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    class PausingStore(InMemoryCheckpointStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def initialize(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+        async def save(self, checkpoint: HarnessCheckpoint) -> None:
+            if checkpoint.boundary is CheckpointBoundary.AFTER_MODEL:
+                self.started.set()
+                await self.release.wait()
+            await super().save(checkpoint)
+
+    async def run() -> PausingStore:
+        store = PausingStore()
+        monkeypatch.setattr(cli, "OpenAICompatibleChatModel", lambda config: ScriptedModel([_text_model()]))
+        monkeypatch.setattr(cli, "SQLiteCheckpointStore", lambda path: store)
+        task = asyncio.create_task(
+            cli._run_chat(
+                "hello",
+                cli.ToolRegistry(),
+                model_config=ModelConfig("https://example.test", "test-key", "fake"),
+                state_db=str(tmp_path / "after-model-runs.db"),
+                checkpoint_db=str(tmp_path / "after-model-checkpoints.db"),
+            )
+        )
+        await store.started.wait()
+        task.cancel()
+        store.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return store
+
+    store = asyncio.run(run())
+    capsys.readouterr()
+    connection = sqlite3.connect(tmp_path / "after-model-runs.db")
+    run_id, status, trace_complete, error_code = connection.execute(
+        "SELECT id, status, trace_complete, error_code FROM runs LIMIT 1"
+    ).fetchone()
+    connection.close()
+    latest = asyncio.run(store.load_latest(run_id))
+
+    assert status == "cancelled"
+    assert trace_complete == 0
+    assert error_code == "checkpoint_barrier_cancelled_after_model"
+    assert latest is not None
+    assert latest.boundary is CheckpointBoundary.AFTER_MODEL
+
+
 def test_cancel_during_after_model_save_waits_for_durable_outcome() -> None:
     async def run() -> None:
         class PausingStore(InMemoryCheckpointStore):
@@ -683,6 +928,77 @@ def test_after_tool_commit_failure_marks_trace_incomplete_without_durability_los
         latest = await store.load_latest("run-commit-failed")
         assert latest is not None
         assert latest.boundary is CheckpointBoundary.AFTER_TOOL
+
+    asyncio.run(run())
+
+
+def test_checkpoint_coordinators_keep_run_sequences_isolated() -> None:
+    async def run() -> None:
+        store = InMemoryCheckpointStore()
+        runner = HarnessRunner(ScriptedModel([_text_model()]))
+        first = runner.create_execution(
+            HarnessRequest(messages=(Message(MessageRole.USER, "first"),))
+        )
+        second = runner.create_execution(
+            HarnessRequest(messages=(Message(MessageRole.USER, "second"),))
+        )
+        first_coordinator = CheckpointCoordinator(first, store, run_id="run-first")
+        second_coordinator = CheckpointCoordinator(second, store, run_id="run-second")
+
+        first_events, second_events = await asyncio.gather(
+            _collect(first_coordinator.stream()),
+            _collect(second_coordinator.stream()),
+        )
+
+        assert first_events[-1].type is RuntimeEventType.RUN_COMPLETED
+        assert second_events[-1].type is RuntimeEventType.RUN_COMPLETED
+        first_checkpoints = await store.list("run-first")
+        second_checkpoints = await store.list("run-second")
+        assert [item.run_id for item in first_checkpoints] == ["run-first", "run-first"]
+        assert [item.run_id for item in second_checkpoints] == ["run-second", "run-second"]
+        assert [item.sequence for item in first_checkpoints] == [0, 1]
+        assert [item.sequence for item in second_checkpoints] == [0, 1]
+        assert first.last_checkpoint_sequence == 1
+        assert second.last_checkpoint_sequence == 1
+
+    asyncio.run(run())
+
+
+def test_sqlite_reopen_returns_last_committed_safe_boundary(tmp_path) -> None:
+    async def run() -> None:
+        path = tmp_path / "normal-reopen.db"
+        store = SQLiteCheckpointStore(path)
+        await store.initialize()
+        call = ToolCall(id="call-reopen", name="echo", arguments={})
+        executor = RecordingExecutor([])
+        runtime = ChatRuntime(
+            ScriptedModel([_tool_model(call), _text_model()]),
+            tool_executor=executor,
+            checkpoint_store=store,
+            checkpoint_run_id="run-normal-reopen",
+        )
+        stream = runtime.stream_user_message("hello", tools=[executor.definition_value])
+        async for event in stream:
+            if event.type is RuntimeEventType.TOOL_RESULT:
+                break
+        await stream.aclose()
+        await store.close()
+
+        reopened = SQLiteCheckpointStore(path)
+        await reopened.initialize()
+        latest = await reopened.load_latest("run-normal-reopen")
+        checkpoints = await reopened.list("run-normal-reopen")
+        await reopened.close()
+
+        assert executor.calls == ["call-reopen"]
+        assert latest is not None
+        assert latest.boundary is CheckpointBoundary.AFTER_TOOL
+        assert latest.sequence == 1
+        assert [item.boundary for item in checkpoints] == [
+            CheckpointBoundary.AFTER_MODEL,
+            CheckpointBoundary.AFTER_TOOL,
+        ]
+        assert [item.sequence for item in checkpoints] == [0, 1]
 
     asyncio.run(run())
 
