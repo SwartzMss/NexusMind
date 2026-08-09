@@ -16,8 +16,8 @@ from nexusmind.runtime.chat import AgentLoopLimits
 from nexusmind.runtime.policy import ApprovalDecision, ApprovalRequest, DefaultToolApprovalSummarizer
 from nexusmind.runtime.chat import ChatRuntime, ToolExecutionCancelled
 from nexusmind.runtime.events import RuntimeEventType
-from nexusmind.runtime.leases import RunLeaseError, RunLeaseStoreError, SQLiteRunLeaseStore
-from nexusmind.runtime.harness import CheckpointBarrierCancelled, SQLiteCheckpointStore
+from nexusmind.runtime.leases import RunLeaseError, RunLeaseReleaseError, RunLeaseStoreError, SQLiteRunLeaseStore
+from nexusmind.runtime.harness import CheckpointBarrierCancelled, HarnessStatus, SQLiteCheckpointStore
 from nexusmind.runtime.harness.sqlite_checkpoint_store import CheckpointStoreError
 from nexusmind.skills import SkillError, discover_skills, load_skill, resolve_skill_tool_references
 from nexusmind.skills.resolver import (
@@ -397,7 +397,7 @@ async def _run_chat_with_mcp(
         _best_effort_close(store)
         return 1
     if store and run_id and runtime_started and not failure_sink.get("already_finalized"):
-        try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED, error_code=failure_sink.get("error_code"), error_message=failure_sink.get("message"), trace_complete=failure_sink.get("trace_complete"), final_text=''.join(text_sink) if record_content else None)
+        try: await store.finish_run(run_id, RunStatus.COMPLETED if failure_sink.get("execution_completed") else (RunStatus.FAILED if return_code else RunStatus.COMPLETED), error_code=None if failure_sink.get("execution_completed") else failure_sink.get("error_code"), error_message=None if failure_sink.get("execution_completed") else failure_sink.get("message"), trace_complete=failure_sink.get("trace_complete"), final_text=''.join(text_sink) if record_content else None)
         except StateStoreError:
             print("State error: Run final status could not be persisted", file=sys.stderr); return_code = 1
         _best_effort_close(store)
@@ -603,19 +603,96 @@ async def _run_chat(
             )
         await _best_effort_cancel(store, run_id, trace_complete=failure_sink.get("trace_complete"), error_code=failure_sink.get("error_code", "cancelled"), error_message=failure_sink.get("message"), final_text=''.join(final_text) if record_content else None)
         raise
+    except RunLeaseReleaseError:
+        execution_completed = runtime._harness.state is not None and runtime._harness.state.status is HarnessStatus.COMPLETED
+        failure_sink.update(
+            lease_release_failed=True,
+            cleanup_error_code="lease_release_failed",
+            execution_completed=execution_completed,
+            trace_complete=trace_complete,
+        )
+        if store and run_id:
+            try:
+                await store.append_event(
+                    run_id,
+                    RunTraceEvent(
+                        "lease_release_failed",
+                        datetime.now(timezone.utc),
+                        {"error_code": "lease_release_failed"},
+                    ),
+                )
+            except StateStoreError:
+                trace_complete = False
+                failure_sink["trace_complete"] = False
+        if owns_store and store and run_id:
+            status = RunStatus.COMPLETED if execution_completed else RunStatus.FAILED
+            await _best_effort_finish(
+                store,
+                run_id,
+                status,
+                error_code=None if execution_completed else failure_sink.get("error_code"),
+                error_message=None if execution_completed else failure_message,
+                trace_complete=trace_complete,
+                final_text=''.join(final_text) if record_content else None,
+            )
+        print("Lease error: Run lease release failed", file=sys.stderr)
+        return 1
     except RunLeaseError:
         harness_state = runtime._harness.state
-        if harness_state is not None and harness_state.started_tool_call_ids - harness_state.executed_tool_call_ids:
+        coordinator = runtime._lease_coordinator
+        lease_progress_lost = bool(
+            coordinator is not None
+            and coordinator.ownership_lost_after_progress
+        )
+        if lease_progress_lost or (
+            harness_state is not None
+            and harness_state.started_tool_call_ids - harness_state.executed_tool_call_ids
+        ):
             trace_complete = False
-        failure_sink.update(error_code="lease_ownership_failed", message="Run execution ownership could not be proven", trace_complete=trace_complete)
-        await _best_effort_finish(
+        error_code = "lease_lost_after_execution_progress" if lease_progress_lost else "lease_ownership_failed"
+        release_failed = bool(coordinator is not None and coordinator.release_error is not None)
+        failure_sink.update(
+            error_code=error_code,
+            message="Run execution ownership could not be proven",
+            trace_complete=trace_complete,
+            lease_lost_after_execution_progress=lease_progress_lost,
+            lease_release_failed=release_failed,
+        )
+        if store and run_id:
+            try:
+                await store.append_event(
+                    run_id,
+                    RunTraceEvent(
+                        "lease_ownership_lost",
+                        datetime.now(timezone.utc),
+                        {
+                            "error_code": error_code,
+                            "after_execution_progress": lease_progress_lost,
+                            "release_failed": release_failed,
+                        },
+                    ),
+                )
+                if release_failed:
+                    await store.append_event(
+                        run_id,
+                        RunTraceEvent(
+                            "lease_release_failed",
+                            datetime.now(timezone.utc),
+                            {"error_code": "lease_release_failed"},
+                        ),
+                    )
+            except StateStoreError:
+                trace_complete = False
+                failure_sink["trace_complete"] = False
+        finalized = await _best_effort_finish(
             store,
             run_id,
             RunStatus.FAILED,
-            error_code="lease_ownership_failed",
+            error_code=error_code,
             error_message="Run execution ownership could not be proven",
             trace_complete=trace_complete,
         )
+        failure_sink["already_finalized"] = finalized
         print("Lease error: Run execution ownership could not be proven", file=sys.stderr)
         return 1
     except Exception:
@@ -1108,7 +1185,7 @@ async def _run_skill_with_mcp(
         _best_effort_close(store)
         return 1
     if store and run_id and "tools" in locals() and not failure_sink.get("already_finalized"):
-        try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED, error_code=failure_sink.get("error_code"), error_message=failure_sink.get("message"), trace_complete=failure_sink.get("trace_complete"), final_text=''.join(text_sink) if record_content else None)
+        try: await store.finish_run(run_id, RunStatus.COMPLETED if failure_sink.get("execution_completed") else (RunStatus.FAILED if return_code else RunStatus.COMPLETED), error_code=None if failure_sink.get("execution_completed") else failure_sink.get("error_code"), error_message=None if failure_sink.get("execution_completed") else failure_sink.get("message"), trace_complete=failure_sink.get("trace_complete"), final_text=''.join(text_sink) if record_content else None)
         except StateStoreError:
             print("State error: Run final status could not be persisted", file=sys.stderr); return_code = 1
         _best_effort_close(store)

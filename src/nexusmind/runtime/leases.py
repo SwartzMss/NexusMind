@@ -32,6 +32,10 @@ class RunLeaseStoreError(RunLeaseError):
     """Lease persistence failed or produced an ambiguous result."""
 
 
+class RunLeaseReleaseError(RunLeaseStoreError):
+    """Execution ended, but releasing its lease could not be proven."""
+
+
 @dataclass(frozen=True, slots=True)
 class RunLease:
     run_id: str
@@ -74,6 +78,65 @@ class RunLeaseStore(Protocol):
         ...
 
 
+class ExecutionOwnershipGuard(Protocol):
+    def assert_owned(self) -> None:
+        ...
+
+
+class RunLeaseOwnershipGuard:
+    """Shared in-process proof consulted immediately before side effects."""
+
+    def __init__(self, *, clock: Callable[[], datetime] | None = None) -> None:
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._lease: RunLease | None = None
+        self._ownership_error: RunLeaseError | None = None
+
+    @property
+    def lease(self) -> RunLease | None:
+        return self._lease
+
+    def prove(self, lease: RunLease, *, initial: bool = False) -> None:
+        if type(lease) is not RunLease:
+            raise RunLeaseStoreError("Run lease store returned an invalid lease")
+        if self._ownership_error is not None and not initial:
+            raise self._ownership_error
+        now = self._now()
+        if lease.is_expired(now):
+            raise RunLeaseOwnershipLost("Run lease store returned an expired lease")
+        self._lease = lease
+        self._ownership_error = None
+
+    def fail(self, error: RunLeaseError) -> None:
+        if not isinstance(error, RunLeaseError):
+            raise TypeError("Ownership guard failure must be a RunLeaseError")
+        self._ownership_error = error
+
+    def clear(self) -> None:
+        self._lease = None
+
+    def assert_owned(self) -> None:
+        if self._ownership_error is not None:
+            raise self._ownership_error
+        if self._lease is None:
+            raise RunLeaseOwnershipLost("Run lease has not been acquired")
+        if self._lease.is_expired(self._now()):
+            error = RunLeaseOwnershipLost("Run lease expired before execution could continue")
+            self._ownership_error = error
+            raise error
+
+    def _now(self) -> datetime:
+        try:
+            now = self._clock()
+            _require_utc(now, "clock result")
+            return now
+        except RunLeaseError:
+            raise
+        except Exception as exc:
+            error = RunLeaseStoreError("Run lease clock failed")
+            self._ownership_error = error
+            raise error from exc
+
+
 class RunLeaseCoordinator:
     """Own and heartbeat a run while fail-closed gating an async event stream.
 
@@ -91,6 +154,7 @@ class RunLeaseCoordinator:
         ttl: timedelta = timedelta(seconds=30),
         heartbeat_interval: timedelta | None = None,
         clock: Callable[[], datetime] | None = None,
+        guard: RunLeaseOwnershipGuard | None = None,
     ) -> None:
         _validate_identity(run_id, "run_id")
         resolved_owner_id = owner_id or uuid4().hex
@@ -105,16 +169,15 @@ class RunLeaseCoordinator:
         self.owner_id = resolved_owner_id
         self.ttl = ttl
         self.heartbeat_interval = interval
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
-        self._lease: RunLease | None = None
-        self._ownership_error: RunLeaseError | None = None
+        self._guard = guard or RunLeaseOwnershipGuard(clock=clock)
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._stream_started = False
         self.release_error: RunLeaseError | None = None
+        self.ownership_lost_after_progress = False
 
     @property
     def lease(self) -> RunLease | None:
-        return self._lease
+        return self._guard.lease
 
     async def stream(self, events: AsyncIterator[RuntimeEvent]) -> AsyncIterator[RuntimeEvent]:
         if self._stream_started:
@@ -129,7 +192,7 @@ class RunLeaseCoordinator:
                 raise
             except Exception as exc:
                 raise RunLeaseStoreError("Run lease acquisition failed") from exc
-            self._lease = self._validate_owned_lease(lease)
+            self._guard.prove(self._validate_owned_lease(lease), initial=True)
             acquired = True
             self._heartbeat_task = asyncio.create_task(self._heartbeat())
             while True:
@@ -138,7 +201,11 @@ class RunLeaseCoordinator:
                     event = await anext(iterator)
                 except StopAsyncIteration:
                     break
-                self.assert_owned()
+                try:
+                    self.assert_owned()
+                except RunLeaseError:
+                    self.ownership_lost_after_progress = True
+                    raise
                 yield event
                 if event.type in {RuntimeEventType.RUN_COMPLETED, RuntimeEventType.RUN_FAILED}:
                     break
@@ -158,21 +225,7 @@ class RunLeaseCoordinator:
                         raise
 
     def assert_owned(self) -> None:
-        if self._ownership_error is not None:
-            raise self._ownership_error
-        if self._lease is None:
-            raise RunLeaseOwnershipLost("Run lease has not been acquired")
-        try:
-            now = self._clock()
-            _require_utc(now, "clock result")
-        except Exception as exc:
-            error = RunLeaseStoreError("Run lease clock failed")
-            self._ownership_error = error
-            raise error from exc
-        if self._lease.is_expired(now):
-            error = RunLeaseOwnershipLost("Run lease expired before execution could continue")
-            self._ownership_error = error
-            raise error
+        self._guard.assert_owned()
 
     async def _heartbeat(self) -> None:
         delay = self.heartbeat_interval.total_seconds()
@@ -180,15 +233,16 @@ class RunLeaseCoordinator:
             try:
                 await asyncio.sleep(delay)
                 renewed = await self._store.renew(self.run_id, self.owner_id, self.ttl)
-                self._lease = self._validate_owned_lease(renewed)
+                self._guard.prove(self._validate_owned_lease(renewed))
             except asyncio.CancelledError:
                 raise
             except RunLeaseError as exc:
-                self._ownership_error = exc
+                self._guard.fail(exc)
                 return
             except Exception as exc:
-                self._ownership_error = RunLeaseStoreError("Run lease heartbeat failed")
-                self._ownership_error.__cause__ = exc
+                error = RunLeaseStoreError("Run lease heartbeat failed")
+                error.__cause__ = exc
+                self._guard.fail(error)
                 return
 
     def _validate_owned_lease(self, lease: object) -> RunLease:
@@ -196,13 +250,6 @@ class RunLeaseCoordinator:
             raise RunLeaseStoreError("Run lease store returned an invalid lease")
         if lease.run_id != self.run_id or lease.owner_id != self.owner_id:
             raise RunLeaseStoreError("Run lease store returned the wrong owner")
-        try:
-            now = self._clock()
-            _require_utc(now, "clock result")
-        except Exception as exc:
-            raise RunLeaseStoreError("Run lease clock failed") from exc
-        if lease.is_expired(now):
-            raise RunLeaseOwnershipLost("Run lease store returned an expired lease")
         return lease
 
     async def _stop_heartbeat(self) -> None:
@@ -219,12 +266,12 @@ class RunLeaseCoordinator:
     async def _release(self) -> None:
         try:
             await self._store.release(self.run_id, self.owner_id)
-        except RunLeaseError:
-            raise
+        except RunLeaseError as exc:
+            raise RunLeaseReleaseError("Run lease release failed") from exc
         except Exception as exc:
-            raise RunLeaseStoreError("Run lease release failed") from exc
+            raise RunLeaseReleaseError("Run lease release failed") from exc
         finally:
-            self._lease = None
+            self._guard.clear()
 
 
 class SQLiteRunLeaseStore:

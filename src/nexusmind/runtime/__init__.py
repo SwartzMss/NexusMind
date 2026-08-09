@@ -5,10 +5,13 @@ the legacy runtime import graph acyclic.
 """
 
 from .leases import (
+    ExecutionOwnershipGuard,
     RunLease,
     RunLeaseCoordinator,
     RunLeaseError,
     RunLeaseOwnershipLost,
+    RunLeaseOwnershipGuard,
+    RunLeaseReleaseError,
     RunLeaseStore,
     RunLeaseStoreError,
     RunLeaseUnavailable,
@@ -16,10 +19,13 @@ from .leases import (
 )
 
 __all__ = [
+    "ExecutionOwnershipGuard",
     "RunLease",
     "RunLeaseCoordinator",
     "RunLeaseError",
     "RunLeaseOwnershipLost",
+    "RunLeaseOwnershipGuard",
+    "RunLeaseReleaseError",
     "RunLeaseStore",
     "RunLeaseStoreError",
     "RunLeaseUnavailable",
