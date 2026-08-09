@@ -1,0 +1,458 @@
+from __future__ import annotations
+
+import asyncio
+import sqlite3
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from nexusmind import cli
+from nexusmind.config import ModelConfig
+from nexusmind.runtime.leases import (
+    RunLease,
+    RunLeaseOwnershipLost,
+    RunLeaseStoreError,
+    RunLeaseUnavailable,
+    SQLiteRunLeaseStore,
+)
+from nexusmind.models.base import ChatModel
+from nexusmind.runtime.chat import ChatRuntime
+from nexusmind.runtime.events import RuntimeEvent, RuntimeEventType
+from nexusmind.tools.contracts import (
+    ToolCall,
+    ToolDefinition,
+    ToolResult,
+    ToolResultBudget,
+    ToolResultRequirements,
+)
+from nexusmind.tools.registry import ToolRegistry
+
+
+class MutableClock:
+    def __init__(self) -> None:
+        self.value = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    def __call__(self) -> datetime:
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        self.value += timedelta(seconds=seconds)
+
+
+def test_first_owner_acquires_and_heartbeat_renews_lease(tmp_path) -> None:
+    async def run() -> None:
+        clock = MutableClock()
+        store = SQLiteRunLeaseStore(tmp_path / "leases.db", clock=clock)
+        await store.initialize()
+
+        acquired = await store.acquire("run-1", "owner-1", timedelta(seconds=10))
+        clock.advance(3)
+        renewed = await store.renew("run-1", "owner-1", timedelta(seconds=10))
+
+        assert acquired.acquired_at == clock.value - timedelta(seconds=3)
+        assert renewed.acquired_at == acquired.acquired_at
+        assert renewed.heartbeat_at == clock.value
+        assert renewed.expires_at == clock.value + timedelta(seconds=10)
+        assert await store.inspect("run-1") == renewed
+        await store.close()
+
+    asyncio.run(run())
+
+
+def test_second_owner_cannot_acquire_or_renew_unexpired_lease(tmp_path) -> None:
+    async def run() -> None:
+        store = SQLiteRunLeaseStore(tmp_path / "leases.db", clock=MutableClock())
+        await store.initialize()
+        await store.acquire("run-1", "owner-1", timedelta(seconds=10))
+
+        with pytest.raises(RunLeaseUnavailable):
+            await store.acquire("run-1", "owner-2", timedelta(seconds=10))
+        with pytest.raises(RunLeaseOwnershipLost):
+            await store.renew("run-1", "owner-2", timedelta(seconds=10))
+        assert (await store.inspect("run-1")).owner_id == "owner-1"
+
+    asyncio.run(run())
+
+
+def test_concurrent_acquire_allows_exactly_one_owner(tmp_path) -> None:
+    async def run() -> None:
+        path = tmp_path / "leases.db"
+        first = SQLiteRunLeaseStore(path)
+        second = SQLiteRunLeaseStore(path)
+        await asyncio.gather(first.initialize(), second.initialize())
+
+        results = await asyncio.gather(
+            first.acquire("run-race", "owner-1", timedelta(seconds=30)),
+            second.acquire("run-race", "owner-2", timedelta(seconds=30)),
+            return_exceptions=True,
+        )
+
+        winners = [result for result in results if not isinstance(result, BaseException)]
+        losers = [result for result in results if isinstance(result, RunLeaseUnavailable)]
+        assert len(winners) == 1
+        assert len(losers) == 1
+        assert (await first.inspect("run-race")).owner_id == winners[0].owner_id
+
+    asyncio.run(run())
+
+
+def test_expired_takeover_has_one_winner_and_rejects_stale_owner(tmp_path) -> None:
+    async def run() -> None:
+        clock = MutableClock()
+        path = tmp_path / "leases.db"
+        stores = [SQLiteRunLeaseStore(path, clock=clock) for _ in range(3)]
+        await asyncio.gather(*(store.initialize() for store in stores))
+        await stores[0].acquire("run-takeover", "old-owner", timedelta(seconds=5))
+        clock.advance(6)
+
+        results = await asyncio.gather(
+            stores[1].acquire("run-takeover", "new-owner-1", timedelta(seconds=10)),
+            stores[2].acquire("run-takeover", "new-owner-2", timedelta(seconds=10)),
+            return_exceptions=True,
+        )
+        winners = [result for result in results if not isinstance(result, BaseException)]
+        assert len(winners) == 1
+        assert sum(isinstance(result, RunLeaseUnavailable) for result in results) == 1
+
+        with pytest.raises(RunLeaseOwnershipLost):
+            await stores[0].renew("run-takeover", "old-owner", timedelta(seconds=10))
+        with pytest.raises(RunLeaseOwnershipLost):
+            await stores[0].release("run-takeover", "old-owner")
+        assert (await stores[0].inspect("run-takeover")).owner_id == winners[0].owner_id
+
+    asyncio.run(run())
+
+
+def test_owner_scoped_release_and_different_run_ids_are_isolated(tmp_path) -> None:
+    async def run() -> None:
+        store = SQLiteRunLeaseStore(tmp_path / "leases.db")
+        await store.initialize()
+        first, second = await asyncio.gather(
+            store.acquire("run-1", "owner-1", timedelta(seconds=10)),
+            store.acquire("run-2", "owner-2", timedelta(seconds=10)),
+        )
+        assert first.run_id == "run-1"
+        assert second.run_id == "run-2"
+
+        with pytest.raises(RunLeaseOwnershipLost):
+            await store.release("run-1", "owner-2")
+        await store.release("run-1", "owner-1")
+        assert await store.inspect("run-1") is None
+        assert (await store.inspect("run-2")).owner_id == "owner-2"
+
+    asyncio.run(run())
+
+
+def test_sqlite_reopen_preserves_active_lease(tmp_path) -> None:
+    async def run() -> None:
+        path = tmp_path / "leases.db"
+        first = SQLiteRunLeaseStore(path)
+        await first.initialize()
+        lease = await first.acquire("run-1", "owner-1", timedelta(minutes=1))
+        await first.close()
+
+        reopened = SQLiteRunLeaseStore(path)
+        await reopened.initialize()
+        assert await reopened.inspect("run-1") == lease
+        with pytest.raises(RunLeaseUnavailable):
+            await reopened.acquire("run-1", "owner-2", timedelta(minutes=1))
+
+    asyncio.run(run())
+
+
+def test_sqlite_lock_failure_is_controlled(tmp_path) -> None:
+    async def run() -> None:
+        path = tmp_path / "leases.db"
+        store = SQLiteRunLeaseStore(path, timeout=0.01)
+        await store.initialize()
+        lock = sqlite3.connect(path, isolation_level=None)
+        lock.execute("BEGIN IMMEDIATE")
+        try:
+            with pytest.raises(RunLeaseStoreError):
+                await store.acquire("run-1", "owner-1", timedelta(seconds=10))
+        finally:
+            lock.rollback()
+            lock.close()
+
+    asyncio.run(run())
+
+
+def test_invalid_or_closed_store_fails_with_public_errors(tmp_path) -> None:
+    async def run() -> None:
+        path = tmp_path / "leases.db"
+        connection = sqlite3.connect(path)
+        connection.execute("CREATE TABLE run_leases (run_id TEXT PRIMARY KEY)")
+        connection.close()
+        store = SQLiteRunLeaseStore(path)
+        with pytest.raises(RunLeaseStoreError):
+            await store.initialize()
+
+        healthy = SQLiteRunLeaseStore(tmp_path / "healthy.db")
+        await healthy.initialize()
+        await healthy.close()
+        with pytest.raises(RunLeaseStoreError):
+            await healthy.inspect("run-1")
+
+    asyncio.run(run())
+
+
+class CountingTextModel(ChatModel):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def stream(self, messages, tools=None):
+        self.calls += 1
+        yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+        yield RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="done")
+        yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="stop")
+
+
+class ToolModel(ChatModel):
+    def __init__(self, call: ToolCall) -> None:
+        self.call = call
+        self.calls = 0
+
+    async def stream(self, messages, tools=None):
+        self.calls += 1
+        yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+        yield RuntimeEvent(RuntimeEventType.TOOL_CALL_COMPLETED, tool_call=self.call)
+        yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="tool_calls")
+
+
+class RecordingExecutor:
+    definition_value = ToolDefinition(
+        name="echo",
+        description="echo",
+        input_schema={"type": "object", "additionalProperties": False},
+    )
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def definition(self, name: str) -> ToolDefinition | None:
+        return self.definition_value if name == "echo" else None
+
+    def result_requirements(self, call: ToolCall) -> ToolResultRequirements:
+        return ToolResultRequirements(min_bytes=32, min_nodes=3, min_depth=1)
+
+    async def execute(self, call: ToolCall) -> ToolResult:
+        self.calls.append(call.id)
+        return ToolResult(call_id=call.id, name=call.name, output="ok")
+
+    async def execute_with_result_budget(
+        self,
+        call: ToolCall,
+        *,
+        result_budget: ToolResultBudget,
+    ) -> ToolResult:
+        return await self.execute(call)
+
+
+def test_lease_acquisition_failure_fails_closed_before_model(tmp_path) -> None:
+    async def run() -> None:
+        store = SQLiteRunLeaseStore(tmp_path / "leases.db")
+        await store.initialize()
+        await store.acquire("run-1", "existing-owner", timedelta(seconds=30))
+        model = CountingTextModel()
+        runtime = ChatRuntime(
+            model,
+            lease_store=store,
+            lease_run_id="run-1",
+            lease_owner_id="contender",
+        )
+
+        with pytest.raises(RunLeaseUnavailable):
+            [event async for event in runtime.stream_user_message("hello")]
+        assert model.calls == 0
+        assert (await store.inspect("run-1")).owner_id == "existing-owner"
+
+    asyncio.run(run())
+
+
+def test_normal_execution_releases_lease(tmp_path) -> None:
+    async def run() -> None:
+        store = SQLiteRunLeaseStore(tmp_path / "leases.db")
+        await store.initialize()
+        runtime = ChatRuntime(
+            CountingTextModel(),
+            lease_store=store,
+            lease_run_id="run-1",
+            lease_owner_id="owner-1",
+        )
+
+        events = [event async for event in runtime.stream_user_message("hello")]
+        assert events[-1].type is RuntimeEventType.RUN_COMPLETED
+        assert await store.inspect("run-1") is None
+
+    asyncio.run(run())
+
+
+def test_failed_and_cancelled_executions_release_lease(tmp_path) -> None:
+    async def run() -> None:
+        class FailingModel(ChatModel):
+            async def stream(self, messages, tools=None):
+                yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+                raise RuntimeError("provider failed")
+
+        class CancelModel(ChatModel):
+            async def stream(self, messages, tools=None):
+                yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+                raise asyncio.CancelledError()
+
+        store = SQLiteRunLeaseStore(tmp_path / "leases.db")
+        await store.initialize()
+        failed = ChatRuntime(
+            FailingModel(),
+            lease_store=store,
+            lease_run_id="run-failed",
+            lease_owner_id="owner-failed",
+        )
+        events = [event async for event in failed.stream_user_message("hello")]
+        assert events[-1].type is RuntimeEventType.RUN_FAILED
+        assert await store.inspect("run-failed") is None
+
+        cancelled = ChatRuntime(
+            CancelModel(),
+            lease_store=store,
+            lease_run_id="run-cancelled",
+            lease_owner_id="owner-cancelled",
+        )
+        with pytest.raises(asyncio.CancelledError):
+            [event async for event in cancelled.stream_user_message("hello")]
+        assert await store.inspect("run-cancelled") is None
+
+    asyncio.run(run())
+
+
+def test_heartbeat_ownership_loss_blocks_next_tool() -> None:
+    async def run() -> None:
+        class HeartbeatFailureStore:
+            def __init__(self) -> None:
+                self.renew_failed = asyncio.Event()
+
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl):
+                self.renew_failed.set()
+                raise RunLeaseStoreError("heartbeat persistence failed")
+
+            async def inspect(self, run_id):
+                return None
+
+            async def release(self, run_id, owner_id):
+                return None
+
+        store = HeartbeatFailureStore()
+        call = ToolCall(id="call-1", name="echo", arguments={})
+        model = ToolModel(call)
+        executor = RecordingExecutor()
+        runtime = ChatRuntime(
+            model,
+            tool_executor=executor,
+            lease_store=store,
+            lease_run_id="run-1",
+            lease_owner_id="owner-1",
+            lease_ttl=timedelta(seconds=1),
+            lease_heartbeat_interval=timedelta(milliseconds=10),
+        )
+
+        stream = runtime.stream_user_message("hello", tools=[executor.definition_value])
+        seen = []
+        with pytest.raises(RunLeaseStoreError, match="heartbeat persistence failed"):
+            async for event in stream:
+                seen.append(event.type)
+                if event.type is RuntimeEventType.MODEL_TURN_COMPLETED:
+                    await store.renew_failed.wait()
+
+        assert RuntimeEventType.MODEL_TURN_COMPLETED in seen
+        assert executor.calls == []
+        assert model.calls == 1
+
+    asyncio.run(run())
+
+
+def test_release_failure_is_surfaced_after_terminal_event() -> None:
+    async def run() -> None:
+        class ReleaseFailureStore:
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl):
+                raise AssertionError("heartbeat should not run")
+
+            async def inspect(self, run_id):
+                return None
+
+            async def release(self, run_id, owner_id):
+                raise RunLeaseStoreError("release persistence failed")
+
+        runtime = ChatRuntime(
+            CountingTextModel(),
+            lease_store=ReleaseFailureStore(),
+            lease_run_id="run-1",
+            lease_owner_id="owner-1",
+        )
+        terminal_seen = False
+        with pytest.raises(RunLeaseStoreError, match="release persistence failed"):
+            async for event in runtime.stream_user_message("hello"):
+                terminal_seen = terminal_seen or event.type is RuntimeEventType.RUN_COMPLETED
+        assert terminal_seen
+
+    asyncio.run(run())
+
+
+def test_cli_execution_owns_and_releases_lease(tmp_path, monkeypatch, capsys) -> None:
+    lease_path = tmp_path / "cli-leases.db"
+    model = CountingTextModel()
+    monkeypatch.setattr(cli, "OpenAICompatibleChatModel", lambda config: model)
+
+    code = asyncio.run(
+        cli._run_chat(
+            "hello",
+            ToolRegistry(),
+            model_config=ModelConfig("https://example.test", "test-key", "fake"),
+            lease_db=str(lease_path),
+            lease_run_id="run-cli",
+        )
+    )
+    capsys.readouterr()
+
+    async def inspect() -> None:
+        store = SQLiteRunLeaseStore(lease_path)
+        await store.initialize()
+        assert await store.inspect("run-cli") is None
+
+    asyncio.run(inspect())
+    assert code == 0
+    assert model.calls == 1
+
+
+def test_cli_active_owner_fails_closed_before_model(tmp_path, monkeypatch, capsys) -> None:
+    lease_path = tmp_path / "cli-leases.db"
+
+    async def own_run() -> None:
+        store = SQLiteRunLeaseStore(lease_path)
+        await store.initialize()
+        await store.acquire("run-cli", "existing-owner", timedelta(minutes=1))
+        await store.close()
+
+    asyncio.run(own_run())
+    model = CountingTextModel()
+    monkeypatch.setattr(cli, "OpenAICompatibleChatModel", lambda config: model)
+
+    code = asyncio.run(
+        cli._run_chat(
+            "hello",
+            ToolRegistry(),
+            model_config=ModelConfig("https://example.test", "test-key", "fake"),
+            lease_db=str(lease_path),
+            lease_run_id="run-cli",
+        )
+    )
+
+    assert code == 1
+    assert model.calls == 0
+    assert "ownership could not be proven" in capsys.readouterr().err

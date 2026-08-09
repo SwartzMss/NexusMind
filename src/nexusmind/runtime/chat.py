@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import timedelta
 
 from nexusmind.models.base import ChatModel
 from nexusmind.runtime.events import RuntimeEvent
@@ -13,6 +14,7 @@ from nexusmind.runtime.harness.runner import HarnessRunner
 from nexusmind.runtime.harness.checkpoint_store import CheckpointStore
 from nexusmind.runtime.harness.checkpointing import CheckpointCoordinator
 from nexusmind.runtime.messages import Message, MessageRole
+from nexusmind.runtime.leases import RunLeaseCoordinator, RunLeaseStore
 from nexusmind.runtime.policy import ApprovalProvider, ToolApprovalSummarizer, ToolPolicy
 from nexusmind.tools.contracts import ToolDefinition
 from nexusmind.tools.executor import ToolExecutorProtocol
@@ -35,6 +37,11 @@ class ChatRuntime:
         checkpoint_run_id: str | None = None,
         checkpoint_sequence: int | None = None,
         save_terminal_checkpoint: bool = True,
+        lease_store: RunLeaseStore | None = None,
+        lease_run_id: str | None = None,
+        lease_owner_id: str | None = None,
+        lease_ttl: timedelta = timedelta(seconds=30),
+        lease_heartbeat_interval: timedelta | None = None,
     ) -> None:
         self._harness = HarnessRunner(
             model,
@@ -52,6 +59,18 @@ class ChatRuntime:
         self._checkpoint_run_id = checkpoint_run_id
         self._checkpoint_sequence = checkpoint_sequence
         self._save_terminal_checkpoint = save_terminal_checkpoint
+        if lease_store is not None and not lease_run_id:
+            raise ValueError("lease_run_id is required when run leasing is enabled")
+        if lease_store is None and lease_run_id is not None:
+            raise ValueError("lease_store is required when lease_run_id is provided")
+        if checkpoint_run_id is not None and lease_run_id is not None and checkpoint_run_id != lease_run_id:
+            raise ValueError("Lease and checkpoint run IDs must match")
+        self._lease_store = lease_store
+        self._lease_run_id = lease_run_id
+        self._lease_owner_id = lease_owner_id
+        self._lease_ttl = lease_ttl
+        self._lease_heartbeat_interval = lease_heartbeat_interval
+        self._lease_coordinator: RunLeaseCoordinator | None = None
 
     async def stream_user_message(
         self,
@@ -79,6 +98,15 @@ class ChatRuntime:
                 start_sequence=self._checkpoint_sequence,
                 save_terminal=self._save_terminal_checkpoint,
             ).stream()
+        if self._lease_store is not None:
+            self._lease_coordinator = RunLeaseCoordinator(
+                self._lease_store,
+                run_id=self._lease_run_id,
+                owner_id=self._lease_owner_id,
+                ttl=self._lease_ttl,
+                heartbeat_interval=self._lease_heartbeat_interval,
+            )
+            stream = self._lease_coordinator.stream(stream)
         try:
             async for event in stream:
                 yield event

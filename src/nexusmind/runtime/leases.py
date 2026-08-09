@@ -1,0 +1,525 @@
+"""Durable, owner-scoped execution leases for NexusMind runs."""
+
+from __future__ import annotations
+
+import asyncio
+import sqlite3
+import sys
+from collections.abc import AsyncIterator, Callable
+from contextlib import closing
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Protocol
+from uuid import uuid4
+
+from nexusmind.runtime.events import RuntimeEvent, RuntimeEventType
+
+
+class RunLeaseError(RuntimeError):
+    """Base class for controlled lease failures."""
+
+
+class RunLeaseUnavailable(RunLeaseError):
+    """The run is currently owned by another live owner."""
+
+
+class RunLeaseOwnershipLost(RunLeaseError):
+    """The caller can no longer prove that it owns the run."""
+
+
+class RunLeaseStoreError(RunLeaseError):
+    """Lease persistence failed or produced an ambiguous result."""
+
+
+@dataclass(frozen=True, slots=True)
+class RunLease:
+    run_id: str
+    owner_id: str
+    acquired_at: datetime
+    heartbeat_at: datetime
+    expires_at: datetime
+
+    def __post_init__(self) -> None:
+        _validate_identity(self.run_id, "run_id")
+        _validate_identity(self.owner_id, "owner_id")
+        for value, name in (
+            (self.acquired_at, "acquired_at"),
+            (self.heartbeat_at, "heartbeat_at"),
+            (self.expires_at, "expires_at"),
+        ):
+            _require_utc(value, name)
+        if self.heartbeat_at < self.acquired_at:
+            raise ValueError("Run lease heartbeat cannot precede acquisition")
+        if self.expires_at <= self.heartbeat_at:
+            raise ValueError("Run lease expiry must follow its heartbeat")
+
+    def is_expired(self, at: datetime | None = None) -> bool:
+        instant = at or datetime.now(timezone.utc)
+        _require_utc(instant, "at")
+        return self.expires_at <= instant
+
+
+class RunLeaseStore(Protocol):
+    async def acquire(self, run_id: str, owner_id: str, ttl: timedelta) -> RunLease:
+        ...
+
+    async def renew(self, run_id: str, owner_id: str, ttl: timedelta) -> RunLease:
+        ...
+
+    async def inspect(self, run_id: str) -> RunLease | None:
+        ...
+
+    async def release(self, run_id: str, owner_id: str) -> None:
+        ...
+
+
+class RunLeaseCoordinator:
+    """Own and heartbeat a run while fail-closed gating an async event stream.
+
+    The coordinator sits outside the Harness state machine. It checks the
+    locally proven lease before advancing the wrapped stream, so a lost lease
+    cannot advance to another model or tool operation.
+    """
+
+    def __init__(
+        self,
+        store: RunLeaseStore,
+        *,
+        run_id: str,
+        owner_id: str | None = None,
+        ttl: timedelta = timedelta(seconds=30),
+        heartbeat_interval: timedelta | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        _validate_identity(run_id, "run_id")
+        resolved_owner_id = owner_id or uuid4().hex
+        _validate_identity(resolved_owner_id, "owner_id")
+        if type(ttl) is not timedelta or ttl <= timedelta(0):
+            raise ValueError("Run lease ttl must be a positive timedelta")
+        interval = heartbeat_interval or ttl / 3
+        if type(interval) is not timedelta or interval <= timedelta(0) or interval >= ttl:
+            raise ValueError("Heartbeat interval must be positive and shorter than the lease ttl")
+        self._store = store
+        self.run_id = run_id
+        self.owner_id = resolved_owner_id
+        self.ttl = ttl
+        self.heartbeat_interval = interval
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._lease: RunLease | None = None
+        self._ownership_error: RunLeaseError | None = None
+        self._heartbeat_task: asyncio.Task[None] | None = None
+        self._stream_started = False
+        self.release_error: RunLeaseError | None = None
+
+    @property
+    def lease(self) -> RunLease | None:
+        return self._lease
+
+    async def stream(self, events: AsyncIterator[RuntimeEvent]) -> AsyncIterator[RuntimeEvent]:
+        if self._stream_started:
+            raise RuntimeError("RunLeaseCoordinator can only be streamed once")
+        self._stream_started = True
+        acquired = False
+        iterator = events.__aiter__()
+        try:
+            try:
+                lease = await self._store.acquire(self.run_id, self.owner_id, self.ttl)
+            except RunLeaseError:
+                raise
+            except Exception as exc:
+                raise RunLeaseStoreError("Run lease acquisition failed") from exc
+            self._lease = self._validate_owned_lease(lease)
+            acquired = True
+            self._heartbeat_task = asyncio.create_task(self._heartbeat())
+            while True:
+                self.assert_owned()
+                try:
+                    event = await anext(iterator)
+                except StopAsyncIteration:
+                    break
+                self.assert_owned()
+                yield event
+                if event.type in {RuntimeEventType.RUN_COMPLETED, RuntimeEventType.RUN_FAILED}:
+                    break
+        finally:
+            active_error = sys.exc_info()[1]
+            await self._stop_heartbeat()
+            try:
+                await iterator.aclose()
+            except (AttributeError, RuntimeError):
+                pass
+            if acquired:
+                try:
+                    await self._release()
+                except RunLeaseError as exc:
+                    self.release_error = exc
+                    if active_error is None:
+                        raise
+
+    def assert_owned(self) -> None:
+        if self._ownership_error is not None:
+            raise self._ownership_error
+        if self._lease is None:
+            raise RunLeaseOwnershipLost("Run lease has not been acquired")
+        try:
+            now = self._clock()
+            _require_utc(now, "clock result")
+        except Exception as exc:
+            error = RunLeaseStoreError("Run lease clock failed")
+            self._ownership_error = error
+            raise error from exc
+        if self._lease.is_expired(now):
+            error = RunLeaseOwnershipLost("Run lease expired before execution could continue")
+            self._ownership_error = error
+            raise error
+
+    async def _heartbeat(self) -> None:
+        delay = self.heartbeat_interval.total_seconds()
+        while True:
+            try:
+                await asyncio.sleep(delay)
+                renewed = await self._store.renew(self.run_id, self.owner_id, self.ttl)
+                self._lease = self._validate_owned_lease(renewed)
+            except asyncio.CancelledError:
+                raise
+            except RunLeaseError as exc:
+                self._ownership_error = exc
+                return
+            except Exception as exc:
+                self._ownership_error = RunLeaseStoreError("Run lease heartbeat failed")
+                self._ownership_error.__cause__ = exc
+                return
+
+    def _validate_owned_lease(self, lease: object) -> RunLease:
+        if type(lease) is not RunLease:
+            raise RunLeaseStoreError("Run lease store returned an invalid lease")
+        if lease.run_id != self.run_id or lease.owner_id != self.owner_id:
+            raise RunLeaseStoreError("Run lease store returned the wrong owner")
+        try:
+            now = self._clock()
+            _require_utc(now, "clock result")
+        except Exception as exc:
+            raise RunLeaseStoreError("Run lease clock failed") from exc
+        if lease.is_expired(now):
+            raise RunLeaseOwnershipLost("Run lease store returned an expired lease")
+        return lease
+
+    async def _stop_heartbeat(self) -> None:
+        task = self._heartbeat_task
+        self._heartbeat_task = None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _release(self) -> None:
+        try:
+            await self._store.release(self.run_id, self.owner_id)
+        except RunLeaseError:
+            raise
+        except Exception as exc:
+            raise RunLeaseStoreError("Run lease release failed") from exc
+        finally:
+            self._lease = None
+
+
+class SQLiteRunLeaseStore:
+    """SQLite lease store with transactional acquisition and takeover."""
+
+    def __init__(
+        self,
+        db_path: str | Path,
+        *,
+        clock: Callable[[], datetime] | None = None,
+        timeout: float = 10.0,
+    ) -> None:
+        self._path = str(db_path)
+        if self._path in {"", ":memory:"}:
+            raise ValueError("SQLiteRunLeaseStore requires a persistent database path")
+        if timeout <= 0:
+            raise ValueError("SQLite lease timeout must be positive")
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._timeout = timeout
+        self._initialized = False
+        self._closed = False
+
+    async def initialize(self) -> None:
+        await asyncio.to_thread(self._initialize)
+        self._initialized = True
+        self._closed = False
+
+    async def close(self) -> None:
+        self._closed = True
+
+    async def acquire(self, run_id: str, owner_id: str, ttl: timedelta) -> RunLease:
+        self._require_ready()
+        _validate_request(run_id, owner_id, ttl)
+        now = self._now()
+        return await asyncio.to_thread(self._acquire, run_id, owner_id, ttl, now)
+
+    async def renew(self, run_id: str, owner_id: str, ttl: timedelta) -> RunLease:
+        self._require_ready()
+        _validate_request(run_id, owner_id, ttl)
+        now = self._now()
+        return await asyncio.to_thread(self._renew, run_id, owner_id, ttl, now)
+
+    async def inspect(self, run_id: str) -> RunLease | None:
+        self._require_ready()
+        _validate_identity(run_id, "run_id")
+        return await asyncio.to_thread(self._inspect, run_id)
+
+    async def release(self, run_id: str, owner_id: str) -> None:
+        self._require_ready()
+        _validate_identity(run_id, "run_id")
+        _validate_identity(owner_id, "owner_id")
+        await asyncio.to_thread(self._release, run_id, owner_id)
+
+    def _connect(self) -> sqlite3.Connection:
+        db = sqlite3.connect(self._path, timeout=self._timeout, isolation_level=None)
+        db.execute(f"PRAGMA busy_timeout={max(1, int(self._timeout * 1000))}")
+        db.execute("PRAGMA synchronous=FULL")
+        return db
+
+    def _initialize(self) -> None:
+        try:
+            with closing(self._connect()) as db:
+                db.execute("BEGIN IMMEDIATE")
+                db.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS run_leases (
+                        run_id TEXT PRIMARY KEY,
+                        owner_id TEXT NOT NULL,
+                        acquired_at TEXT NOT NULL,
+                        heartbeat_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL
+                    )
+                    """
+                )
+                self._validate_schema(db)
+                db.commit()
+        except RunLeaseStoreError:
+            raise
+        except sqlite3.Error as exc:
+            raise RunLeaseStoreError("SQLite lease initialization failed") from exc
+
+    @staticmethod
+    def _validate_schema(db: sqlite3.Connection) -> None:
+        expected = {
+            "run_id": ("TEXT", 0, 1),
+            "owner_id": ("TEXT", 1, 0),
+            "acquired_at": ("TEXT", 1, 0),
+            "heartbeat_at": ("TEXT", 1, 0),
+            "expires_at": ("TEXT", 1, 0),
+        }
+        actual = {
+            row[1]: (row[2].upper(), row[3], row[5])
+            for row in db.execute("PRAGMA table_info(run_leases)")
+        }
+        if actual != expected:
+            raise RunLeaseStoreError("Lease database schema is incomplete or incompatible")
+
+    def _require_ready(self) -> None:
+        if not self._initialized or self._closed:
+            raise RunLeaseStoreError("Run lease store is not initialized")
+
+    def _now(self) -> datetime:
+        try:
+            now = self._clock()
+            _require_utc(now, "clock result")
+            return now
+        except RunLeaseError:
+            raise
+        except Exception as exc:
+            raise RunLeaseStoreError("Run lease clock failed") from exc
+
+    def _acquire(
+        self,
+        run_id: str,
+        owner_id: str,
+        ttl: timedelta,
+        now: datetime,
+    ) -> RunLease:
+        expires_at = now + ttl
+        try:
+            with closing(self._connect()) as db:
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute(
+                    "SELECT run_id, owner_id, acquired_at, heartbeat_at, expires_at "
+                    "FROM run_leases WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()
+                if row is None:
+                    lease = RunLease(run_id, owner_id, now, now, expires_at)
+                    db.execute(
+                        "INSERT INTO run_leases VALUES (?, ?, ?, ?, ?)",
+                        _lease_values(lease),
+                    )
+                else:
+                    current = _lease_from_row(row)
+                    if not current.is_expired(now):
+                        raise RunLeaseUnavailable("Run already has an active execution owner")
+                    lease = RunLease(run_id, owner_id, now, now, expires_at)
+                    cursor = db.execute(
+                        "UPDATE run_leases SET owner_id = ?, acquired_at = ?, heartbeat_at = ?, expires_at = ? "
+                        "WHERE run_id = ? AND owner_id = ? AND expires_at = ?",
+                        (
+                            lease.owner_id,
+                            _encode_time(lease.acquired_at),
+                            _encode_time(lease.heartbeat_at),
+                            _encode_time(lease.expires_at),
+                            current.run_id,
+                            current.owner_id,
+                            _encode_time(current.expires_at),
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RunLeaseStoreError("Lease takeover result was ambiguous")
+                db.commit()
+                return lease
+        except (RunLeaseUnavailable, RunLeaseStoreError):
+            raise
+        except sqlite3.Error as exc:
+            raise RunLeaseStoreError("SQLite lease acquisition failed") from exc
+
+    def _renew(
+        self,
+        run_id: str,
+        owner_id: str,
+        ttl: timedelta,
+        now: datetime,
+    ) -> RunLease:
+        try:
+            with closing(self._connect()) as db:
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute(
+                    "SELECT run_id, owner_id, acquired_at, heartbeat_at, expires_at "
+                    "FROM run_leases WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()
+                if row is None:
+                    raise RunLeaseOwnershipLost("Run lease no longer exists")
+                current = _lease_from_row(row)
+                if current.owner_id != owner_id:
+                    raise RunLeaseOwnershipLost("Run lease is owned by another owner")
+                if current.is_expired(now):
+                    raise RunLeaseOwnershipLost("Run lease expired before renewal")
+                lease = RunLease(run_id, owner_id, current.acquired_at, now, now + ttl)
+                cursor = db.execute(
+                    "UPDATE run_leases SET heartbeat_at = ?, expires_at = ? "
+                    "WHERE run_id = ? AND owner_id = ? AND expires_at = ?",
+                    (
+                        _encode_time(lease.heartbeat_at),
+                        _encode_time(lease.expires_at),
+                        run_id,
+                        owner_id,
+                        _encode_time(current.expires_at),
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RunLeaseStoreError("Lease renewal result was ambiguous")
+                db.commit()
+                return lease
+        except (RunLeaseOwnershipLost, RunLeaseStoreError):
+            raise
+        except sqlite3.Error as exc:
+            raise RunLeaseStoreError("SQLite lease renewal failed") from exc
+
+    def _inspect(self, run_id: str) -> RunLease | None:
+        try:
+            with closing(self._connect()) as db:
+                row = db.execute(
+                    "SELECT run_id, owner_id, acquired_at, heartbeat_at, expires_at "
+                    "FROM run_leases WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()
+            return _lease_from_row(row) if row is not None else None
+        except RunLeaseStoreError:
+            raise
+        except sqlite3.Error as exc:
+            raise RunLeaseStoreError("SQLite lease inspection failed") from exc
+
+    def _release(self, run_id: str, owner_id: str) -> None:
+        try:
+            with closing(self._connect()) as db:
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute(
+                    "SELECT owner_id FROM run_leases WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()
+                if row is None:
+                    raise RunLeaseOwnershipLost("Run lease no longer exists")
+                if row[0] != owner_id:
+                    raise RunLeaseOwnershipLost("Run lease is owned by another owner")
+                cursor = db.execute(
+                    "DELETE FROM run_leases WHERE run_id = ? AND owner_id = ?",
+                    (run_id, owner_id),
+                )
+                if cursor.rowcount != 1:
+                    raise RunLeaseStoreError("Lease release result was ambiguous")
+                db.commit()
+        except (RunLeaseOwnershipLost, RunLeaseStoreError):
+            raise
+        except sqlite3.Error as exc:
+            raise RunLeaseStoreError("SQLite lease release failed") from exc
+
+
+def _validate_request(run_id: str, owner_id: str, ttl: timedelta) -> None:
+    _validate_identity(run_id, "run_id")
+    _validate_identity(owner_id, "owner_id")
+    if type(ttl) is not timedelta or ttl <= timedelta(0):
+        raise ValueError("Run lease ttl must be a positive timedelta")
+
+
+def _validate_identity(value: str, name: str) -> None:
+    if type(value) is not str or not value:
+        raise ValueError(f"Run lease {name} must be a non-empty string")
+
+
+def _require_utc(value: datetime, name: str) -> None:
+    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() != timedelta(0):
+        raise ValueError(f"Run lease {name} must be timezone-aware UTC")
+
+
+def _encode_time(value: datetime) -> str:
+    _require_utc(value, "timestamp")
+    return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _decode_time(value: object) -> datetime:
+    if type(value) is not str or not value.endswith("Z"):
+        raise RunLeaseStoreError("Lease database contains an invalid UTC timestamp")
+    try:
+        result = datetime.fromisoformat(value[:-1] + "+00:00")
+        _require_utc(result, "stored timestamp")
+        return result
+    except (TypeError, ValueError) as exc:
+        raise RunLeaseStoreError("Lease database contains an invalid UTC timestamp") from exc
+
+
+def _lease_values(lease: RunLease) -> tuple[str, str, str, str, str]:
+    return (
+        lease.run_id,
+        lease.owner_id,
+        _encode_time(lease.acquired_at),
+        _encode_time(lease.heartbeat_at),
+        _encode_time(lease.expires_at),
+    )
+
+
+def _lease_from_row(row: tuple[object, ...]) -> RunLease:
+    if len(row) != 5 or type(row[0]) is not str or type(row[1]) is not str:
+        raise RunLeaseStoreError("Lease database contains an invalid row")
+    try:
+        return RunLease(
+            run_id=row[0],
+            owner_id=row[1],
+            acquired_at=_decode_time(row[2]),
+            heartbeat_at=_decode_time(row[3]),
+            expires_at=_decode_time(row[4]),
+        )
+    except ValueError as exc:
+        raise RunLeaseStoreError("Lease database contains invalid lease data") from exc
