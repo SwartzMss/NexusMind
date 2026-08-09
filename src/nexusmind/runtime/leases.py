@@ -7,7 +7,7 @@ import sqlite3
 import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol
@@ -95,6 +95,10 @@ class RunLeaseOwnershipGuard:
     def lease(self) -> RunLease | None:
         return self._lease
 
+    @property
+    def ownership_error(self) -> RunLeaseError | None:
+        return self._ownership_error
+
     def prove(self, lease: RunLease, *, initial: bool = False) -> None:
         if type(lease) is not RunLease:
             raise RunLeaseStoreError("Run lease store returned an invalid lease")
@@ -174,6 +178,7 @@ class RunLeaseCoordinator:
         self._stream_started = False
         self.release_error: RunLeaseError | None = None
         self.ownership_lost_after_progress = False
+        self._terminal_cleanup_done = False
 
     @property
     def lease(self) -> RunLease | None:
@@ -198,8 +203,13 @@ class RunLeaseCoordinator:
             while True:
                 self.assert_owned()
                 try:
-                    event = await anext(iterator)
+                    event = await self._next_event(iterator)
                 except StopAsyncIteration:
+                    break
+                if event.type in {RuntimeEventType.RUN_COMPLETED, RuntimeEventType.RUN_FAILED}:
+                    event = await self._finalize_terminal(event)
+                    self._terminal_cleanup_done = True
+                    yield event
                     break
                 try:
                     self.assert_owned()
@@ -207,8 +217,6 @@ class RunLeaseCoordinator:
                     self.ownership_lost_after_progress = True
                     raise
                 yield event
-                if event.type in {RuntimeEventType.RUN_COMPLETED, RuntimeEventType.RUN_FAILED}:
-                    break
         finally:
             active_error = sys.exc_info()[1]
             await self._stop_heartbeat()
@@ -216,13 +224,87 @@ class RunLeaseCoordinator:
                 await iterator.aclose()
             except (AttributeError, RuntimeError):
                 pass
-            if acquired:
+            if acquired and not self._terminal_cleanup_done:
                 try:
                     await self._release()
                 except RunLeaseError as exc:
                     self.release_error = exc
                     if active_error is None:
                         raise
+
+    async def _next_event(self, iterator: AsyncIterator[RuntimeEvent]) -> RuntimeEvent:
+        next_task = asyncio.create_task(anext(iterator))
+        heartbeat_task = self._heartbeat_task
+        if heartbeat_task is None:
+            next_task.cancel()
+            await self._drain(next_task)
+            raise RunLeaseOwnershipLost("Run lease heartbeat is not running")
+        try:
+            done, _ = await asyncio.wait(
+                {next_task, heartbeat_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except asyncio.CancelledError:
+            next_task.cancel()
+            await self._drain(next_task)
+            raise
+
+        if next_task in done:
+            try:
+                return next_task.result()
+            except BaseException:
+                if heartbeat_task in done and self._guard.ownership_error is not None:
+                    raise self._guard.ownership_error
+                raise
+
+        ownership_error = self._guard.ownership_error
+        if ownership_error is None:
+            ownership_error = RunLeaseStoreError("Run lease heartbeat stopped unexpectedly")
+            self._guard.fail(ownership_error)
+        next_task.cancel()
+        try:
+            event = await next_task
+        except BaseException:
+            self.ownership_lost_after_progress = True
+            raise ownership_error
+        if event.type in {RuntimeEventType.RUN_COMPLETED, RuntimeEventType.RUN_FAILED}:
+            return event
+        self.ownership_lost_after_progress = True
+        raise ownership_error
+
+    async def _finalize_terminal(self, event: RuntimeEvent) -> RuntimeEvent:
+        await self._stop_heartbeat()
+        ownership_lost = self._guard.ownership_error is not None
+        await self._release_terminal_barrier()
+        metadata = dict(event.metadata)
+        if ownership_lost:
+            metadata["lease_ownership_lost_after_terminal"] = True
+        if self.release_error is not None:
+            metadata["lease_release_failed"] = True
+        return replace(event, metadata=metadata)
+
+    async def _release_terminal_barrier(self) -> None:
+        release_task = asyncio.create_task(self._release())
+        while not release_task.done():
+            try:
+                await asyncio.shield(release_task)
+            except asyncio.CancelledError:
+                # The execution outcome is already terminal. Resolve the
+                # owner-scoped release before exposing that fixed outcome.
+                continue
+            except RunLeaseError:
+                break
+        try:
+            release_task.result()
+        except RunLeaseError as exc:
+            self.release_error = exc
+
+    @staticmethod
+    async def _drain(task: asyncio.Task[object]) -> None:
+        try:
+            await task
+        except BaseException:
+            pass
 
     def assert_owned(self) -> None:
         self._guard.assert_owned()

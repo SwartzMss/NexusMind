@@ -506,12 +506,51 @@ async def _run_chat(
         lease_run_id=lease_run_id,
     )
     tools = registry.list_definitions() if tools is None else tools
-    failed = False; failure_message = None; trace_complete = True; final_text = []; current_text = bytearray(); current_text_bytes = 0
+    failed = False; cleanup_failed = False; failure_message = None; trace_complete = True; final_text = []; current_text = bytearray(); current_text_bytes = 0
     stream_kwargs = {"tools": tools}
     if system_prompt is not None:
         stream_kwargs["system_prompt"] = system_prompt
     try:
         async for event in runtime.stream_user_message(message, **stream_kwargs):
+            if event.type in {RuntimeEventType.RUN_COMPLETED, RuntimeEventType.RUN_FAILED} and (
+                event.metadata.get("lease_ownership_lost_after_terminal")
+                or event.metadata.get("lease_release_failed")
+            ):
+                cleanup_failed = True
+                execution_completed = event.type is RuntimeEventType.RUN_COMPLETED
+                failure_sink.update(
+                    execution_completed=execution_completed,
+                    lease_ownership_lost_after_terminal=bool(event.metadata.get("lease_ownership_lost_after_terminal")),
+                    lease_release_failed=bool(event.metadata.get("lease_release_failed")),
+                    cleanup_error_code=(
+                        "lease_release_failed"
+                        if event.metadata.get("lease_release_failed")
+                        else "lease_ownership_lost_after_terminal"
+                    ),
+                )
+                if store and run_id:
+                    try:
+                        if event.metadata.get("lease_ownership_lost_after_terminal"):
+                            await store.append_event(
+                                run_id,
+                                RunTraceEvent(
+                                    "lease_ownership_lost_after_terminal",
+                                    datetime.now(timezone.utc),
+                                    {"error_code": "lease_ownership_lost_after_terminal"},
+                                ),
+                            )
+                        if event.metadata.get("lease_release_failed"):
+                            await store.append_event(
+                                run_id,
+                                RunTraceEvent(
+                                    "lease_release_failed",
+                                    datetime.now(timezone.utc),
+                                    {"error_code": "lease_release_failed"},
+                                ),
+                            )
+                    except StateStoreError:
+                        trace_complete = False
+                        failure_sink["trace_complete"] = False
             if event.type == RuntimeEventType.MODEL_STARTED:
                 current_text.clear(); current_text_bytes = 0
             if store and run_id and event.type not in {RuntimeEventType.RUN_STARTED, RuntimeEventType.RUN_COMPLETED, RuntimeEventType.RUN_FAILED, RuntimeEventType.TEXT_DELTA, RuntimeEventType.TOOL_CALL_DELTA}:
@@ -579,7 +618,9 @@ async def _run_chat(
             try: await store.finish_run(run_id, RunStatus.FAILED if failed else RunStatus.COMPLETED, error_code=failure_sink.get("error_code") if failed else None, error_message=failure_message, trace_complete=trace_complete, final_text=''.join(final_text) if record_content else None)
             except StateStoreError:
                 print("State error: Run final status could not be persisted", file=sys.stderr); return 1
-        return 1 if failed else 0
+        if cleanup_failed:
+            print("Lease error: Terminal lease cleanup failed", file=sys.stderr)
+        return 1 if failed or cleanup_failed else 0
     except asyncio.CancelledError as cancellation:
         if isinstance(cancellation, ToolExecutionCancelled):
             failure_sink.update(trace_complete=False, error_code="tool_execution_cancelled", message="Tool execution was cancelled; the tool may still be running")
@@ -684,10 +725,15 @@ async def _run_chat(
             except StateStoreError:
                 trace_complete = False
                 failure_sink["trace_complete"] = False
+        lease_failure_status = (
+            RunStatus.CANCELLED
+            if harness_state is not None and harness_state.status is HarnessStatus.CANCELLED
+            else RunStatus.FAILED
+        )
         finalized = await _best_effort_finish(
             store,
             run_id,
-            RunStatus.FAILED,
+            lease_failure_status,
             error_code=error_code,
             error_message="Run execution ownership could not be proven",
             trace_complete=trace_complete,

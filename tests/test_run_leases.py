@@ -230,6 +230,7 @@ class RecordingExecutor:
         name="echo",
         description="echo",
         input_schema={"type": "object", "additionalProperties": False},
+        risk_level=ToolRiskLevel.READ_ONLY,
     )
 
     def __init__(self) -> None:
@@ -372,9 +373,8 @@ def test_heartbeat_ownership_loss_blocks_next_tool() -> None:
                 if event.type is RuntimeEventType.MODEL_TURN_COMPLETED:
                     await store.renew_failed.wait()
 
-        assert RuntimeEventType.MODEL_TURN_COMPLETED in seen
         assert executor.calls == []
-        assert model.calls == 1
+        assert model.calls <= 1
 
     asyncio.run(run())
 
@@ -403,11 +403,10 @@ def test_release_failure_is_surfaced_after_terminal_event() -> None:
             checkpoint_store=(checkpoints := InMemoryCheckpointStore()),
             checkpoint_run_id="run-1",
         )
-        terminal_seen = False
-        with pytest.raises(RunLeaseReleaseError, match="Run lease release failed"):
-            async for event in runtime.stream_user_message("hello"):
-                terminal_seen = terminal_seen or event.type is RuntimeEventType.RUN_COMPLETED
-        assert terminal_seen
+        events = [event async for event in runtime.stream_user_message("hello")]
+        assert events[-1].type is RuntimeEventType.RUN_COMPLETED
+        assert events[-1].metadata["lease_release_failed"] is True
+        assert isinstance(runtime._lease_coordinator.release_error, RunLeaseReleaseError)
         latest = await checkpoints.load_latest("run-1")
         assert latest is not None
         assert latest.boundary is CheckpointBoundary.RUN_TERMINAL
@@ -415,6 +414,204 @@ def test_release_failure_is_surfaced_after_terminal_event() -> None:
         assert runtime._harness.state.status is HarnessStatus.COMPLETED
 
     asyncio.run(run())
+
+
+def test_terminal_event_is_not_delivered_until_lease_is_released() -> None:
+    async def run() -> None:
+        class TrackingStore:
+            def __init__(self) -> None:
+                self.released = asyncio.Event()
+
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id):
+                self.released.set()
+
+        store = TrackingStore()
+        runtime = ChatRuntime(
+            CountingTextModel(),
+            lease_store=store,
+            lease_run_id="run-terminal-release",
+            lease_owner_id="owner-terminal-release",
+        )
+        stream = runtime.stream_user_message("hello")
+        while True:
+            event = await anext(stream)
+            if event.type is RuntimeEventType.RUN_COMPLETED:
+                break
+
+        assert store.released.is_set()
+        assert runtime._lease_coordinator.lease is None
+        # Deliberately do not request another item or explicitly close here;
+        # terminal cleanup must already be complete when the event arrives.
+
+    asyncio.run(run())
+
+
+def test_cancellation_during_terminal_release_preserves_terminal_outcome() -> None:
+    async def run() -> None:
+        class PausingReleaseStore:
+            def __init__(self) -> None:
+                self.release_started = asyncio.Event()
+                self.allow_release = asyncio.Event()
+
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id):
+                self.release_started.set()
+                await self.allow_release.wait()
+
+        store = PausingReleaseStore()
+        runtime = ChatRuntime(
+            CountingTextModel(),
+            lease_store=store,
+            lease_run_id="run-terminal-cancel",
+            lease_owner_id="owner-terminal-cancel",
+        )
+        task = asyncio.create_task(_collect_events(runtime.stream_user_message("hello")))
+        await store.release_started.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        store.allow_release.set()
+        events = await task
+
+        assert events[-1].type is RuntimeEventType.RUN_COMPLETED
+        assert runtime._harness.state.status is HarnessStatus.COMPLETED
+        assert runtime._lease_coordinator.lease is None
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("outcome", "history_status", "harness_status"),
+    [
+        ("completed", "completed", HarnessStatus.COMPLETED),
+        ("failed", "failed", HarnessStatus.FAILED),
+    ],
+)
+def test_heartbeat_loss_during_terminal_checkpoint_preserves_all_outcomes(
+    outcome,
+    history_status,
+    harness_status,
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    async def run() -> tuple[int, InMemoryCheckpointStore, ChatRuntime]:
+        class PausingCheckpointStore(InMemoryCheckpointStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.terminal_started = asyncio.Event()
+                self.release_terminal = asyncio.Event()
+
+            async def initialize(self):
+                return None
+
+            async def close(self):
+                return None
+
+            async def save(self, checkpoint):
+                if checkpoint.boundary is CheckpointBoundary.RUN_TERMINAL:
+                    self.terminal_started.set()
+                    await self.release_terminal.wait()
+                await super().save(checkpoint)
+
+        class TerminalHeartbeatFailureStore:
+            def __init__(self, checkpoint_store) -> None:
+                self.checkpoint_store = checkpoint_store
+                self.renew_failed = asyncio.Event()
+
+            async def initialize(self):
+                return None
+
+            async def close(self):
+                return None
+
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl):
+                await self.checkpoint_store.terminal_started.wait()
+                self.renew_failed.set()
+                raise RunLeaseStoreError("heartbeat failed during terminal checkpoint")
+
+            async def release(self, run_id, owner_id):
+                return None
+
+        class OutcomeModel(ChatModel):
+            async def stream(self, messages, tools=None):
+                yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+                if outcome == "failed":
+                    yield RuntimeEvent(RuntimeEventType.MODEL_FAILED, error="provider failed")
+                    return
+                yield RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="done")
+                yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="stop")
+
+        checkpoints = PausingCheckpointStore()
+        leases = TerminalHeartbeatFailureStore(checkpoints)
+        captured = {}
+        original_runtime = ChatRuntime
+
+        def runtime_factory(*args, **kwargs):
+            runtime = original_runtime(
+                *args,
+                **kwargs,
+                lease_ttl=timedelta(seconds=1),
+                lease_heartbeat_interval=timedelta(milliseconds=10),
+            )
+            captured["runtime"] = runtime
+            return runtime
+
+        monkeypatch.setattr(cli, "OpenAICompatibleChatModel", lambda config: OutcomeModel())
+        monkeypatch.setattr(cli, "SQLiteCheckpointStore", lambda path: checkpoints)
+        monkeypatch.setattr(cli, "SQLiteRunLeaseStore", lambda path: leases)
+        monkeypatch.setattr(cli, "ChatRuntime", runtime_factory)
+        task = asyncio.create_task(
+            cli._run_chat(
+                "hello",
+                ToolRegistry(),
+                model_config=ModelConfig("https://example.test", "test-key", "fake"),
+                state_db=str(tmp_path / f"{outcome}-runs.db"),
+                checkpoint_db=str(tmp_path / f"{outcome}-checkpoints.db"),
+                lease_db=str(tmp_path / f"{outcome}-leases.db"),
+            )
+        )
+        await checkpoints.terminal_started.wait()
+        await leases.renew_failed.wait()
+        while captured["runtime"]._lease_guard.ownership_error is None:
+            await asyncio.sleep(0)
+        checkpoints.release_terminal.set()
+        return await task, checkpoints, captured["runtime"]
+
+    code, checkpoints, runtime = asyncio.run(run())
+    capsys.readouterr()
+    connection = sqlite3.connect(tmp_path / f"{outcome}-runs.db")
+    run_id, stored_status = connection.execute("SELECT id, status FROM runs LIMIT 1").fetchone()
+    event_types = [
+        row[0]
+        for row in connection.execute("SELECT event_type FROM run_events ORDER BY sequence")
+    ]
+    connection.close()
+    latest = asyncio.run(checkpoints.load_latest(run_id))
+
+    assert code == 1
+    assert stored_status == history_status
+    assert runtime._harness.state.status is harness_status
+    assert latest is not None
+    assert latest.state.status is harness_status
+    assert "lease_ownership_lost_after_terminal" in event_types
 
 
 def test_heartbeat_loss_during_policy_blocks_tool_execution() -> None:
@@ -428,6 +625,7 @@ def test_heartbeat_loss_during_policy_blocks_tool_execution() -> None:
                 return RunLease(run_id, owner_id, now, now, now + ttl)
 
             async def renew(self, run_id, owner_id, ttl):
+                await policy.started.wait()
                 self.renew_failed.set()
                 raise RunLeaseStoreError("heartbeat failed during policy")
 
@@ -441,10 +639,15 @@ def test_heartbeat_loss_during_policy_blocks_tool_execution() -> None:
             def __init__(self) -> None:
                 self.started = asyncio.Event()
                 self.release = asyncio.Event()
+                self.cancelled = asyncio.Event()
 
             async def evaluate(self, call, context):
                 self.started.set()
-                await self.release.wait()
+                try:
+                    await self.release.wait()
+                except asyncio.CancelledError:
+                    self.cancelled.set()
+                    raise
                 return ToolPolicyDecision.ALLOW
 
         store = HeartbeatFailureStore()
@@ -465,11 +668,190 @@ def test_heartbeat_loss_during_policy_blocks_tool_execution() -> None:
         )
         await policy.started.wait()
         await store.renew_failed.wait()
-        policy.release.set()
+        while runtime._lease_guard.ownership_error is None:
+            await asyncio.sleep(0)
 
         with pytest.raises(RunLeaseStoreError, match="heartbeat failed during policy"):
             await task
+        assert policy.cancelled.is_set()
         assert executor.calls == []
+
+    asyncio.run(run())
+
+
+def test_heartbeat_loss_cancels_inflight_tool() -> None:
+    async def run() -> None:
+        class HeartbeatFailureStore:
+            def __init__(self) -> None:
+                self.renew_failed = asyncio.Event()
+
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl):
+                await executor.started.wait()
+                self.renew_failed.set()
+                raise RunLeaseStoreError("heartbeat failed during tool")
+
+            async def release(self, run_id, owner_id):
+                return None
+
+        class BlockingExecutor(RecordingExecutor):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.cancelled = asyncio.Event()
+
+            async def execute_with_result_budget(self, call, *, result_budget):
+                self.started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.cancelled.set()
+                    raise
+
+        store = HeartbeatFailureStore()
+        executor = BlockingExecutor()
+        runtime = ChatRuntime(
+            ToolModel(ToolCall(id="call-inflight", name="echo", arguments={})),
+            tool_executor=executor,
+            lease_store=store,
+            lease_run_id="run-inflight",
+            lease_owner_id="owner-inflight",
+            lease_ttl=timedelta(seconds=1),
+            lease_heartbeat_interval=timedelta(milliseconds=10),
+        )
+        task = asyncio.create_task(
+            _collect_events(runtime.stream_user_message("hello", tools=[executor.definition_value]))
+        )
+        await executor.started.wait()
+        await store.renew_failed.wait()
+
+        with pytest.raises(RunLeaseStoreError, match="heartbeat failed during tool"):
+            await asyncio.wait_for(task, timeout=1)
+        assert executor.cancelled.is_set()
+        assert executor.calls == []
+        assert runtime._harness.state.status is HarnessStatus.CANCELLED
+
+    asyncio.run(run())
+
+
+def test_heartbeat_loss_cancels_inflight_model() -> None:
+    async def run() -> None:
+        class HeartbeatFailureStore:
+            def __init__(self) -> None:
+                self.renew_failed = asyncio.Event()
+
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl):
+                await model.started.wait()
+                self.renew_failed.set()
+                raise RunLeaseStoreError("heartbeat failed during model")
+
+            async def release(self, run_id, owner_id):
+                return None
+
+        class BlockingModel(ChatModel):
+            def __init__(self) -> None:
+                self.started = asyncio.Event()
+                self.cancelled = asyncio.Event()
+
+            async def stream(self, messages, tools=None):
+                yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+                self.started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.cancelled.set()
+                    raise
+
+        store = HeartbeatFailureStore()
+        model = BlockingModel()
+        runtime = ChatRuntime(
+            model,
+            lease_store=store,
+            lease_run_id="run-model-inflight",
+            lease_owner_id="owner-model-inflight",
+            lease_ttl=timedelta(seconds=1),
+            lease_heartbeat_interval=timedelta(milliseconds=10),
+        )
+        task = asyncio.create_task(_collect_events(runtime.stream_user_message("hello")))
+        await model.started.wait()
+        await store.renew_failed.wait()
+
+        with pytest.raises(RunLeaseStoreError, match="heartbeat failed during model"):
+            await asyncio.wait_for(task, timeout=1)
+        assert model.cancelled.is_set()
+        assert runtime._harness.state.status is HarnessStatus.CANCELLED
+
+    asyncio.run(run())
+
+
+def test_expired_owner_cannot_continue_inflight_tool_after_takeover(tmp_path) -> None:
+    async def run() -> None:
+        class FailingOwnerStore(SQLiteRunLeaseStore):
+            async def renew(self, run_id, owner_id, ttl):
+                await executor.started.wait()
+                raise RunLeaseStoreError("owner heartbeat failed")
+
+            async def release(self, run_id, owner_id):
+                raise RunLeaseStoreError("owner release failed")
+
+        class BlockingExecutor(RecordingExecutor):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.cancelled = asyncio.Event()
+
+            async def execute_with_result_budget(self, call, *, result_budget):
+                self.started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.cancelled.set()
+                    raise
+
+        clock = MutableClock()
+        path = tmp_path / "takeover.db"
+        old_store = FailingOwnerStore(path, clock=clock)
+        await old_store.initialize()
+        executor = BlockingExecutor()
+        runtime = ChatRuntime(
+            ToolModel(ToolCall(id="call-old-owner", name="echo", arguments={})),
+            tool_executor=executor,
+            lease_store=old_store,
+            lease_run_id="run-takeover-inflight",
+            lease_owner_id="owner-old",
+            lease_ttl=timedelta(milliseconds=100),
+            lease_heartbeat_interval=timedelta(milliseconds=10),
+            lease_clock=clock,
+        )
+        old_task = asyncio.create_task(
+            _collect_events(runtime.stream_user_message("hello", tools=[executor.definition_value]))
+        )
+        await executor.started.wait()
+        with pytest.raises(RunLeaseStoreError, match="owner heartbeat failed"):
+            await asyncio.wait_for(old_task, timeout=1)
+        assert executor.cancelled.is_set()
+
+        clock.advance(1)
+        new_store = SQLiteRunLeaseStore(path, clock=clock)
+        await new_store.initialize()
+        new_lease = await new_store.acquire(
+            "run-takeover-inflight",
+            "owner-new",
+            timedelta(seconds=1),
+        )
+        assert new_lease.owner_id == "owner-new"
+        assert old_task.done()
+        assert executor.calls == []
+        await new_store.release("run-takeover-inflight", "owner-new")
+        await old_store.close()
+        await new_store.close()
 
     asyncio.run(run())
 
@@ -521,8 +903,8 @@ def test_lease_expiry_during_policy_blocks_tool_execution() -> None:
         clock.advance(1)
         policy.release.set()
 
-        with pytest.raises(RunLeaseOwnershipLost, match="expired"):
-            await task
+        events = await task
+        assert events[-1].type is RuntimeEventType.RUN_FAILED
         assert executor.calls == []
 
     asyncio.run(run())
@@ -644,6 +1026,7 @@ def test_cli_ownership_loss_after_tool_progress_marks_trace_incomplete(
                 return RunLease(run_id, owner_id, now, now, now + ttl)
 
             async def renew(self, run_id, owner_id, ttl):
+                await executor.started.wait()
                 self.renew_failed.set()
                 raise RunLeaseStoreError("heartbeat failed while tool was running")
 
@@ -661,12 +1044,15 @@ def test_cli_ownership_loss_after_tool_progress_marks_trace_incomplete(
             def __init__(self) -> None:
                 super().__init__()
                 self.started = asyncio.Event()
-                self.release = asyncio.Event()
+                self.cancelled = asyncio.Event()
 
             async def execute_with_result_budget(self, call, *, result_budget):
                 self.started.set()
-                await self.release.wait()
-                return await self.execute(call)
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.cancelled.set()
+                    raise
 
         store = HeartbeatFailureStore()
         executor = BlockingExecutor()
@@ -697,8 +1083,9 @@ def test_cli_ownership_loss_after_tool_progress_marks_trace_incomplete(
         )
         await executor.started.wait()
         await store.renew_failed.wait()
-        executor.release.set()
-        return await task
+        code = await task
+        assert executor.cancelled.is_set()
+        return code
 
     code = asyncio.run(run())
     capsys.readouterr()
@@ -713,7 +1100,7 @@ def test_cli_ownership_loss_after_tool_progress_marks_trace_incomplete(
     connection.close()
 
     assert code == 1
-    assert status == "failed"
+    assert status == "cancelled"
     assert trace_complete == 0
     assert error_code == "lease_lost_after_execution_progress"
     assert "lease_ownership_lost" in event_types
@@ -753,7 +1140,7 @@ def test_cli_release_failure_audits_cleanup_without_rewriting_completed_outcome(
             lease_db=str(tmp_path / "leases.db"),
         )
     )
-    assert "Run lease release failed" in capsys.readouterr().err
+    assert "Terminal lease cleanup failed" in capsys.readouterr().err
 
     connection = sqlite3.connect(tmp_path / "runs.db")
     status, error_code = connection.execute(
