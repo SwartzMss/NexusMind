@@ -5,15 +5,11 @@ from collections.abc import AsyncIterator
 
 from nexusmind.runtime.events import RuntimeEvent, RuntimeEventType
 
-from .checkpoint import CheckpointBoundary
+from .checkpoint import CheckpointBoundary, HarnessCheckpoint
 from .checkpoint_store import CheckpointStore
 from .runner import HarnessExecution
 from .state import HarnessPhase, HarnessStatus
 from .stop import StopReason
-
-
-class CheckpointPersistenceError(RuntimeError):
-    """Raised internally when a durability barrier cannot be committed."""
 
 
 _BARRIER_EVENTS = {
@@ -71,12 +67,27 @@ class CheckpointCoordinator:
                 if boundary is None or (boundary is CheckpointBoundary.RUN_TERMINAL and not self._save_terminal):
                     yield event
                     continue
+                if boundary is CheckpointBoundary.RUN_TERMINAL and self._has_active_tools():
+                    # A started tool with no trusted result is intentionally not
+                    # checkpointable. Preserve the original terminal failure.
+                    yield event
+                    continue
                 try:
-                    await self._persist(boundary)
+                    checkpoint = self._build_checkpoint(boundary)
+                except Exception:
+                    yield self._creation_failure(boundary, event)
+                    return
+                try:
+                    await self._save_checkpoint(checkpoint)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
                     yield self._persistence_failure(boundary, event)
+                    return
+                try:
+                    self._commit_checkpoint(checkpoint)
+                except Exception:
+                    yield self._commit_failure(boundary, event)
                     return
                 yield event
                 if boundary is CheckpointBoundary.RUN_TERMINAL:
@@ -84,9 +95,11 @@ class CheckpointCoordinator:
         except asyncio.CancelledError:
             # HarnessExecution records cancellation and terminal phase before
             # re-raising. Save it only when no tool could be left in-flight.
-            if self._save_terminal and not self._terminal_saved:
+            if self._save_terminal and not self._terminal_saved and not self._has_active_tools():
                 try:
-                    await self._persist(CheckpointBoundary.RUN_TERMINAL)
+                    checkpoint = self._build_checkpoint(CheckpointBoundary.RUN_TERMINAL)
+                    await self._save_checkpoint(checkpoint)
+                    self._commit_checkpoint(checkpoint)
                     self._terminal_saved = True
                 except asyncio.CancelledError:
                     pass
@@ -94,42 +107,93 @@ class CheckpointCoordinator:
                     pass
             raise
 
-    async def _persist(self, boundary: CheckpointBoundary) -> None:
-        checkpoint = self._execution.create_checkpoint(
+    def _has_active_tools(self) -> bool:
+        state = self._execution.state
+        return bool(state.started_tool_call_ids - state.executed_tool_call_ids)
+
+    def _build_checkpoint(self, boundary: CheckpointBoundary) -> HarnessCheckpoint:
+        return self._execution.create_checkpoint(
             run_id=self._run_id,
             sequence=self._next_sequence,
             boundary=boundary,
             commit=False,
         )
+
+    async def _save_checkpoint(self, checkpoint: HarnessCheckpoint) -> None:
         await self._store.save(checkpoint)
+
+    def _commit_checkpoint(self, checkpoint: HarnessCheckpoint) -> None:
         # Only move both cursors after the store has accepted the checkpoint.
         self._execution.commit_checkpoint(checkpoint)
         self._next_sequence += 1
+
+    def _creation_failure(
+        self,
+        boundary: CheckpointBoundary,
+        original_event: RuntimeEvent,
+    ) -> RuntimeEvent:
+        return self._runtime_failure(
+            boundary,
+            original_event,
+            error=f"Automatic checkpoint creation failed at {boundary.value}",
+            metadata={"checkpoint_creation_failed": True},
+        )
+
+    def _commit_failure(
+        self,
+        boundary: CheckpointBoundary,
+        original_event: RuntimeEvent,
+    ) -> RuntimeEvent:
+        return self._runtime_failure(
+            boundary,
+            original_event,
+            error=f"Automatic checkpoint commit failed at {boundary.value}",
+            metadata={"checkpoint_commit_failed": True},
+        )
 
     def _persistence_failure(
         self,
         boundary: CheckpointBoundary,
         original_event: RuntimeEvent | None = None,
     ) -> RuntimeEvent:
+        metadata: dict[str, object] = {"checkpoint_persistence_failed": True}
+        if boundary is CheckpointBoundary.AFTER_TOOL:
+            metadata.update(
+                {
+                    "durability_lost_after_tool": True,
+                    "tool_execution_started": True,
+                    "trace_complete": False,
+                }
+            )
+        error = f"Automatic checkpoint persistence failed at {boundary.value}"
+        if original_event is not None and original_event.error:
+            error = f"{error}: {original_event.error}"
+        return self._runtime_failure(boundary, original_event, error=error, metadata=metadata)
+
+    def _runtime_failure(
+        self,
+        boundary: CheckpointBoundary,
+        original_event: RuntimeEvent | None,
+        *,
+        error: str,
+        metadata: dict[str, object],
+    ) -> RuntimeEvent:
         self._execution.state.status = HarnessStatus.FAILED
         self._execution.state.phase = HarnessPhase.TERMINAL
         self._execution.stop_reason = StopReason.RUNTIME_ERROR
         self._execution.state.stop_reason = StopReason.RUNTIME_ERROR
-        metadata = dict(original_event.metadata) if original_event is not None else {}
-        metadata.update(
+        merged_metadata = dict(original_event.metadata) if original_event is not None else {}
+        merged_metadata.update(metadata)
+        merged_metadata.update(
             {
-                "checkpoint_persistence_failed": True,
                 "checkpoint_boundary": boundary.value,
                 "stop_reason": StopReason.RUNTIME_ERROR.value,
             }
         )
-        error = f"Automatic checkpoint persistence failed at {boundary.value}"
-        if original_event is not None and original_event.error:
-            error = f"{error}: {original_event.error}"
         return RuntimeEvent(
             RuntimeEventType.RUN_FAILED,
             error=error,
-            metadata=metadata,
+            metadata=merged_metadata,
         )
 
 
