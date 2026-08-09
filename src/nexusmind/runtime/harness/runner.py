@@ -163,7 +163,19 @@ class HarnessExecution:
         self._skip_assistant_once = False
         self._last_checkpoint_sequence: int | None = None
 
-    def create_checkpoint(self, run_id: str | None = None, sequence: int | None = None, boundary: CheckpointBoundary | None = None) -> HarnessCheckpoint:
+    @property
+    def last_checkpoint_sequence(self) -> int | None:
+        """Return the last checkpoint sequence committed for this execution."""
+        return self._last_checkpoint_sequence
+
+    def create_checkpoint(
+        self,
+        run_id: str | None = None,
+        sequence: int | None = None,
+        boundary: CheckpointBoundary | None = None,
+        *,
+        commit: bool = True,
+    ) -> HarnessCheckpoint:
         if self._resume_cursor_pending:
             raise HarnessResumeStateError("Cannot checkpoint before the resume cursor advances")
         if self._resume_source is not None:
@@ -186,8 +198,17 @@ class HarnessExecution:
             boundary=boundary,
             stop_reason=self.stop_reason,
         )
-        self._last_checkpoint_sequence = sequence
+        if commit:
+            self.commit_checkpoint(checkpoint)
         return checkpoint
+
+    def commit_checkpoint(self, checkpoint: HarnessCheckpoint) -> None:
+        """Advance the local checkpoint cursor after a store save succeeds."""
+        if checkpoint.run_id and self._resume_source is not None and checkpoint.run_id != self._resume_source.run_id:
+            raise HarnessResumeStateError("Resumed execution must keep the source run ID")
+        if self._last_checkpoint_sequence is not None and checkpoint.sequence <= self._last_checkpoint_sequence:
+            raise HarnessResumeStateError("Checkpoint sequence must increase monotonically")
+        self._last_checkpoint_sequence = checkpoint.sequence
 
     async def stream(self) -> AsyncIterator[RuntimeEvent]:
         if self._stream_started:
