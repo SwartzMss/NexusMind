@@ -1570,3 +1570,74 @@ def test_cli_release_failure_audits_cleanup_without_rewriting_completed_outcome(
     assert status == "completed"
     assert error_code is None
     assert event_types[-2:] == ["lease_release_failed", "run_completed"]
+
+
+def test_cli_release_timeout_audits_cleanup_without_rewriting_completed_outcome(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    class HangingReleaseStore:
+        def __init__(self) -> None:
+            self.release_started = asyncio.Event()
+            self.release_cancelled = asyncio.Event()
+            self.never_release = asyncio.Event()
+
+        async def initialize(self):
+            return None
+
+        async def close(self):
+            return None
+
+        async def acquire(self, run_id, owner_id, ttl):
+            now = datetime.now(timezone.utc)
+            return RunLease(run_id, owner_id, now, now, now + ttl)
+
+        async def renew(self, run_id, owner_id, ttl):
+            raise AssertionError("heartbeat should not run")
+
+        async def release(self, run_id, owner_id):
+            self.release_started.set()
+            try:
+                await self.never_release.wait()
+            except asyncio.CancelledError:
+                self.release_cancelled.set()
+                raise
+
+    store = HangingReleaseStore()
+    original_runtime = ChatRuntime
+
+    def runtime_factory(*args, **kwargs):
+        kwargs.setdefault("lease_release_timeout", timedelta(milliseconds=30))
+        return original_runtime(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "SQLiteRunLeaseStore", lambda path: store)
+    monkeypatch.setattr(cli, "OpenAICompatibleChatModel", lambda config: CountingTextModel())
+    monkeypatch.setattr(cli, "ChatRuntime", runtime_factory)
+    code = asyncio.run(
+        cli._run_chat(
+            "hello",
+            ToolRegistry(),
+            model_config=ModelConfig("https://example.test", "test-key", "fake"),
+            state_db=str(tmp_path / "runs.db"),
+            lease_db=str(tmp_path / "leases.db"),
+        )
+    )
+    assert "Terminal lease cleanup failed" in capsys.readouterr().err
+
+    connection = sqlite3.connect(tmp_path / "runs.db")
+    status, error_code = connection.execute(
+        "SELECT status, error_code FROM runs LIMIT 1"
+    ).fetchone()
+    event_types = [
+        row[0]
+        for row in connection.execute("SELECT event_type FROM run_events ORDER BY sequence")
+    ]
+    connection.close()
+
+    assert code == 1
+    assert status == "completed"
+    assert error_code is None
+    assert event_types[-2:] == ["lease_release_failed", "run_completed"]
+    assert store.release_started.is_set()
+    assert store.release_cancelled.is_set()
