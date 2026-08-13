@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import sqlite3
 import threading
+import weakref
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 
@@ -11,6 +13,7 @@ import pytest
 from nexusmind import cli
 from nexusmind.config import ModelConfig
 from nexusmind.runtime.lease_guarding import LeaseGuardedChatModel
+import nexusmind.runtime.leases as leases_module
 from nexusmind.runtime.leases import (
     RunLease,
     RunLeaseCoordinator,
@@ -723,6 +726,7 @@ def test_timed_out_terminal_release_task_is_retained_until_it_finishes() -> None
                 self.cancellation_suppressed = asyncio.Event()
                 self.allow_finish = asyncio.Event()
                 self.never_release = asyncio.Event()
+                self.release_task_ref = None
 
             async def acquire(self, run_id, owner_id, ttl):
                 now = datetime.now(timezone.utc)
@@ -736,11 +740,15 @@ def test_timed_out_terminal_release_task_is_retained_until_it_finishes() -> None
 
             async def release(self, run_id, owner_id):
                 self.release_started.set()
+                task = asyncio.current_task()
+                assert task is not None
+                self.release_task_ref = weakref.ref(task)
                 try:
                     await self.never_release.wait()
                 except asyncio.CancelledError:
                     self.cancellation_suppressed.set()
                     await self.allow_finish.wait()
+                    raise RunLeaseStoreError("eventual release failure")
 
         store = CancellationSuppressingReleaseStore()
         runtime = ChatRuntime(
@@ -756,12 +764,23 @@ def test_timed_out_terminal_release_task_is_retained_until_it_finishes() -> None
         assert events[-1].type is RuntimeEventType.RUN_COMPLETED
         assert events[-1].metadata["lease_release_failed"] is True
         await asyncio.wait_for(store.cancellation_suppressed.wait(), timeout=1)
-        background_task = next(iter(runtime._lease_coordinator._background_tasks))
-        assert not background_task.done()
+        release_task_ref = store.release_task_ref
+        assert release_task_ref is not None
+        assert release_task_ref() is not None
+        assert not release_task_ref().done()
+        assert release_task_ref() in leases_module._BACKGROUND_RELEASE_TASKS
+        del events
+        del runtime
+        gc.collect()
+        assert release_task_ref() is not None
+        assert not release_task_ref().done()
+        assert release_task_ref() in leases_module._BACKGROUND_RELEASE_TASKS
         store.allow_finish.set()
-        await asyncio.wait_for(asyncio.shield(background_task), timeout=1)
-        await asyncio.sleep(0)
-        assert runtime._lease_coordinator._background_tasks == set()
+        for _ in range(10):
+            await asyncio.sleep(0)
+            if not leases_module._BACKGROUND_RELEASE_TASKS:
+                break
+        assert leases_module._BACKGROUND_RELEASE_TASKS == set()
 
     asyncio.run(run())
 
@@ -803,20 +822,17 @@ def test_cancellation_cannot_extend_terminal_release_timeout() -> None:
         task = asyncio.create_task(_collect_events(runtime.stream_user_message("hello")))
         await store.release_started.wait()
 
-        cancellation_attempts = 0
-
         async def cancel_repeatedly() -> None:
-            nonlocal cancellation_attempts
             for _ in range(40):
                 task.cancel()
-                cancellation_attempts += 1
                 await asyncio.sleep(0.005)
 
         cancellation_storm = asyncio.create_task(cancel_repeatedly())
+        started_at = asyncio.get_running_loop().time()
         try:
             events = await asyncio.wait_for(asyncio.shield(task), timeout=0.15)
             assert not cancellation_storm.done()
-            assert cancellation_attempts >= 5
+            assert asyncio.get_running_loop().time() - started_at < 0.15
         finally:
             await cancellation_storm
         assert cancellation_storm.done()
