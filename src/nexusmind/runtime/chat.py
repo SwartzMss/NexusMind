@@ -47,6 +47,7 @@ class ChatRuntime:
         lease_owner_id: str | None = None,
         lease_ttl: timedelta = timedelta(seconds=30),
         lease_heartbeat_interval: timedelta | None = None,
+        lease_release_timeout: timedelta = timedelta(seconds=10),
         lease_clock: Callable[[], datetime] | None = None,
     ) -> None:
         if checkpoint_store is not None and not checkpoint_run_id:
@@ -83,6 +84,7 @@ class ChatRuntime:
         self._lease_owner_id = lease_owner_id
         self._lease_ttl = lease_ttl
         self._lease_heartbeat_interval = lease_heartbeat_interval
+        self._lease_release_timeout = lease_release_timeout
         self._lease_coordinator: RunLeaseCoordinator | None = None
 
     async def stream_user_message(
@@ -118,6 +120,7 @@ class ChatRuntime:
                 owner_id=self._lease_owner_id,
                 ttl=self._lease_ttl,
                 heartbeat_interval=self._lease_heartbeat_interval,
+                lease_release_timeout=self._lease_release_timeout,
                 guard=self._lease_guard,
             )
             stream = self._lease_coordinator.stream(stream)

@@ -157,6 +157,7 @@ class RunLeaseCoordinator:
         owner_id: str | None = None,
         ttl: timedelta = timedelta(seconds=30),
         heartbeat_interval: timedelta | None = None,
+        lease_release_timeout: timedelta = timedelta(seconds=10),
         clock: Callable[[], datetime] | None = None,
         guard: RunLeaseOwnershipGuard | None = None,
     ) -> None:
@@ -168,11 +169,14 @@ class RunLeaseCoordinator:
         interval = heartbeat_interval or ttl / 3
         if type(interval) is not timedelta or interval <= timedelta(0) or interval >= ttl:
             raise ValueError("Heartbeat interval must be positive and shorter than the lease ttl")
+        if type(lease_release_timeout) is not timedelta or lease_release_timeout <= timedelta(0):
+            raise ValueError("Lease release timeout must be a positive timedelta")
         self._store = store
         self.run_id = run_id
         self.owner_id = resolved_owner_id
         self.ttl = ttl
         self.heartbeat_interval = interval
+        self.lease_release_timeout = lease_release_timeout
         self._guard = guard or RunLeaseOwnershipGuard(clock=clock)
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._stream_started = False
@@ -290,19 +294,34 @@ class RunLeaseCoordinator:
 
     async def _release_terminal_barrier(self) -> None:
         release_task = asyncio.create_task(self._release())
+        deadline = asyncio.get_running_loop().time() + self.lease_release_timeout.total_seconds()
         while not release_task.done():
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                break
             try:
-                await asyncio.shield(release_task)
+                await asyncio.wait({release_task}, timeout=remaining)
             except asyncio.CancelledError:
                 # The execution outcome is already terminal. Resolve the
                 # owner-scoped release before exposing that fixed outcome.
                 continue
-            except RunLeaseError:
-                break
+        if not release_task.done():
+            self.release_error = RunLeaseReleaseError("Run lease release timed out")
+            release_task.cancel()
+            self._guard.clear()
+            release_task.add_done_callback(self._consume_task_result)
+            return
         try:
             release_task.result()
         except RunLeaseError as exc:
             self.release_error = exc
+
+    @staticmethod
+    def _consume_task_result(task: asyncio.Task[None]) -> None:
+        try:
+            task.result()
+        except BaseException:
+            pass
 
     @staticmethod
     async def _drain(task: asyncio.Task[object]) -> None:

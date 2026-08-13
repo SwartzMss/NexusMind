@@ -13,6 +13,7 @@ from nexusmind.config import ModelConfig
 from nexusmind.runtime.lease_guarding import LeaseGuardedChatModel
 from nexusmind.runtime.leases import (
     RunLease,
+    RunLeaseCoordinator,
     RunLeaseOwnershipLost,
     RunLeaseOwnershipGuard,
     RunLeaseReleaseError,
@@ -328,6 +329,16 @@ def test_invalid_or_closed_store_fails_with_public_errors(tmp_path) -> None:
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("lease_release_timeout", (timedelta(0), 0))
+def test_coordinator_rejects_invalid_lease_release_timeout(lease_release_timeout) -> None:
+    with pytest.raises(ValueError, match="Lease release timeout must be a positive timedelta"):
+        RunLeaseCoordinator(
+            object(),
+            run_id="run-release-timeout",
+            lease_release_timeout=lease_release_timeout,
+        )
+
+
 class CountingTextModel(ChatModel):
     def __init__(self) -> None:
         self.calls = 0
@@ -614,6 +625,102 @@ def test_cancellation_during_terminal_release_preserves_terminal_outcome() -> No
 
         assert events[-1].type is RuntimeEventType.RUN_COMPLETED
         assert runtime._harness.state.status is HarnessStatus.COMPLETED
+        assert runtime._lease_coordinator.lease is None
+
+    asyncio.run(run())
+
+
+def test_terminal_release_timeout_preserves_terminal_outcome() -> None:
+    async def run() -> None:
+        class HangingReleaseStore:
+            def __init__(self) -> None:
+                self.release_started = asyncio.Event()
+                self.release_cancelled = asyncio.Event()
+                self.never_release = asyncio.Event()
+
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl):
+                raise AssertionError("heartbeat should not run")
+
+            async def inspect(self, run_id):
+                return None
+
+            async def release(self, run_id, owner_id):
+                self.release_started.set()
+                try:
+                    await self.never_release.wait()
+                except asyncio.CancelledError:
+                    self.release_cancelled.set()
+                    raise
+
+        store = HangingReleaseStore()
+        runtime = ChatRuntime(
+            CountingTextModel(),
+            lease_store=store,
+            lease_run_id="run-terminal-release-timeout",
+            lease_owner_id="owner-terminal-release-timeout",
+            lease_release_timeout=timedelta(milliseconds=20),
+        )
+
+        events = [event async for event in runtime.stream_user_message("hello")]
+
+        assert events[-1].type is RuntimeEventType.RUN_COMPLETED
+        assert events[-1].metadata["lease_release_failed"] is True
+        assert isinstance(runtime._lease_coordinator.release_error, RunLeaseReleaseError)
+        assert runtime._harness.state.status is HarnessStatus.COMPLETED
+        await asyncio.wait_for(store.release_cancelled.wait(), timeout=1)
+        assert runtime._lease_coordinator.lease is None
+
+    asyncio.run(run())
+
+
+def test_cancellation_cannot_extend_terminal_release_timeout() -> None:
+    async def run() -> None:
+        class HangingReleaseStore:
+            def __init__(self) -> None:
+                self.release_started = asyncio.Event()
+                self.release_cancelled = asyncio.Event()
+                self.never_release = asyncio.Event()
+
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl):
+                raise AssertionError("heartbeat should not run")
+
+            async def inspect(self, run_id):
+                return None
+
+            async def release(self, run_id, owner_id):
+                self.release_started.set()
+                try:
+                    await self.never_release.wait()
+                except asyncio.CancelledError:
+                    self.release_cancelled.set()
+                    raise
+
+        store = HangingReleaseStore()
+        runtime = ChatRuntime(
+            CountingTextModel(),
+            lease_store=store,
+            lease_run_id="run-terminal-release-cancel-timeout",
+            lease_owner_id="owner-terminal-release-cancel-timeout",
+            lease_release_timeout=timedelta(milliseconds=20),
+        )
+        task = asyncio.create_task(_collect_events(runtime.stream_user_message("hello")))
+        await store.release_started.wait()
+        task.cancel()
+
+        events = await asyncio.wait_for(asyncio.shield(task), timeout=1)
+
+        assert events[-1].type is RuntimeEventType.RUN_COMPLETED
+        assert events[-1].metadata["lease_release_failed"] is True
+        assert runtime._harness.state.status is HarnessStatus.COMPLETED
+        await asyncio.wait_for(store.release_cancelled.wait(), timeout=1)
         assert runtime._lease_coordinator.lease is None
 
     asyncio.run(run())
