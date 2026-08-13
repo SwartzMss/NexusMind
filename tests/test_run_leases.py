@@ -5,7 +5,7 @@ import gc
 import sqlite3
 import threading
 import weakref
-from contextlib import suppress
+from contextlib import closing, suppress
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -574,7 +574,7 @@ def test_sqlite_terminal_release_timeout_cannot_delete_after_lock_opens(tmp_path
             timedelta(seconds=30),
         )
         holder = sqlite3.connect(path, isolation_level=None)
-        collect_task: asyncio.Task[list[RuntimeEvent]] | None = None
+        stream = None
         holder_open = True
         try:
             holder.execute("BEGIN IMMEDIATE")
@@ -587,30 +587,41 @@ def test_sqlite_terminal_release_timeout_cannot_delete_after_lock_opens(tmp_path
                 lease_owner_id=seeded.owner_id,
                 lease_release_timeout=timedelta(milliseconds=20),
             )
-            collect_task = asyncio.create_task(
-                _collect_events(runtime.stream_user_message("hello"))
-            )
-
-            assert await asyncio.to_thread(store.begin_immediate_attempted.wait, 1)
-            assert not collect_task.done()
             started_at = asyncio.get_running_loop().time()
-            events = await asyncio.wait_for(asyncio.shield(collect_task), timeout=0.2)
+            stream = runtime.stream_user_message("hello")
+            async for event in stream:
+                if event.type is not RuntimeEventType.RUN_COMPLETED:
+                    continue
 
-            assert asyncio.get_running_loop().time() - started_at < 0.2
-            assert holder.in_transaction
-            assert events[-1].type is RuntimeEventType.RUN_COMPLETED
-            assert events[-1].metadata["lease_release_failed"] is True
-            assert runtime._harness.state.status is HarnessStatus.COMPLETED
+                assert asyncio.get_running_loop().time() - started_at < 0.2
+                assert store.begin_immediate_attempted.is_set()
+                assert holder.in_transaction
+                assert event.metadata["lease_release_failed"] is True
 
-            holder.rollback()
-            holder.close()
-            holder_open = False
-            assert await asyncio.to_thread(store.release_connection_closed.wait, 1)
+                # Do not yield after receiving the terminal event. The
+                # coordinator must have signalled the SQLite worker before
+                # exposing the fixed outcome to this consumer.
+                holder.rollback()
+                holder.close()
+                holder_open = False
+                assert store.release_connection_closed.wait(1)
+                with closing(sqlite3.connect(path)) as db:
+                    row = db.execute(
+                        "SELECT owner_id FROM run_leases WHERE run_id = ?",
+                        (seeded.run_id,),
+                    ).fetchone()
+                assert row == (seeded.owner_id,)
+                break
+            else:
+                pytest.fail("Runtime stream did not produce a terminal event")
+
+            await stream.aclose()
             for _ in range(100):
                 if not leases_module._BACKGROUND_RELEASE_TASKS:
                     break
                 await asyncio.sleep(0.001)
             assert leases_module._BACKGROUND_RELEASE_TASKS == set()
+            assert store._release_cancellations == {}
 
             stored = await store.inspect(seeded.run_id)
             assert stored is not None
@@ -620,10 +631,9 @@ def test_sqlite_terminal_release_timeout_cannot_delete_after_lock_opens(tmp_path
             if holder_open:
                 holder.rollback()
                 holder.close()
-            if collect_task is not None and not collect_task.done():
-                collect_task.cancel()
+            if stream is not None:
                 with suppress(BaseException):
-                    await collect_task
+                    await stream.aclose()
             stored = await store.inspect(seeded.run_id)
             if stored is not None:
                 await store.release(stored.run_id, stored.owner_id)

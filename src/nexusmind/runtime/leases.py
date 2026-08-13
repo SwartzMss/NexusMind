@@ -331,6 +331,7 @@ class RunLeaseCoordinator:
                 continue
         if not release_task.done():
             self.release_error = RunLeaseReleaseError("Run lease release timed out")
+            self._cancel_store_release()
             release_task.cancel()
             self._guard.clear()
             _retain_background_release_task(release_task)
@@ -343,6 +344,14 @@ class RunLeaseCoordinator:
             self.release_error = error
         except RunLeaseError as exc:
             self.release_error = exc
+
+    def _cancel_store_release(self) -> None:
+        try:
+            cancel_release = getattr(self._store, "cancel_release", None)
+            if callable(cancel_release):
+                cancel_release(self.run_id, self.owner_id)
+        except Exception:
+            pass
 
     @staticmethod
     async def _drain(task: asyncio.Task[object]) -> None:
@@ -420,6 +429,10 @@ class SQLiteRunLeaseStore:
         self._timeout = timeout
         self._initialized = False
         self._closed = False
+        self._release_cancellations_lock = threading.Lock()
+        self._release_cancellations: dict[
+            tuple[str, str], set[threading.Event]
+        ] = {}
 
     async def initialize(self) -> None:
         await asyncio.to_thread(self._initialize)
@@ -449,44 +462,83 @@ class SQLiteRunLeaseStore:
         _validate_identity(run_id, "run_id")
         _validate_identity(owner_id, "owner_id")
         cancellation = threading.Event()
+        self._register_release_cancellation(run_id, owner_id, cancellation)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._timeout
-        while True:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                raise RunLeaseStoreError("SQLite lease release failed: database is locked")
-            attempt_timeout = min(0.05, remaining)
-            attempt = asyncio.create_task(
-                asyncio.to_thread(
+        try:
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise RunLeaseStoreError("SQLite lease release failed: database is locked")
+                attempt_timeout = min(0.05, remaining)
+                attempt = loop.run_in_executor(
+                    None,
                     self._release_attempt,
                     run_id,
                     owner_id,
                     cancellation,
                     attempt_timeout,
                 )
-            )
-            try:
-                result = await asyncio.shield(attempt)
-            except asyncio.CancelledError as cancelled:
-                cancellation.set()
                 try:
-                    result = await self._drain_release_attempt(attempt, cancellation)
-                except BaseException:
+                    result = await asyncio.shield(attempt)
+                except asyncio.CancelledError as cancelled:
+                    cancellation.set()
+                    try:
+                        result = await self._drain_release_attempt(attempt, cancellation)
+                    except BaseException:
+                        raise cancelled
+                    if result is _SQLiteReleaseAttempt.RELEASED:
+                        return
                     raise cancelled
                 if result is _SQLiteReleaseAttempt.RELEASED:
                     return
-                raise cancelled
-            if result is _SQLiteReleaseAttempt.RELEASED:
+                if result is _SQLiteReleaseAttempt.CANCELLED:
+                    raise asyncio.CancelledError()
+                if loop.time() >= deadline:
+                    raise RunLeaseStoreError("SQLite lease release failed: database is locked")
+                await asyncio.sleep(0)
+        finally:
+            self._unregister_release_cancellation(run_id, owner_id, cancellation)
+
+    def cancel_release(self, run_id: str, owner_id: str) -> None:
+        _validate_identity(run_id, "run_id")
+        _validate_identity(owner_id, "owner_id")
+        with self._release_cancellations_lock:
+            cancellations = tuple(
+                self._release_cancellations.get((run_id, owner_id), ())
+            )
+        for cancellation in cancellations:
+            cancellation.set()
+
+    def _register_release_cancellation(
+        self,
+        run_id: str,
+        owner_id: str,
+        cancellation: threading.Event,
+    ) -> None:
+        with self._release_cancellations_lock:
+            self._release_cancellations.setdefault((run_id, owner_id), set()).add(
+                cancellation
+            )
+
+    def _unregister_release_cancellation(
+        self,
+        run_id: str,
+        owner_id: str,
+        cancellation: threading.Event,
+    ) -> None:
+        key = (run_id, owner_id)
+        with self._release_cancellations_lock:
+            cancellations = self._release_cancellations.get(key)
+            if cancellations is None:
                 return
-            if result is _SQLiteReleaseAttempt.CANCELLED:
-                raise asyncio.CancelledError()
-            if loop.time() >= deadline:
-                raise RunLeaseStoreError("SQLite lease release failed: database is locked")
-            await asyncio.sleep(0)
+            cancellations.discard(cancellation)
+            if not cancellations:
+                del self._release_cancellations[key]
 
     @staticmethod
     async def _drain_release_attempt(
-        attempt: asyncio.Task[_SQLiteReleaseAttempt],
+        attempt: asyncio.Future[_SQLiteReleaseAttempt],
         cancellation: threading.Event,
     ) -> _SQLiteReleaseAttempt:
         while not attempt.done():
