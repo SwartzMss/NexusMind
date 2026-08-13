@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from nexusmind.models.base import ChatModel
 from nexusmind.runtime.leases import ExecutionOwnershipGuard
 from nexusmind.tools.contracts import ToolCall, ToolResult, ToolResultBudget, ToolResultRequirements
@@ -36,7 +38,11 @@ class LeaseGuardedToolExecutor:
 
     async def execute(self, call: ToolCall) -> ToolResult:
         self._guard.assert_owned()
-        return await self._delegate.execute(call)
+        try:
+            return await self._delegate.execute(call)
+        except asyncio.CancelledError:
+            self._mark_execution_uncertain()
+            raise
 
     async def execute_with_result_budget(
         self,
@@ -45,4 +51,13 @@ class LeaseGuardedToolExecutor:
         result_budget: ToolResultBudget,
     ) -> ToolResult:
         self._guard.assert_owned()
-        return await self._delegate.execute_with_result_budget(call, result_budget=result_budget)
+        try:
+            return await self._delegate.execute_with_result_budget(call, result_budget=result_budget)
+        except asyncio.CancelledError:
+            self._mark_execution_uncertain()
+            raise
+
+    def _mark_execution_uncertain(self) -> None:
+        mark = getattr(self._guard, "mark_execution_uncertain", None)
+        if callable(mark):
+            mark()

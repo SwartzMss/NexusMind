@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import sqlite3
 import sys
 import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import closing
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum, auto
 from pathlib import Path
@@ -60,6 +61,11 @@ class _SQLiteReleaseAttempt(Enum):
     CANCELLED = auto()
 
 
+class _SQLiteLeaseAttempt(Enum):
+    BUSY = auto()
+    CANCELLED = auto()
+
+
 @dataclass(frozen=True, slots=True)
 class RunLease:
     run_id: str
@@ -67,10 +73,12 @@ class RunLease:
     acquired_at: datetime
     heartbeat_at: datetime
     expires_at: datetime
+    generation: str = field(default_factory=lambda: uuid4().hex)
 
     def __post_init__(self) -> None:
         _validate_identity(self.run_id, "run_id")
         _validate_identity(self.owner_id, "owner_id")
+        _validate_identity(self.generation, "generation")
         for value, name in (
             (self.acquired_at, "acquired_at"),
             (self.heartbeat_at, "heartbeat_at"),
@@ -92,13 +100,17 @@ class RunLeaseStore(Protocol):
     async def acquire(self, run_id: str, owner_id: str, ttl: timedelta) -> RunLease:
         ...
 
-    async def renew(self, run_id: str, owner_id: str, ttl: timedelta) -> RunLease:
+    async def renew(
+        self, run_id: str, owner_id: str, ttl: timedelta, generation: str | None = None
+    ) -> RunLease:
         ...
 
     async def inspect(self, run_id: str) -> RunLease | None:
         ...
 
-    async def release(self, run_id: str, owner_id: str) -> None:
+    async def release(
+        self, run_id: str, owner_id: str, generation: str | None = None
+    ) -> None:
         ...
 
 
@@ -114,6 +126,8 @@ class RunLeaseOwnershipGuard:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._lease: RunLease | None = None
         self._ownership_error: RunLeaseError | None = None
+        self._execution_uncertain = False
+        self._renewal_event = asyncio.Event()
 
     @property
     def lease(self) -> RunLease | None:
@@ -128,11 +142,17 @@ class RunLeaseOwnershipGuard:
             raise RunLeaseStoreError("Run lease store returned an invalid lease")
         if self._ownership_error is not None and not initial:
             raise self._ownership_error
+        if not initial and self._lease is not None and lease.generation != self._lease.generation:
+            error = RunLeaseOwnershipLost("Run lease generation changed")
+            self._ownership_error = error
+            raise error
         now = self._now()
         if lease.is_expired(now):
             raise RunLeaseOwnershipLost("Run lease store returned an expired lease")
         self._lease = lease
         self._ownership_error = None
+        if not initial:
+            self._renewal_event.set()
 
     def fail(self, error: RunLeaseError) -> None:
         if not isinstance(error, RunLeaseError):
@@ -141,6 +161,25 @@ class RunLeaseOwnershipGuard:
 
     def clear(self) -> None:
         self._lease = None
+
+    @property
+    def execution_uncertain(self) -> bool:
+        return self._execution_uncertain
+
+    def mark_execution_uncertain(self) -> None:
+        # Cancellation is not proof that an external side effect stopped.
+        self._execution_uncertain = True
+
+    def consume_renewal_signal(self) -> None:
+        self._renewal_event.clear()
+
+    async def wait_for_renewal(self) -> None:
+        await self._renewal_event.wait()
+
+    def seconds_until_expiry(self) -> float:
+        self.assert_owned()
+        assert self._lease is not None
+        return max(0.0, (self._lease.expires_at - self._now()).total_seconds())
 
     def assert_owned(self) -> None:
         if self._ownership_error is not None:
@@ -220,7 +259,7 @@ class RunLeaseCoordinator:
         iterator = events.__aiter__()
         try:
             try:
-                lease = await self._store.acquire(self.run_id, self.owner_id, self.ttl)
+                lease = await self._acquire_store()
             except RunLeaseError:
                 raise
             except Exception as exc:
@@ -252,9 +291,9 @@ class RunLeaseCoordinator:
                 await iterator.aclose()
             except (AttributeError, RuntimeError):
                 pass
-            if acquired and not self._terminal_cleanup_done:
+            if acquired and not self._terminal_cleanup_done and not self._guard.execution_uncertain:
                 try:
-                    await self._release()
+                    await self._release_with_deadline(propagate_cancellation=True)
                 except RunLeaseError as exc:
                     self.release_error = exc
                     if active_error is None:
@@ -267,25 +306,68 @@ class RunLeaseCoordinator:
             next_task.cancel()
             await self._drain(next_task)
             raise RunLeaseOwnershipLost("Run lease heartbeat is not running")
+        self._guard.consume_renewal_signal()
+        expiry_task = asyncio.create_task(self._wait_for_expiry())
+        renewal_task = asyncio.create_task(self._guard.wait_for_renewal())
         try:
-            done, _ = await asyncio.wait(
-                {next_task, heartbeat_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            while True:
+                done, _ = await asyncio.wait(
+                    {next_task, heartbeat_task, expiry_task, renewal_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if renewal_task in done and heartbeat_task not in done:
+                    if next_task in done:
+                        break
+                    expiry_task.cancel()
+                    await self._drain(expiry_task)
+                    self._guard.consume_renewal_signal()
+                    expiry_task = asyncio.create_task(self._wait_for_expiry())
+                    renewal_task = asyncio.create_task(self._guard.wait_for_renewal())
+                    continue
+                break
         except asyncio.CancelledError:
             next_task.cancel()
+            expiry_task.cancel()
+            renewal_task.cancel()
             await self._drain(next_task)
+            await self._drain(expiry_task)
+            await self._drain(renewal_task)
             raise
+        finally:
+            if not expiry_task.done():
+                expiry_task.cancel()
+            if not renewal_task.done():
+                renewal_task.cancel()
+            await self._drain(expiry_task)
+            await self._drain(renewal_task)
 
         if next_task in done:
             try:
-                return next_task.result()
+                event = next_task.result()
+                if expiry_task in done and event.type not in {
+                    RuntimeEventType.RUN_COMPLETED,
+                    RuntimeEventType.RUN_FAILED,
+                }:
+                    ownership_error = RunLeaseOwnershipLost("Run lease expired before progress")
+                    self._guard.fail(ownership_error)
+                    self.ownership_lost_after_progress = True
+                    raise ownership_error
+                return event
             except BaseException:
                 if heartbeat_task in done and self._guard.ownership_error is not None:
                     raise self._guard.ownership_error
                 raise
 
-        ownership_error = self._guard.ownership_error
+        if expiry_task in done and heartbeat_task not in done:
+            try:
+                self._guard.assert_owned()
+            except RunLeaseError as exc:
+                ownership_error = exc
+            else:
+                ownership_error = RunLeaseOwnershipLost("Run lease expiry watchdog fired")
+                self._guard.fail(ownership_error)
+        else:
+            ownership_error = self._guard.ownership_error
         if ownership_error is None:
             ownership_error = RunLeaseStoreError("Run lease heartbeat stopped unexpectedly")
             self._guard.fail(ownership_error)
@@ -300,6 +382,15 @@ class RunLeaseCoordinator:
         self.ownership_lost_after_progress = True
         raise ownership_error
 
+    async def _wait_for_expiry(self) -> None:
+        while True:
+            delay = self._guard.seconds_until_expiry()
+            if delay <= 0:
+                return
+            # Short quanta keep injected clocks and real wall-clock expiry
+            # observable even while a renew call is blocked.
+            await asyncio.sleep(min(delay, 0.05))
+
     async def _finalize_terminal(self, event: RuntimeEvent) -> RuntimeEvent:
         ownership_lost = False
         try:
@@ -308,7 +399,7 @@ class RunLeaseCoordinator:
             ownership_lost = True
         await self._stop_heartbeat()
         ownership_lost = ownership_lost or self._guard.ownership_error is not None
-        await self._release_terminal_barrier()
+        await self._release_with_deadline(propagate_cancellation=False)
         metadata = dict(event.metadata)
         if ownership_lost:
             metadata["lease_ownership_lost_after_terminal"] = True
@@ -316,9 +407,10 @@ class RunLeaseCoordinator:
             metadata["lease_release_failed"] = True
         return replace(event, metadata=metadata)
 
-    async def _release_terminal_barrier(self) -> None:
+    async def _release_with_deadline(self, *, propagate_cancellation: bool) -> None:
         release_task = asyncio.create_task(self._release())
         deadline = asyncio.get_running_loop().time() + self.lease_release_timeout.total_seconds()
+        cancelled = False
         while not release_task.done():
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
@@ -326,8 +418,7 @@ class RunLeaseCoordinator:
             try:
                 await asyncio.wait({release_task}, timeout=remaining)
             except asyncio.CancelledError:
-                # The execution outcome is already terminal. Resolve the
-                # owner-scoped release before exposing that fixed outcome.
+                cancelled = True
                 continue
         if not release_task.done():
             self.release_error = RunLeaseReleaseError("Run lease release timed out")
@@ -335,6 +426,8 @@ class RunLeaseCoordinator:
             release_task.cancel()
             self._guard.clear()
             _retain_background_release_task(release_task)
+            if cancelled and propagate_cancellation:
+                raise asyncio.CancelledError
             return
         try:
             release_task.result()
@@ -344,12 +437,17 @@ class RunLeaseCoordinator:
             self.release_error = error
         except RunLeaseError as exc:
             self.release_error = exc
+        if cancelled and propagate_cancellation:
+            raise asyncio.CancelledError
 
     def _cancel_store_release(self) -> None:
+        self._cancel_store_operation("release")
+
+    def _cancel_store_operation(self, operation: str) -> None:
         try:
-            cancel_release = getattr(self._store, "cancel_release", None)
-            if callable(cancel_release):
-                cancel_release(self.run_id, self.owner_id)
+            cancel = getattr(self._store, f"cancel_{operation}", None)
+            if callable(cancel):
+                cancel(self.run_id, self.owner_id)
         except Exception:
             pass
 
@@ -363,14 +461,25 @@ class RunLeaseCoordinator:
     def assert_owned(self) -> None:
         self._guard.assert_owned()
 
+    async def _acquire_store(self) -> RunLease:
+        task = asyncio.create_task(self._store.acquire(self.run_id, self.owner_id, self.ttl))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            self._cancel_store_operation("acquire")
+            task.cancel()
+            await self._drain(task)
+            raise
+
     async def _heartbeat(self) -> None:
         delay = self.heartbeat_interval.total_seconds()
         while True:
             try:
                 await asyncio.sleep(delay)
-                renewed = await self._store.renew(self.run_id, self.owner_id, self.ttl)
+                renewed = await self._renew_store()
                 self._guard.prove(self._validate_owned_lease(renewed))
             except asyncio.CancelledError:
+                self._cancel_store_operation("renew")
                 raise
             except RunLeaseError as exc:
                 self._guard.fail(exc)
@@ -401,13 +510,42 @@ class RunLeaseCoordinator:
 
     async def _release(self) -> None:
         try:
-            await self._store.release(self.run_id, self.owner_id)
+            await self._release_store()
         except RunLeaseError as exc:
             raise RunLeaseReleaseError("Run lease release failed") from exc
         except Exception as exc:
             raise RunLeaseReleaseError("Run lease release failed") from exc
         finally:
             self._guard.clear()
+
+    async def _renew_store(self) -> RunLease:
+        renew = self._store.renew
+        if self._accepts_generation(renew):
+            return await renew(
+                self.run_id, self.owner_id, self.ttl,
+                generation=self._guard.lease.generation if self._guard.lease else None,
+            )
+        return await renew(self.run_id, self.owner_id, self.ttl)
+
+    async def _release_store(self) -> None:
+        release = self._store.release
+        if self._accepts_generation(release):
+            await release(
+                self.run_id, self.owner_id,
+                generation=self._guard.lease.generation if self._guard.lease else None,
+            )
+        else:
+            await release(self.run_id, self.owner_id)
+
+    @staticmethod
+    def _accepts_generation(method: object) -> bool:
+        try:
+            parameters = inspect.signature(method).parameters.values()
+        except (TypeError, ValueError):
+            return False
+        return any(parameter.name == "generation" for parameter in parameters) or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters
+        )
 
 
 class SQLiteRunLeaseStore:
@@ -433,6 +571,9 @@ class SQLiteRunLeaseStore:
         self._release_cancellations: dict[
             tuple[str, str], set[threading.Event]
         ] = {}
+        self._lease_cancellations: dict[
+            tuple[str, str, str], set[threading.Event]
+        ] = {}
 
     async def initialize(self) -> None:
         await asyncio.to_thread(self._initialize)
@@ -445,22 +586,110 @@ class SQLiteRunLeaseStore:
     async def acquire(self, run_id: str, owner_id: str, ttl: timedelta) -> RunLease:
         self._require_ready()
         _validate_request(run_id, owner_id, ttl)
-        return await asyncio.to_thread(self._acquire, run_id, owner_id, ttl)
+        return await self._run_cancellable_lease_operation("acquire", run_id, owner_id, ttl)
 
-    async def renew(self, run_id: str, owner_id: str, ttl: timedelta) -> RunLease:
+    async def renew(
+        self, run_id: str, owner_id: str, ttl: timedelta, generation: str | None = None
+    ) -> RunLease:
         self._require_ready()
         _validate_request(run_id, owner_id, ttl)
-        return await asyncio.to_thread(self._renew, run_id, owner_id, ttl)
+        if generation is not None:
+            _validate_identity(generation, "generation")
+        return await self._run_cancellable_lease_operation("renew", run_id, owner_id, ttl, generation)
+
+    async def _run_cancellable_lease_operation(
+        self, operation: str, run_id: str, owner_id: str, ttl: timedelta,
+        generation: str | None = None,
+    ) -> RunLease:
+        cancellation = threading.Event()
+        self._register_lease_cancellation(operation, run_id, owner_id, cancellation)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._timeout
+        try:
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise RunLeaseStoreError(f"SQLite lease {operation} failed: database is locked")
+                attempt = loop.run_in_executor(
+                    None,
+                    getattr(self, f"_{operation}"),
+                    run_id,
+                    owner_id,
+                    ttl,
+                    generation,
+                    cancellation,
+                    min(0.05, remaining),
+                )
+                try:
+                    result = await asyncio.shield(attempt)
+                except asyncio.CancelledError as cancelled:
+                    cancellation.set()
+                    try:
+                        await self._drain_lease_attempt(attempt, cancellation)
+                    except BaseException:
+                        raise cancelled
+                    raise cancelled
+                if isinstance(result, RunLease):
+                    return result
+                if result is _SQLiteLeaseAttempt.CANCELLED:
+                    raise asyncio.CancelledError()
+                if loop.time() >= deadline:
+                    raise RunLeaseStoreError(f"SQLite lease {operation} failed: database is locked")
+                await asyncio.sleep(0)
+        finally:
+            self._unregister_lease_cancellation(operation, run_id, owner_id, cancellation)
+
+    @staticmethod
+    async def _drain_lease_attempt(
+        attempt: asyncio.Future[RunLease | _SQLiteLeaseAttempt],
+        cancellation: threading.Event,
+    ) -> RunLease | _SQLiteLeaseAttempt:
+        while not attempt.done():
+            try:
+                await asyncio.shield(attempt)
+            except asyncio.CancelledError:
+                cancellation.set()
+        return attempt.result()
+
+    def cancel_acquire(self, run_id: str, owner_id: str) -> None:
+        self._cancel_lease_operation("acquire", run_id, owner_id)
+
+    def cancel_renew(self, run_id: str, owner_id: str) -> None:
+        self._cancel_lease_operation("renew", run_id, owner_id)
+
+    def _cancel_lease_operation(self, operation: str, run_id: str, owner_id: str) -> None:
+        _validate_identity(run_id, "run_id")
+        _validate_identity(owner_id, "owner_id")
+        with self._release_cancellations_lock:
+            cancellations = tuple(self._lease_cancellations.get((operation, run_id, owner_id), ()))
+        for cancellation in cancellations:
+            cancellation.set()
+
+    def _register_lease_cancellation(self, operation, run_id, owner_id, cancellation):
+        with self._release_cancellations_lock:
+            self._lease_cancellations.setdefault((operation, run_id, owner_id), set()).add(cancellation)
+
+    def _unregister_lease_cancellation(self, operation, run_id, owner_id, cancellation):
+        with self._release_cancellations_lock:
+            key = (operation, run_id, owner_id)
+            cancellations = self._lease_cancellations.get(key)
+            if cancellations is None:
+                return
+            cancellations.discard(cancellation)
+            if not cancellations:
+                del self._lease_cancellations[key]
 
     async def inspect(self, run_id: str) -> RunLease | None:
         self._require_ready()
         _validate_identity(run_id, "run_id")
         return await asyncio.to_thread(self._inspect, run_id)
 
-    async def release(self, run_id: str, owner_id: str) -> None:
+    async def release(self, run_id: str, owner_id: str, generation: str | None = None) -> None:
         self._require_ready()
         _validate_identity(run_id, "run_id")
         _validate_identity(owner_id, "owner_id")
+        if generation is not None:
+            _validate_identity(generation, "generation")
         cancellation = threading.Event()
         self._register_release_cancellation(run_id, owner_id, cancellation)
         loop = asyncio.get_running_loop()
@@ -476,6 +705,7 @@ class SQLiteRunLeaseStore:
                     self._release_attempt,
                     run_id,
                     owner_id,
+                    generation,
                     cancellation,
                     attempt_timeout,
                 )
@@ -566,7 +796,8 @@ class SQLiteRunLeaseStore:
                         owner_id TEXT NOT NULL,
                         acquired_at TEXT NOT NULL,
                         heartbeat_at TEXT NOT NULL,
-                        expires_at TEXT NOT NULL
+                        expires_at TEXT NOT NULL,
+                        generation TEXT NOT NULL
                     )
                     """
                 )
@@ -585,12 +816,32 @@ class SQLiteRunLeaseStore:
             "acquired_at": ("TEXT", 1, 0),
             "heartbeat_at": ("TEXT", 1, 0),
             "expires_at": ("TEXT", 1, 0),
+            "generation": ("TEXT", 1, 0),
         }
         actual = {
             row[1]: (row[2].upper(), row[3], row[5])
             for row in db.execute("PRAGMA table_info(run_leases)")
         }
-        if actual != expected:
+        legacy = dict(expected)
+        legacy.pop("generation")
+        if actual == legacy:
+            db.execute("ALTER TABLE run_leases ADD COLUMN generation TEXT")
+            rows = db.execute("SELECT run_id FROM run_leases").fetchall()
+            for (run_id,) in rows:
+                db.execute(
+                    "UPDATE run_leases SET generation = ? WHERE run_id = ?",
+                    (uuid4().hex, run_id),
+                )
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS run_leases_generation_idx ON run_leases(run_id, generation)")
+            actual = {
+                row[1]: (row[2].upper(), row[3], row[5])
+                for row in db.execute("PRAGMA table_info(run_leases)")
+            }
+        if actual != expected and not (
+            actual.get("generation") == ("TEXT", 0, 0)
+            and {key: value for key, value in actual.items() if key != "generation"}
+            == {key: value for key, value in expected.items() if key != "generation"}
+        ):
             raise RunLeaseStoreError("Lease database schema is incomplete or incompatible")
 
     def _require_ready(self) -> None:
@@ -612,21 +863,31 @@ class SQLiteRunLeaseStore:
         run_id: str,
         owner_id: str,
         ttl: timedelta,
+        generation: str | None = None,
+        cancellation: threading.Event | None = None,
+        timeout: float | None = None,
     ) -> RunLease:
         try:
-            with closing(self._connect()) as db:
+            if cancellation is not None and cancellation.is_set():
+                return _SQLiteLeaseAttempt.CANCELLED  # type: ignore[return-value]
+            with closing(self._connect(timeout)) as db:
+                if cancellation is not None and cancellation.is_set():
+                    return _SQLiteLeaseAttempt.CANCELLED  # type: ignore[return-value]
                 db.execute("BEGIN IMMEDIATE")
+                if cancellation is not None and cancellation.is_set():
+                    db.rollback()
+                    return _SQLiteLeaseAttempt.CANCELLED  # type: ignore[return-value]
                 now = self._now()
                 expires_at = now + ttl
                 row = db.execute(
-                    "SELECT run_id, owner_id, acquired_at, heartbeat_at, expires_at "
+                    "SELECT run_id, owner_id, acquired_at, heartbeat_at, expires_at, generation "
                     "FROM run_leases WHERE run_id = ?",
                     (run_id,),
                 ).fetchone()
                 if row is None:
                     lease = RunLease(run_id, owner_id, now, now, expires_at)
                     db.execute(
-                        "INSERT INTO run_leases VALUES (?, ?, ?, ?, ?)",
+                        "INSERT INTO run_leases VALUES (?, ?, ?, ?, ?, ?)",
                         _lease_values(lease),
                     )
                 else:
@@ -635,13 +896,14 @@ class SQLiteRunLeaseStore:
                         raise RunLeaseUnavailable("Run already has an active execution owner")
                     lease = RunLease(run_id, owner_id, now, now, expires_at)
                     cursor = db.execute(
-                        "UPDATE run_leases SET owner_id = ?, acquired_at = ?, heartbeat_at = ?, expires_at = ? "
+                        "UPDATE run_leases SET owner_id = ?, acquired_at = ?, heartbeat_at = ?, expires_at = ?, generation = ? "
                         "WHERE run_id = ? AND owner_id = ? AND expires_at = ?",
                         (
                             lease.owner_id,
                             _encode_time(lease.acquired_at),
                             _encode_time(lease.heartbeat_at),
                             _encode_time(lease.expires_at),
+                            lease.generation,
                             current.run_id,
                             current.owner_id,
                             _encode_time(current.expires_at),
@@ -649,11 +911,16 @@ class SQLiteRunLeaseStore:
                     )
                     if cursor.rowcount != 1:
                         raise RunLeaseStoreError("Lease takeover result was ambiguous")
+                if cancellation is not None and cancellation.is_set():
+                    db.rollback()
+                    return _SQLiteLeaseAttempt.CANCELLED  # type: ignore[return-value]
                 db.commit()
                 return lease
         except (RunLeaseUnavailable, RunLeaseStoreError):
             raise
         except sqlite3.Error as exc:
+            if _sqlite_is_busy(exc):
+                return _SQLiteLeaseAttempt.BUSY  # type: ignore[return-value]
             raise RunLeaseStoreError("SQLite lease acquisition failed") from exc
 
     def _renew(
@@ -661,13 +928,23 @@ class SQLiteRunLeaseStore:
         run_id: str,
         owner_id: str,
         ttl: timedelta,
+        generation: str | None = None,
+        cancellation: threading.Event | None = None,
+        timeout: float | None = None,
     ) -> RunLease:
         try:
-            with closing(self._connect()) as db:
+            if cancellation is not None and cancellation.is_set():
+                return _SQLiteLeaseAttempt.CANCELLED  # type: ignore[return-value]
+            with closing(self._connect(timeout)) as db:
+                if cancellation is not None and cancellation.is_set():
+                    return _SQLiteLeaseAttempt.CANCELLED  # type: ignore[return-value]
                 db.execute("BEGIN IMMEDIATE")
+                if cancellation is not None and cancellation.is_set():
+                    db.rollback()
+                    return _SQLiteLeaseAttempt.CANCELLED  # type: ignore[return-value]
                 now = self._now()
                 row = db.execute(
-                    "SELECT run_id, owner_id, acquired_at, heartbeat_at, expires_at "
+                    "SELECT run_id, owner_id, acquired_at, heartbeat_at, expires_at, generation "
                     "FROM run_leases WHERE run_id = ?",
                     (run_id,),
                 ).fetchone()
@@ -676,34 +953,45 @@ class SQLiteRunLeaseStore:
                 current = _lease_from_row(row)
                 if current.owner_id != owner_id:
                     raise RunLeaseOwnershipLost("Run lease is owned by another owner")
+                if generation is not None and current.generation != generation:
+                    raise RunLeaseOwnershipLost("Run lease generation changed")
                 if current.is_expired(now):
                     raise RunLeaseOwnershipLost("Run lease expired before renewal")
-                lease = RunLease(run_id, owner_id, current.acquired_at, now, now + ttl)
+                lease = RunLease(
+                    run_id, owner_id, current.acquired_at, now, now + ttl,
+                    generation=current.generation,
+                )
                 cursor = db.execute(
                     "UPDATE run_leases SET heartbeat_at = ?, expires_at = ? "
-                    "WHERE run_id = ? AND owner_id = ? AND expires_at = ?",
+                    "WHERE run_id = ? AND owner_id = ? AND generation = ? AND expires_at = ?",
                     (
                         _encode_time(lease.heartbeat_at),
                         _encode_time(lease.expires_at),
                         run_id,
                         owner_id,
+                        current.generation,
                         _encode_time(current.expires_at),
                     ),
                 )
                 if cursor.rowcount != 1:
                     raise RunLeaseStoreError("Lease renewal result was ambiguous")
+                if cancellation is not None and cancellation.is_set():
+                    db.rollback()
+                    return _SQLiteLeaseAttempt.CANCELLED  # type: ignore[return-value]
                 db.commit()
                 return lease
         except (RunLeaseOwnershipLost, RunLeaseStoreError):
             raise
         except sqlite3.Error as exc:
+            if _sqlite_is_busy(exc):
+                return _SQLiteLeaseAttempt.BUSY  # type: ignore[return-value]
             raise RunLeaseStoreError("SQLite lease renewal failed") from exc
 
     def _inspect(self, run_id: str) -> RunLease | None:
         try:
             with closing(self._connect()) as db:
                 row = db.execute(
-                    "SELECT run_id, owner_id, acquired_at, heartbeat_at, expires_at "
+                    "SELECT run_id, owner_id, acquired_at, heartbeat_at, expires_at, generation "
                     "FROM run_leases WHERE run_id = ?",
                     (run_id,),
                 ).fetchone()
@@ -717,6 +1005,7 @@ class SQLiteRunLeaseStore:
         self,
         run_id: str,
         owner_id: str,
+        generation: str | None,
         cancellation: threading.Event,
         timeout: float,
     ) -> _SQLiteReleaseAttempt:
@@ -731,20 +1020,27 @@ class SQLiteRunLeaseStore:
                     db.rollback()
                     return _SQLiteReleaseAttempt.CANCELLED
                 row = db.execute(
-                    "SELECT owner_id FROM run_leases WHERE run_id = ?",
+                    "SELECT owner_id, generation FROM run_leases WHERE run_id = ?",
                     (run_id,),
                 ).fetchone()
                 if row is None:
                     raise RunLeaseOwnershipLost("Run lease no longer exists")
                 if row[0] != owner_id:
                     raise RunLeaseOwnershipLost("Run lease is owned by another owner")
+                if generation is not None and row[1] != generation:
+                    raise RunLeaseOwnershipLost("Run lease generation changed")
+                # The legacy two-argument API remains accepted for existing
+                # stores, while coordinator callers pass the generation and
+                # get ABA-safe owner scoping.
                 if cancellation.is_set():
                     db.rollback()
                     return _SQLiteReleaseAttempt.CANCELLED
-                cursor = db.execute(
-                    "DELETE FROM run_leases WHERE run_id = ? AND owner_id = ?",
-                    (run_id, owner_id),
-                )
+                sql = "DELETE FROM run_leases WHERE run_id = ? AND owner_id = ?"
+                parameters: tuple[object, ...] = (run_id, owner_id)
+                if generation is not None:
+                    sql += " AND generation = ?"
+                    parameters += (generation,)
+                cursor = db.execute(sql, parameters)
                 if cursor.rowcount != 1:
                     raise RunLeaseStoreError("Lease release result was ambiguous")
                 if cancellation.is_set():
@@ -803,18 +1099,19 @@ def _decode_time(value: object) -> datetime:
         raise RunLeaseStoreError("Lease database contains an invalid UTC timestamp") from exc
 
 
-def _lease_values(lease: RunLease) -> tuple[str, str, str, str, str]:
+def _lease_values(lease: RunLease) -> tuple[str, str, str, str, str, str]:
     return (
         lease.run_id,
         lease.owner_id,
         _encode_time(lease.acquired_at),
         _encode_time(lease.heartbeat_at),
         _encode_time(lease.expires_at),
+        lease.generation,
     )
 
 
 def _lease_from_row(row: tuple[object, ...]) -> RunLease:
-    if len(row) != 5 or type(row[0]) is not str or type(row[1]) is not str:
+    if len(row) != 6 or type(row[0]) is not str or type(row[1]) is not str:
         raise RunLeaseStoreError("Lease database contains an invalid row")
     try:
         return RunLease(
@@ -823,6 +1120,7 @@ def _lease_from_row(row: tuple[object, ...]) -> RunLease:
             acquired_at=_decode_time(row[2]),
             heartbeat_at=_decode_time(row[3]),
             expires_at=_decode_time(row[4]),
+            generation=row[5],
         )
     except ValueError as exc:
         raise RunLeaseStoreError("Lease database contains invalid lease data") from exc
