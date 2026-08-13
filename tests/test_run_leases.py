@@ -366,6 +366,211 @@ def test_acquire_rechecks_expiry_after_waiting_for_write_lock(tmp_path) -> None:
     asyncio.run(run())
 
 
+def test_same_owner_new_generation_rejects_stale_renew_and_release(tmp_path) -> None:
+    async def run() -> None:
+        clock = MutableClock()
+        store = SQLiteRunLeaseStore(tmp_path / "generation.db", clock=clock)
+        await store.initialize()
+        first = await store.acquire("run-generation", "same-owner", timedelta(seconds=5))
+        clock.advance(6)
+        second = await store.acquire("run-generation", "same-owner", timedelta(seconds=5))
+        assert first.generation != second.generation
+        with pytest.raises(RunLeaseOwnershipLost):
+            await store.renew(
+                "run-generation", "same-owner", timedelta(seconds=5), first.generation
+            )
+        with pytest.raises(RunLeaseOwnershipLost):
+            await store.release("run-generation", "same-owner", first.generation)
+        assert await store.inspect("run-generation") == second
+
+    asyncio.run(run())
+
+
+def test_legacy_lease_schema_is_migrated_with_generation(tmp_path) -> None:
+    async def run() -> None:
+        path = tmp_path / "legacy.db"
+        with closing(sqlite3.connect(path)) as db:
+            db.execute(
+                "CREATE TABLE run_leases (run_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, "
+                "acquired_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL, expires_at TEXT NOT NULL)"
+            )
+            db.commit()
+        store = SQLiteRunLeaseStore(path)
+        await store.initialize()
+        lease = await store.acquire("run-legacy", "owner-legacy", timedelta(seconds=5))
+        assert lease.generation
+        assert (await store.inspect("run-legacy")).generation == lease.generation
+
+    asyncio.run(run())
+
+
+def test_expiry_watchdog_cancels_inflight_tool_while_renew_blocked() -> None:
+    async def run() -> None:
+        class Store:
+            def __init__(self) -> None:
+                self.released = False
+
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + timedelta(milliseconds=60))
+
+            async def renew(self, run_id, owner_id, ttl):
+                await asyncio.Event().wait()
+
+            async def release(self, run_id, owner_id, generation=None):
+                self.released = True
+
+        class Executor(RecordingExecutor):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.cancelled = asyncio.Event()
+
+            async def execute_with_result_budget(self, call, *, result_budget):
+                self.started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.cancelled.set()
+                    raise
+
+        store = Store()
+        executor = Executor()
+        runtime = ChatRuntime(
+            ToolModel(ToolCall(id="expiry-call", name="echo", arguments={})),
+            tool_executor=executor,
+            lease_store=store,
+            lease_run_id="run-expiry-watchdog",
+            lease_owner_id="owner-expiry-watchdog",
+            lease_ttl=timedelta(milliseconds=60),
+            lease_heartbeat_interval=timedelta(milliseconds=10),
+        )
+        task = asyncio.create_task(
+            _collect_events(runtime.stream_user_message("hello", tools=[executor.definition_value]))
+        )
+        await executor.started.wait()
+        with pytest.raises(RunLeaseOwnershipLost):
+            await asyncio.wait_for(task, timeout=1)
+        assert executor.cancelled.is_set()
+        assert store.released is False
+
+    asyncio.run(run())
+
+
+def test_uncertain_tool_cancellation_keeps_unexpired_lease() -> None:
+    async def run() -> None:
+        class Store:
+            def __init__(self) -> None:
+                self.released = False
+
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + timedelta(seconds=5))
+
+            async def renew(self, run_id, owner_id, ttl):
+                raise RunLeaseStoreError("heartbeat failed")
+
+            async def release(self, run_id, owner_id, generation=None):
+                self.released = True
+
+        class Executor(RecordingExecutor):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+
+            async def execute_with_result_budget(self, call, *, result_budget):
+                self.started.set()
+                await asyncio.Event().wait()
+
+        store = Store()
+        executor = Executor()
+        runtime = ChatRuntime(
+            ToolModel(ToolCall(id="uncertain-call", name="echo", arguments={})),
+            tool_executor=executor,
+            lease_store=store,
+            lease_run_id="run-uncertain-tool",
+            lease_owner_id="owner-uncertain-tool",
+            lease_ttl=timedelta(seconds=5),
+            lease_heartbeat_interval=timedelta(milliseconds=10),
+        )
+        task = asyncio.create_task(
+            _collect_events(runtime.stream_user_message("hello", tools=[executor.definition_value]))
+        )
+        await executor.started.wait()
+        with pytest.raises(RunLeaseStoreError, match="heartbeat failed"):
+            await asyncio.wait_for(task, timeout=1)
+        assert store.released is False
+
+    asyncio.run(run())
+
+
+def test_nonterminal_release_failure_is_surfaced_when_no_primary_error() -> None:
+    async def run() -> None:
+        class Store:
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id, generation=None):
+                raise RunLeaseStoreError("release failed")
+
+        async def empty_events():
+            if False:
+                yield RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="unused")
+
+        coordinator = RunLeaseCoordinator(
+            Store(), run_id="run-release-failure", lease_release_timeout=timedelta(milliseconds=20)
+        )
+        with pytest.raises(RunLeaseReleaseError, match="release failed"):
+            [event async for event in coordinator.stream(empty_events())]
+
+    asyncio.run(run())
+
+
+def test_cancelled_acquire_after_commit_does_not_leave_ghost_lease(tmp_path) -> None:
+    class CommitPausedConnection(sqlite3.Connection):
+        armed = False
+        committed = threading.Event()
+        allow_return = threading.Event()
+
+        def commit(self) -> None:
+            super().commit()
+            if type(self).armed:
+                type(self).committed.set()
+                type(self).allow_return.wait(1)
+
+    class CommitPausedStore(SQLiteRunLeaseStore):
+        def _connect(self, timeout=None):
+            resolved_timeout = self._timeout if timeout is None else timeout
+            return sqlite3.connect(
+                self._path,
+                timeout=resolved_timeout,
+                isolation_level=None,
+                factory=CommitPausedConnection,
+            )
+
+    async def run() -> None:
+        store = CommitPausedStore(tmp_path / "cancel-acquire.db")
+        await store.initialize()
+        CommitPausedConnection.armed = True
+        task = asyncio.create_task(store.acquire("run-cancel-acquire", "owner", timedelta(seconds=5)))
+        assert await asyncio.to_thread(CommitPausedConnection.committed.wait, 1)
+        task.cancel()
+        CommitPausedConnection.allow_return.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        with closing(sqlite3.connect(tmp_path / "cancel-acquire.db")) as db:
+            assert db.execute(
+                "SELECT 1 FROM run_leases WHERE run_id = ?", ("run-cancel-acquire",)
+            ).fetchone() is None
+        CommitPausedConnection.armed = False
+
+    asyncio.run(run())
+
+
 def test_invalid_or_closed_store_fails_with_public_errors(tmp_path) -> None:
     async def run() -> None:
         path = tmp_path / "leases.db"

@@ -298,6 +298,8 @@ class RunLeaseCoordinator:
                     self.release_error = exc
                     if active_error is None:
                         raise
+                if self.release_error is not None and active_error is None:
+                    raise self.release_error
 
     async def _next_event(self, iterator: AsyncIterator[RuntimeEvent]) -> RuntimeEvent:
         next_task = asyncio.create_task(anext(iterator))
@@ -520,12 +522,19 @@ class RunLeaseCoordinator:
 
     async def _renew_store(self) -> RunLease:
         renew = self._store.renew
+        current = self._guard.lease
         if self._accepts_generation(renew):
             return await renew(
                 self.run_id, self.owner_id, self.ttl,
-                generation=self._guard.lease.generation if self._guard.lease else None,
+                generation=current.generation if current else None,
             )
-        return await renew(self.run_id, self.owner_id, self.ttl)
+        renewed = await renew(self.run_id, self.owner_id, self.ttl)
+        # Legacy stores do not return a stable generation. Preserve the
+        # coordinator's acquisition generation so compatibility does not
+        # manufacture a false ownership loss on every heartbeat.
+        if current is not None:
+            renewed = replace(renewed, generation=current.generation)
+        return renewed
 
     async def _release_store(self) -> None:
         release = self._store.release
@@ -625,9 +634,11 @@ class SQLiteRunLeaseStore:
                 except asyncio.CancelledError as cancelled:
                     cancellation.set()
                     try:
-                        await self._drain_lease_attempt(attempt, cancellation)
+                        result = await self._drain_lease_attempt(attempt, cancellation)
                     except BaseException:
                         raise cancelled
+                    if operation == "acquire" and isinstance(result, RunLease):
+                        await self._compensating_release(result)
                     raise cancelled
                 if isinstance(result, RunLease):
                     return result
@@ -638,6 +649,23 @@ class SQLiteRunLeaseStore:
                 await asyncio.sleep(0)
         finally:
             self._unregister_lease_cancellation(operation, run_id, owner_id, cancellation)
+
+    async def _compensating_release(self, lease: RunLease) -> None:
+        """Remove an acquire that committed after its caller was cancelled."""
+        release_task = asyncio.create_task(
+            self.release(lease.run_id, lease.owner_id, lease.generation)
+        )
+        while not release_task.done():
+            try:
+                await asyncio.shield(release_task)
+            except asyncio.CancelledError:
+                continue
+        try:
+            release_task.result()
+        except BaseException:
+            # The original cancellation remains authoritative. A failed
+            # compensation is still bounded by SQLite's own timeout.
+            pass
 
     @staticmethod
     async def _drain_lease_attempt(
@@ -915,6 +943,14 @@ class SQLiteRunLeaseStore:
                     db.rollback()
                     return _SQLiteLeaseAttempt.CANCELLED  # type: ignore[return-value]
                 db.commit()
+                if cancellation is not None and cancellation.is_set():
+                    db.execute("BEGIN IMMEDIATE")
+                    db.execute(
+                        "DELETE FROM run_leases WHERE run_id = ? AND owner_id = ? AND generation = ?",
+                        (lease.run_id, lease.owner_id, lease.generation),
+                    )
+                    db.commit()
+                    return _SQLiteLeaseAttempt.CANCELLED  # type: ignore[return-value]
                 return lease
         except (RunLeaseUnavailable, RunLeaseStoreError):
             raise
