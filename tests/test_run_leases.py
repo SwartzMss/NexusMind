@@ -1608,7 +1608,7 @@ def test_cli_release_timeout_audits_cleanup_without_rewriting_completed_outcome(
     original_runtime = ChatRuntime
 
     def runtime_factory(*args, **kwargs):
-        kwargs.setdefault("lease_release_timeout", timedelta(milliseconds=30))
+        kwargs["lease_release_timeout"] = timedelta(milliseconds=30)
         return original_runtime(*args, **kwargs)
 
     monkeypatch.setattr(cli, "SQLiteRunLeaseStore", lambda path: store)
