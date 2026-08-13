@@ -52,8 +52,15 @@ class MutableClock:
 
 
 class BeginImmediateObservedConnection(sqlite3.Connection):
-    def __init__(self, *args, begin_immediate_attempted: threading.Event, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        begin_immediate_attempted: threading.Event,
+        connection_closed: threading.Event | None = None,
+        **kwargs,
+    ) -> None:
         self._begin_immediate_attempted = begin_immediate_attempted
+        self._connection_closed = connection_closed
         super().__init__(*args, **kwargs)
 
     def execute(self, sql, parameters=()):
@@ -61,16 +68,24 @@ class BeginImmediateObservedConnection(sqlite3.Connection):
             self._begin_immediate_attempted.set()
         return super().execute(sql, parameters)
 
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            if self._connection_closed is not None:
+                self._connection_closed.set()
+
 
 class ConnectionObservedLeaseStore(SQLiteRunLeaseStore):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.begin_immediate_attempted = threading.Event()
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self, timeout: float | None = None) -> sqlite3.Connection:
+        resolved_timeout = self._timeout if timeout is None else timeout
         db = sqlite3.connect(
             self._path,
-            timeout=self._timeout,
+            timeout=resolved_timeout,
             isolation_level=None,
             factory=lambda *args, **kwargs: BeginImmediateObservedConnection(
                 *args,
@@ -78,7 +93,45 @@ class ConnectionObservedLeaseStore(SQLiteRunLeaseStore):
                 **kwargs,
             ),
         )
-        db.execute(f"PRAGMA busy_timeout={max(1, int(self._timeout * 1000))}")
+        db.execute(f"PRAGMA busy_timeout={max(1, int(resolved_timeout * 1000))}")
+        db.execute("PRAGMA synchronous=FULL")
+        return db
+
+
+class PreacquiredConnectionObservedLeaseStore(SQLiteRunLeaseStore):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.begin_immediate_attempted = threading.Event()
+        self.release_connection_closed = threading.Event()
+        self.preacquired_lease: RunLease | None = None
+
+    async def seed(self, run_id: str, owner_id: str, ttl: timedelta) -> RunLease:
+        lease = await super().acquire(run_id, owner_id, ttl)
+        self.preacquired_lease = lease
+        return lease
+
+    async def acquire(self, run_id: str, owner_id: str, ttl: timedelta) -> RunLease:
+        lease = self.preacquired_lease
+        if lease is None:
+            return await super().acquire(run_id, owner_id, ttl)
+        assert lease.run_id == run_id
+        assert lease.owner_id == owner_id
+        return lease
+
+    def _connect(self, timeout: float | None = None) -> sqlite3.Connection:
+        resolved_timeout = self._timeout if timeout is None else timeout
+        db = sqlite3.connect(
+            self._path,
+            timeout=resolved_timeout,
+            isolation_level=None,
+            factory=lambda *args, **kwargs: BeginImmediateObservedConnection(
+                *args,
+                begin_immediate_attempted=self.begin_immediate_attempted,
+                connection_closed=self.release_connection_closed,
+                **kwargs,
+            ),
+        )
+        db.execute(f"PRAGMA busy_timeout={max(1, int(resolved_timeout * 1000))}")
         db.execute("PRAGMA synchronous=FULL")
         return db
 
@@ -353,6 +406,82 @@ class CountingTextModel(ChatModel):
         yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="stop")
 
 
+def test_chat_runtime_preserves_prior_positional_lease_clock_slot() -> None:
+    async def run() -> None:
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        clock_calls = 0
+
+        def lease_clock() -> datetime:
+            nonlocal clock_calls
+            clock_calls += 1
+            return now
+
+        class PositionalLeaseStore:
+            def __init__(self) -> None:
+                self.released = False
+
+            async def acquire(self, run_id, owner_id, ttl):
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl):
+                raise AssertionError("heartbeat should not run")
+
+            async def inspect(self, run_id):
+                return None
+
+            async def release(self, run_id, owner_id):
+                self.released = True
+
+        store = PositionalLeaseStore()
+        runtime = ChatRuntime(
+            CountingTextModel(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            True,
+            store,
+            "run-positional-clock",
+            "owner-positional-clock",
+            timedelta(seconds=30),
+            timedelta(seconds=10),
+            lease_clock,
+        )
+
+        events = [event async for event in runtime.stream_user_message("hello")]
+
+        assert events[-1].type is RuntimeEventType.RUN_COMPLETED
+        assert store.released is True
+        assert clock_calls > 0
+
+        next_positional_runtime = ChatRuntime(
+            CountingTextModel(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            True,
+            PositionalLeaseStore(),
+            "run-positional-release-timeout",
+            "owner-positional-release-timeout",
+            timedelta(seconds=30),
+            timedelta(seconds=10),
+            lease_clock,
+            timedelta(milliseconds=25),
+        )
+        assert next_positional_runtime._lease_release_timeout == timedelta(milliseconds=25)
+
+    asyncio.run(run())
+
+
 class ToolModel(ChatModel):
     def __init__(self, call: ToolCall) -> None:
         self.call = call
@@ -430,6 +559,75 @@ def test_normal_execution_releases_lease(tmp_path) -> None:
         events = [event async for event in runtime.stream_user_message("hello")]
         assert events[-1].type is RuntimeEventType.RUN_COMPLETED
         assert await store.inspect("run-1") is None
+
+    asyncio.run(run())
+
+
+def test_sqlite_terminal_release_timeout_cannot_delete_after_lock_opens(tmp_path) -> None:
+    async def run() -> None:
+        path = tmp_path / "leases.db"
+        store = PreacquiredConnectionObservedLeaseStore(path, timeout=1)
+        await store.initialize()
+        seeded = await store.seed(
+            "run-release-lock-timeout",
+            "owner-release-lock-timeout",
+            timedelta(seconds=30),
+        )
+        holder = sqlite3.connect(path, isolation_level=None)
+        collect_task: asyncio.Task[list[RuntimeEvent]] | None = None
+        holder_open = True
+        try:
+            holder.execute("BEGIN IMMEDIATE")
+            store.begin_immediate_attempted.clear()
+            store.release_connection_closed.clear()
+            runtime = ChatRuntime(
+                CountingTextModel(),
+                lease_store=store,
+                lease_run_id=seeded.run_id,
+                lease_owner_id=seeded.owner_id,
+                lease_release_timeout=timedelta(milliseconds=20),
+            )
+            collect_task = asyncio.create_task(
+                _collect_events(runtime.stream_user_message("hello"))
+            )
+
+            assert await asyncio.to_thread(store.begin_immediate_attempted.wait, 1)
+            assert not collect_task.done()
+            started_at = asyncio.get_running_loop().time()
+            events = await asyncio.wait_for(asyncio.shield(collect_task), timeout=0.2)
+
+            assert asyncio.get_running_loop().time() - started_at < 0.2
+            assert holder.in_transaction
+            assert events[-1].type is RuntimeEventType.RUN_COMPLETED
+            assert events[-1].metadata["lease_release_failed"] is True
+            assert runtime._harness.state.status is HarnessStatus.COMPLETED
+
+            holder.rollback()
+            holder.close()
+            holder_open = False
+            assert await asyncio.to_thread(store.release_connection_closed.wait, 1)
+            for _ in range(100):
+                if not leases_module._BACKGROUND_RELEASE_TASKS:
+                    break
+                await asyncio.sleep(0.001)
+            assert leases_module._BACKGROUND_RELEASE_TASKS == set()
+
+            stored = await store.inspect(seeded.run_id)
+            assert stored is not None
+            assert stored.owner_id == seeded.owner_id
+            assert stored == seeded
+        finally:
+            if holder_open:
+                holder.rollback()
+                holder.close()
+            if collect_task is not None and not collect_task.done():
+                collect_task.cancel()
+                with suppress(BaseException):
+                    await collect_task
+            stored = await store.inspect(seeded.run_id)
+            if stored is not None:
+                await store.release(stored.run_id, stored.owner_id)
+            await store.close()
 
     asyncio.run(run())
 

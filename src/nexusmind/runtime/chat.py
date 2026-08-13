@@ -47,8 +47,8 @@ class ChatRuntime:
         lease_owner_id: str | None = None,
         lease_ttl: timedelta = timedelta(seconds=30),
         lease_heartbeat_interval: timedelta | None = None,
-        lease_release_timeout: timedelta = timedelta(seconds=10),
         lease_clock: Callable[[], datetime] | None = None,
+        lease_release_timeout: timedelta = timedelta(seconds=10),
     ) -> None:
         if checkpoint_store is not None and not checkpoint_run_id:
             raise ValueError("checkpoint_run_id is required when automatic checkpointing is enabled")

@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import sys
+import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import closing
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from enum import Enum, auto
 from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
@@ -50,6 +52,12 @@ class RunLeaseStoreError(RunLeaseError):
 
 class RunLeaseReleaseError(RunLeaseStoreError):
     """Execution ended, but releasing its lease could not be proven."""
+
+
+class _SQLiteReleaseAttempt(Enum):
+    RELEASED = auto()
+    BUSY = auto()
+    CANCELLED = auto()
 
 
 @dataclass(frozen=True, slots=True)
@@ -440,11 +448,58 @@ class SQLiteRunLeaseStore:
         self._require_ready()
         _validate_identity(run_id, "run_id")
         _validate_identity(owner_id, "owner_id")
-        await asyncio.to_thread(self._release, run_id, owner_id)
+        cancellation = threading.Event()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._timeout
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise RunLeaseStoreError("SQLite lease release failed: database is locked")
+            attempt_timeout = min(0.05, remaining)
+            attempt = asyncio.create_task(
+                asyncio.to_thread(
+                    self._release_attempt,
+                    run_id,
+                    owner_id,
+                    cancellation,
+                    attempt_timeout,
+                )
+            )
+            try:
+                result = await asyncio.shield(attempt)
+            except asyncio.CancelledError as cancelled:
+                cancellation.set()
+                try:
+                    result = await self._drain_release_attempt(attempt, cancellation)
+                except BaseException:
+                    raise cancelled
+                if result is _SQLiteReleaseAttempt.RELEASED:
+                    return
+                raise cancelled
+            if result is _SQLiteReleaseAttempt.RELEASED:
+                return
+            if result is _SQLiteReleaseAttempt.CANCELLED:
+                raise asyncio.CancelledError()
+            if loop.time() >= deadline:
+                raise RunLeaseStoreError("SQLite lease release failed: database is locked")
+            await asyncio.sleep(0)
 
-    def _connect(self) -> sqlite3.Connection:
-        db = sqlite3.connect(self._path, timeout=self._timeout, isolation_level=None)
-        db.execute(f"PRAGMA busy_timeout={max(1, int(self._timeout * 1000))}")
+    @staticmethod
+    async def _drain_release_attempt(
+        attempt: asyncio.Task[_SQLiteReleaseAttempt],
+        cancellation: threading.Event,
+    ) -> _SQLiteReleaseAttempt:
+        while not attempt.done():
+            try:
+                await asyncio.shield(attempt)
+            except asyncio.CancelledError:
+                cancellation.set()
+        return attempt.result()
+
+    def _connect(self, timeout: float | None = None) -> sqlite3.Connection:
+        resolved_timeout = self._timeout if timeout is None else timeout
+        db = sqlite3.connect(self._path, timeout=resolved_timeout, isolation_level=None)
+        db.execute(f"PRAGMA busy_timeout={max(1, int(resolved_timeout * 1000))}")
         db.execute("PRAGMA synchronous=FULL")
         return db
 
@@ -606,10 +661,23 @@ class SQLiteRunLeaseStore:
         except sqlite3.Error as exc:
             raise RunLeaseStoreError("SQLite lease inspection failed") from exc
 
-    def _release(self, run_id: str, owner_id: str) -> None:
+    def _release_attempt(
+        self,
+        run_id: str,
+        owner_id: str,
+        cancellation: threading.Event,
+        timeout: float,
+    ) -> _SQLiteReleaseAttempt:
+        if cancellation.is_set():
+            return _SQLiteReleaseAttempt.CANCELLED
         try:
-            with closing(self._connect()) as db:
+            with closing(self._connect(timeout=timeout)) as db:
+                if cancellation.is_set():
+                    return _SQLiteReleaseAttempt.CANCELLED
                 db.execute("BEGIN IMMEDIATE")
+                if cancellation.is_set():
+                    db.rollback()
+                    return _SQLiteReleaseAttempt.CANCELLED
                 row = db.execute(
                     "SELECT owner_id FROM run_leases WHERE run_id = ?",
                     (run_id,),
@@ -618,15 +686,26 @@ class SQLiteRunLeaseStore:
                     raise RunLeaseOwnershipLost("Run lease no longer exists")
                 if row[0] != owner_id:
                     raise RunLeaseOwnershipLost("Run lease is owned by another owner")
+                if cancellation.is_set():
+                    db.rollback()
+                    return _SQLiteReleaseAttempt.CANCELLED
                 cursor = db.execute(
                     "DELETE FROM run_leases WHERE run_id = ? AND owner_id = ?",
                     (run_id, owner_id),
                 )
                 if cursor.rowcount != 1:
                     raise RunLeaseStoreError("Lease release result was ambiguous")
+                if cancellation.is_set():
+                    db.rollback()
+                    return _SQLiteReleaseAttempt.CANCELLED
                 db.commit()
+                return _SQLiteReleaseAttempt.RELEASED
         except (RunLeaseOwnershipLost, RunLeaseStoreError):
             raise
+        except sqlite3.OperationalError as exc:
+            if _sqlite_is_busy(exc):
+                return _SQLiteReleaseAttempt.BUSY
+            raise RunLeaseStoreError("SQLite lease release failed") from exc
         except sqlite3.Error as exc:
             raise RunLeaseStoreError("SQLite lease release failed") from exc
 
@@ -636,6 +715,14 @@ def _validate_request(run_id: str, owner_id: str, ttl: timedelta) -> None:
     _validate_identity(owner_id, "owner_id")
     if type(ttl) is not timedelta or ttl <= timedelta(0):
         raise ValueError("Run lease ttl must be a positive timedelta")
+
+
+def _sqlite_is_busy(error: sqlite3.OperationalError) -> bool:
+    code = getattr(error, "sqlite_errorcode", None)
+    if type(code) is int and code & 0xFF in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+        return True
+    message = str(error).lower()
+    return "locked" in message or "busy" in message
 
 
 def _validate_identity(value: str, name: str) -> None:
