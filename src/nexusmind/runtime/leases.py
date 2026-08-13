@@ -287,10 +287,11 @@ class RunLeaseCoordinator:
         finally:
             active_error = sys.exc_info()[1]
             await self._stop_heartbeat()
-            try:
-                await iterator.aclose()
-            except (AttributeError, RuntimeError):
-                pass
+            if not self._terminal_cleanup_done:
+                try:
+                    await iterator.aclose()
+                except (AttributeError, RuntimeError):
+                    pass
             if acquired and not self._terminal_cleanup_done and not self._guard.execution_uncertain:
                 try:
                     await self._release_with_deadline(propagate_cancellation=True)

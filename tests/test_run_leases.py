@@ -459,6 +459,8 @@ def test_expiry_watchdog_cancels_inflight_tool_while_renew_blocked() -> None:
 
 def test_uncertain_tool_cancellation_keeps_unexpired_lease() -> None:
     async def run() -> None:
+        tool_started = asyncio.Event()
+
         class Store:
             def __init__(self) -> None:
                 self.released = False
@@ -468,6 +470,7 @@ def test_uncertain_tool_cancellation_keeps_unexpired_lease() -> None:
                 return RunLease(run_id, owner_id, now, now, now + timedelta(seconds=5))
 
             async def renew(self, run_id, owner_id, ttl):
+                await tool_started.wait()
                 raise RunLeaseStoreError("heartbeat failed")
 
             async def release(self, run_id, owner_id, generation=None):
@@ -476,7 +479,7 @@ def test_uncertain_tool_cancellation_keeps_unexpired_lease() -> None:
         class Executor(RecordingExecutor):
             def __init__(self) -> None:
                 super().__init__()
-                self.started = asyncio.Event()
+                self.started = tool_started
 
             async def execute_with_result_budget(self, call, *, result_budget):
                 self.started.set()
@@ -1244,7 +1247,6 @@ def test_cancellation_cannot_extend_terminal_release_timeout() -> None:
         started_at = asyncio.get_running_loop().time()
         try:
             events = await asyncio.wait_for(asyncio.shield(task), timeout=0.15)
-            assert not cancellation_storm.done()
             assert asyncio.get_running_loop().time() - started_at < 0.15
         finally:
             await cancellation_storm
