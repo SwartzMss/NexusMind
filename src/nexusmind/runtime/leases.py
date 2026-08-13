@@ -273,8 +273,13 @@ class RunLeaseCoordinator:
         raise ownership_error
 
     async def _finalize_terminal(self, event: RuntimeEvent) -> RuntimeEvent:
+        ownership_lost = False
+        try:
+            self._guard.assert_owned()
+        except RunLeaseError:
+            ownership_lost = True
         await self._stop_heartbeat()
-        ownership_lost = self._guard.ownership_error is not None
+        ownership_lost = ownership_lost or self._guard.ownership_error is not None
         await self._release_terminal_barrier()
         metadata = dict(event.metadata)
         if ownership_lost:

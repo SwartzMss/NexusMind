@@ -740,6 +740,57 @@ def test_heartbeat_loss_during_terminal_checkpoint_preserves_all_outcomes(
     assert "lease_ownership_lost_after_terminal" in event_types
 
 
+def test_terminal_event_audits_ownership_expiry_while_waiting(tmp_path) -> None:
+    async def run() -> None:
+        class PausingCheckpointStore(InMemoryCheckpointStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.terminal_started = asyncio.Event()
+                self.release_terminal = asyncio.Event()
+
+            async def save(self, checkpoint):
+                if checkpoint.boundary is CheckpointBoundary.RUN_TERMINAL:
+                    self.terminal_started.set()
+                    await self.release_terminal.wait()
+                await super().save(checkpoint)
+
+        clock = MutableClock()
+        leases = SQLiteRunLeaseStore(tmp_path / "terminal-expiry.db", clock=clock)
+        await leases.initialize()
+        checkpoints = PausingCheckpointStore()
+        runtime = ChatRuntime(
+            CountingTextModel(),
+            checkpoint_store=checkpoints,
+            checkpoint_run_id="run-terminal-expiry",
+            lease_store=leases,
+            lease_run_id="run-terminal-expiry",
+            lease_owner_id="owner-terminal-expiry",
+            lease_ttl=timedelta(seconds=20),
+            lease_heartbeat_interval=timedelta(seconds=10),
+            lease_clock=clock,
+        )
+        task = asyncio.create_task(_collect_events(runtime.stream_user_message("hello")))
+        await checkpoints.terminal_started.wait()
+
+        lease = runtime._lease_coordinator.lease
+        assert lease is not None
+        clock.advance(21)
+        assert runtime._lease_guard.ownership_error is None
+        stored_lease = await leases.inspect("run-terminal-expiry")
+        assert stored_lease is not None
+        assert stored_lease.heartbeat_at == lease.heartbeat_at
+
+        checkpoints.release_terminal.set()
+        events = await task
+        await leases.close()
+
+        assert events[-1].type is RuntimeEventType.RUN_COMPLETED
+        assert runtime._harness.state.status is HarnessStatus.COMPLETED
+        assert events[-1].metadata["lease_ownership_lost_after_terminal"] is True
+
+    asyncio.run(run())
+
+
 def test_heartbeat_loss_during_policy_blocks_tool_execution() -> None:
     async def run() -> None:
         class HeartbeatFailureStore:
