@@ -742,6 +742,15 @@ def test_heartbeat_loss_during_terminal_checkpoint_preserves_all_outcomes(
 
 def test_terminal_event_audits_ownership_expiry_while_waiting(tmp_path) -> None:
     async def run() -> None:
+        class CountingRenewLeaseStore(SQLiteRunLeaseStore):
+            def __init__(self, *args, **kwargs) -> None:
+                super().__init__(*args, **kwargs)
+                self.renew_calls = 0
+
+            async def renew(self, run_id, owner_id, ttl):
+                self.renew_calls += 1
+                return await super().renew(run_id, owner_id, ttl)
+
         class PausingCheckpointStore(InMemoryCheckpointStore):
             def __init__(self) -> None:
                 super().__init__()
@@ -755,7 +764,7 @@ def test_terminal_event_audits_ownership_expiry_while_waiting(tmp_path) -> None:
                 await super().save(checkpoint)
 
         clock = MutableClock()
-        leases = SQLiteRunLeaseStore(tmp_path / "terminal-expiry.db", clock=clock)
+        leases = CountingRenewLeaseStore(tmp_path / "terminal-expiry.db", clock=clock)
         await leases.initialize()
         checkpoints = PausingCheckpointStore()
         runtime = ChatRuntime(
@@ -765,8 +774,8 @@ def test_terminal_event_audits_ownership_expiry_while_waiting(tmp_path) -> None:
             lease_store=leases,
             lease_run_id="run-terminal-expiry",
             lease_owner_id="owner-terminal-expiry",
-            lease_ttl=timedelta(seconds=20),
-            lease_heartbeat_interval=timedelta(seconds=10),
+            lease_ttl=timedelta(days=2),
+            lease_heartbeat_interval=timedelta(days=1),
             lease_clock=clock,
         )
         task = asyncio.create_task(_collect_events(runtime.stream_user_message("hello")))
@@ -774,7 +783,7 @@ def test_terminal_event_audits_ownership_expiry_while_waiting(tmp_path) -> None:
 
         lease = runtime._lease_coordinator.lease
         assert lease is not None
-        clock.advance(21)
+        clock.advance(3 * 24 * 60 * 60)
         assert runtime._lease_guard.ownership_error is None
         stored_lease = await leases.inspect("run-terminal-expiry")
         assert stored_lease is not None
@@ -782,6 +791,7 @@ def test_terminal_event_audits_ownership_expiry_while_waiting(tmp_path) -> None:
 
         checkpoints.release_terminal.set()
         events = await task
+        assert leases.renew_calls == 0
         await leases.close()
 
         assert events[-1].type is RuntimeEventType.RUN_COMPLETED
