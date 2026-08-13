@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -43,6 +44,17 @@ class MutableClock:
 
     def advance(self, seconds: float) -> None:
         self.value += timedelta(seconds=seconds)
+
+
+class ConnectionObservedLeaseStore(SQLiteRunLeaseStore):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.connection_opened = threading.Event()
+
+    def _connect(self) -> sqlite3.Connection:
+        db = super()._connect()
+        self.connection_opened.set()
+        return db
 
 
 def test_first_owner_acquires_and_heartbeat_renews_lease(tmp_path) -> None:
@@ -179,6 +191,67 @@ def test_sqlite_lock_failure_is_controlled(tmp_path) -> None:
         finally:
             lock.rollback()
             lock.close()
+
+    asyncio.run(run())
+
+
+def test_renew_rechecks_expiry_after_waiting_for_write_lock(tmp_path) -> None:
+    async def run() -> None:
+        clock = MutableClock()
+        path = tmp_path / "leases.db"
+        store = ConnectionObservedLeaseStore(path, clock=clock)
+        await store.initialize()
+        old_lease = await store.acquire("run-1", "owner-1", timedelta(seconds=5))
+        lock = sqlite3.connect(path, isolation_level=None)
+        lock.execute("BEGIN IMMEDIATE")
+        try:
+            store.connection_opened.clear()
+            renew_task = asyncio.create_task(
+                store.renew("run-1", "owner-1", timedelta(seconds=10))
+            )
+            await asyncio.wait_for(
+                asyncio.to_thread(store.connection_opened.wait), timeout=1
+            )
+            clock.advance(6)
+        finally:
+            lock.rollback()
+            lock.close()
+
+        with pytest.raises(RunLeaseOwnershipLost):
+            await renew_task
+        stored = await store.inspect("run-1")
+        assert stored == old_lease
+        assert stored.is_expired(clock.value)
+
+    asyncio.run(run())
+
+
+def test_acquire_rechecks_expiry_after_waiting_for_write_lock(tmp_path) -> None:
+    async def run() -> None:
+        clock = MutableClock()
+        path = tmp_path / "leases.db"
+        store = ConnectionObservedLeaseStore(path, clock=clock)
+        await store.initialize()
+        await store.acquire("run-1", "owner-1", timedelta(seconds=5))
+        lock = sqlite3.connect(path, isolation_level=None)
+        lock.execute("BEGIN IMMEDIATE")
+        try:
+            store.connection_opened.clear()
+            acquire_task = asyncio.create_task(
+                store.acquire("run-1", "owner-2", timedelta(seconds=10))
+            )
+            await asyncio.wait_for(
+                asyncio.to_thread(store.connection_opened.wait), timeout=1
+            )
+            clock.advance(6)
+        finally:
+            lock.rollback()
+            lock.close()
+
+        lease = await acquire_task
+        assert lease.owner_id == "owner-2"
+        assert lease.acquired_at == clock.value
+        assert await store.inspect("run-1") == lease
 
     asyncio.run(run())
 

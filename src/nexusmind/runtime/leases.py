@@ -387,14 +387,12 @@ class SQLiteRunLeaseStore:
     async def acquire(self, run_id: str, owner_id: str, ttl: timedelta) -> RunLease:
         self._require_ready()
         _validate_request(run_id, owner_id, ttl)
-        now = self._now()
-        return await asyncio.to_thread(self._acquire, run_id, owner_id, ttl, now)
+        return await asyncio.to_thread(self._acquire, run_id, owner_id, ttl)
 
     async def renew(self, run_id: str, owner_id: str, ttl: timedelta) -> RunLease:
         self._require_ready()
         _validate_request(run_id, owner_id, ttl)
-        now = self._now()
-        return await asyncio.to_thread(self._renew, run_id, owner_id, ttl, now)
+        return await asyncio.to_thread(self._renew, run_id, owner_id, ttl)
 
     async def inspect(self, run_id: str) -> RunLease | None:
         self._require_ready()
@@ -470,12 +468,12 @@ class SQLiteRunLeaseStore:
         run_id: str,
         owner_id: str,
         ttl: timedelta,
-        now: datetime,
     ) -> RunLease:
-        expires_at = now + ttl
         try:
             with closing(self._connect()) as db:
                 db.execute("BEGIN IMMEDIATE")
+                now = self._now()
+                expires_at = now + ttl
                 row = db.execute(
                     "SELECT run_id, owner_id, acquired_at, heartbeat_at, expires_at "
                     "FROM run_leases WHERE run_id = ?",
@@ -519,11 +517,11 @@ class SQLiteRunLeaseStore:
         run_id: str,
         owner_id: str,
         ttl: timedelta,
-        now: datetime,
     ) -> RunLease:
         try:
             with closing(self._connect()) as db:
                 db.execute("BEGIN IMMEDIATE")
+                now = self._now()
                 row = db.execute(
                     "SELECT run_id, owner_id, acquired_at, heartbeat_at, expires_at "
                     "FROM run_leases WHERE run_id = ?",
