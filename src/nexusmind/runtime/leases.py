@@ -179,6 +179,7 @@ class RunLeaseCoordinator:
         self.lease_release_timeout = lease_release_timeout
         self._guard = guard or RunLeaseOwnershipGuard(clock=clock)
         self._heartbeat_task: asyncio.Task[None] | None = None
+        self._background_tasks: set[asyncio.Task[None]] = set()
         self._stream_started = False
         self.release_error: RunLeaseError | None = None
         self.ownership_lost_after_progress = False
@@ -309,12 +310,24 @@ class RunLeaseCoordinator:
             self.release_error = RunLeaseReleaseError("Run lease release timed out")
             release_task.cancel()
             self._guard.clear()
-            release_task.add_done_callback(self._consume_task_result)
+            self._retain_background_task(release_task)
             return
         try:
             release_task.result()
+        except asyncio.CancelledError as exc:
+            error = RunLeaseReleaseError("Run lease release cancelled")
+            error.__cause__ = exc
+            self.release_error = error
         except RunLeaseError as exc:
             self.release_error = exc
+
+    def _retain_background_task(self, task: asyncio.Task[None]) -> None:
+        self._background_tasks.add(task)
+        task.add_done_callback(self._consume_background_task_result)
+
+    def _consume_background_task_result(self, task: asyncio.Task[None]) -> None:
+        self._background_tasks.discard(task)
+        self._consume_task_result(task)
 
     @staticmethod
     def _consume_task_result(task: asyncio.Task[None]) -> None:
