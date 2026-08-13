@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import threading
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -46,15 +47,67 @@ class MutableClock:
         self.value += timedelta(seconds=seconds)
 
 
+class BeginImmediateObservedConnection(sqlite3.Connection):
+    def __init__(self, *args, begin_immediate_attempted: threading.Event, **kwargs) -> None:
+        self._begin_immediate_attempted = begin_immediate_attempted
+        super().__init__(*args, **kwargs)
+
+    def execute(self, sql, parameters=()):
+        if sql == "BEGIN IMMEDIATE":
+            self._begin_immediate_attempted.set()
+        return super().execute(sql, parameters)
+
+
 class ConnectionObservedLeaseStore(SQLiteRunLeaseStore):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.connection_opened = threading.Event()
+        self.begin_immediate_attempted = threading.Event()
 
     def _connect(self) -> sqlite3.Connection:
-        db = super()._connect()
-        self.connection_opened.set()
+        db = sqlite3.connect(
+            self._path,
+            timeout=self._timeout,
+            isolation_level=None,
+            factory=lambda *args, **kwargs: BeginImmediateObservedConnection(
+                *args,
+                begin_immediate_attempted=self.begin_immediate_attempted,
+                **kwargs,
+            ),
+        )
+        db.execute(f"PRAGMA busy_timeout={max(1, int(self._timeout * 1000))}")
+        db.execute("PRAGMA synchronous=FULL")
         return db
+
+
+async def _wait_for_begin_immediate_attempt(
+    task: asyncio.Task[RunLease], event: threading.Event
+) -> None:
+    assert await asyncio.to_thread(event.wait, 1)
+    assert not task.done()
+
+
+async def _drain_lease_task(task: asyncio.Task[RunLease]) -> None:
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=1)
+    except asyncio.TimeoutError:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+    except BaseException:
+        pass
+
+
+async def _release_holder_and_drain(
+    holder: sqlite3.Connection, task: asyncio.Task[RunLease] | None
+) -> None:
+    try:
+        holder.rollback()
+    finally:
+        try:
+            holder.close()
+        finally:
+            if task is not None:
+                await _drain_lease_task(task)
 
 
 def test_first_owner_acquires_and_heartbeat_renews_lease(tmp_path) -> None:
@@ -199,23 +252,23 @@ def test_renew_rechecks_expiry_after_waiting_for_write_lock(tmp_path) -> None:
     async def run() -> None:
         clock = MutableClock()
         path = tmp_path / "leases.db"
-        store = ConnectionObservedLeaseStore(path, clock=clock)
+        store = ConnectionObservedLeaseStore(path, clock=clock, timeout=1)
         await store.initialize()
         old_lease = await store.acquire("run-1", "owner-1", timedelta(seconds=5))
         lock = sqlite3.connect(path, isolation_level=None)
-        lock.execute("BEGIN IMMEDIATE")
+        renew_task: asyncio.Task[RunLease] | None = None
         try:
-            store.connection_opened.clear()
+            lock.execute("BEGIN IMMEDIATE")
+            store.begin_immediate_attempted.clear()
             renew_task = asyncio.create_task(
                 store.renew("run-1", "owner-1", timedelta(seconds=10))
             )
-            await asyncio.wait_for(
-                asyncio.to_thread(store.connection_opened.wait), timeout=1
+            await _wait_for_begin_immediate_attempt(
+                renew_task, store.begin_immediate_attempted
             )
             clock.advance(6)
         finally:
-            lock.rollback()
-            lock.close()
+            await _release_holder_and_drain(lock, renew_task)
 
         with pytest.raises(RunLeaseOwnershipLost):
             await renew_task
@@ -230,23 +283,23 @@ def test_acquire_rechecks_expiry_after_waiting_for_write_lock(tmp_path) -> None:
     async def run() -> None:
         clock = MutableClock()
         path = tmp_path / "leases.db"
-        store = ConnectionObservedLeaseStore(path, clock=clock)
+        store = ConnectionObservedLeaseStore(path, clock=clock, timeout=1)
         await store.initialize()
         await store.acquire("run-1", "owner-1", timedelta(seconds=5))
         lock = sqlite3.connect(path, isolation_level=None)
-        lock.execute("BEGIN IMMEDIATE")
+        acquire_task: asyncio.Task[RunLease] | None = None
         try:
-            store.connection_opened.clear()
+            lock.execute("BEGIN IMMEDIATE")
+            store.begin_immediate_attempted.clear()
             acquire_task = asyncio.create_task(
                 store.acquire("run-1", "owner-2", timedelta(seconds=10))
             )
-            await asyncio.wait_for(
-                asyncio.to_thread(store.connection_opened.wait), timeout=1
+            await _wait_for_begin_immediate_attempt(
+                acquire_task, store.begin_immediate_attempted
             )
             clock.advance(6)
         finally:
-            lock.rollback()
-            lock.close()
+            await _release_holder_and_drain(lock, acquire_task)
 
         lease = await acquire_task
         assert lease.owner_id == "owner-2"
