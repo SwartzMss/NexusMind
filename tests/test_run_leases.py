@@ -721,7 +721,7 @@ def test_guard_uncertainty_does_not_leak_into_next_execution() -> None:
     asyncio.run(run())
 
 
-def test_legacy_owner_only_store_is_rejected_without_mutation() -> None:
+def test_legacy_owner_only_release_is_never_invoked() -> None:
     async def run() -> None:
         class LegacyStore:
             def __init__(self) -> None:
@@ -757,6 +757,115 @@ def test_legacy_owner_only_store_is_rejected_without_mutation() -> None:
 
         assert output[-1].metadata["lease_release_failed"] is True
         assert store.release_calls == 0
+
+    asyncio.run(run())
+
+
+def test_terminal_does_not_hang_when_renew_suppresses_cancellation() -> None:
+    async def run() -> None:
+        class Store:
+            def __init__(self) -> None:
+                self.renew_started = asyncio.Event()
+                self.never_finish = asyncio.Event()
+                self.release_called = asyncio.Event()
+
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(
+                    run_id,
+                    owner_id,
+                    now,
+                    now,
+                    now + ttl,
+                    generation="generation-1",
+                )
+
+            async def renew(self, run_id, owner_id, ttl, generation=None):
+                self.renew_started.set()
+                try:
+                    await self.never_finish.wait()
+                except asyncio.CancelledError:
+                    await self.never_finish.wait()
+
+            async def release(self, run_id, owner_id, generation=None):
+                self.release_called.set()
+
+        store = Store()
+
+        async def events():
+            await store.renew_started.wait()
+            yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
+
+        coordinator = RunLeaseCoordinator(
+            store,
+            run_id="run-renew-cancellation",
+            owner_id="owner-renew-cancellation",
+            heartbeat_interval=timedelta(milliseconds=1),
+            lease_release_timeout=timedelta(milliseconds=20),
+        )
+        output = await asyncio.wait_for(
+            _collect_events(coordinator.stream(events())), timeout=0.2
+        )
+
+        assert output[-1].type is RuntimeEventType.RUN_COMPLETED
+        assert store.release_called.is_set()
+        assert coordinator._heartbeat_active is False
+
+    asyncio.run(run())
+
+
+def test_cancelled_custom_acquire_that_finishes_late_is_compensated() -> None:
+    async def run() -> None:
+        class Store:
+            def __init__(self) -> None:
+                self.acquire_started = asyncio.Event()
+                self.allow_commit = asyncio.Event()
+                self.release_called = asyncio.Event()
+                self.release_generations = []
+
+            async def acquire(self, run_id, owner_id, ttl):
+                self.acquire_started.set()
+                try:
+                    await self.allow_commit.wait()
+                except asyncio.CancelledError:
+                    await self.allow_commit.wait()
+                now = datetime.now(timezone.utc)
+                return RunLease(
+                    run_id,
+                    owner_id,
+                    now,
+                    now,
+                    now + ttl,
+                    generation="generation-late",
+                )
+
+            async def renew(self, run_id, owner_id, ttl, generation=None):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id, generation=None):
+                self.release_generations.append(generation)
+                self.release_called.set()
+
+        async def events():
+            if False:
+                yield RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="unused")
+
+        store = Store()
+        coordinator = RunLeaseCoordinator(
+            store,
+            run_id="run-late-acquire",
+            owner_id="owner-late-acquire",
+            lease_release_timeout=timedelta(milliseconds=20),
+        )
+        task = asyncio.create_task(_collect_events(coordinator.stream(events())))
+        await store.acquire_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=0.2)
+
+        store.allow_commit.set()
+        await asyncio.wait_for(store.release_called.wait(), timeout=0.2)
+        assert store.release_generations == ["generation-late"]
 
     asyncio.run(run())
 
@@ -2661,6 +2770,53 @@ def test_cli_ownership_loss_after_tool_progress_marks_trace_incomplete(
     assert error_code == "lease_lost_after_execution_progress"
     assert "lease_ownership_lost" in event_types
     assert "tool_result_recorded" not in event_types
+
+
+def test_cli_iterator_cleanup_failure_returns_nonzero_without_rewriting_completed_status(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    class FakeHarness:
+        def __init__(self) -> None:
+            self.state = type("State", (), {"status": HarnessStatus.COMPLETED})()
+
+    class FakeRuntime:
+        def __init__(self, *args, **kwargs) -> None:
+            self._harness = FakeHarness()
+
+        async def stream_user_message(self, content, **kwargs):
+            yield RuntimeEvent(
+                RuntimeEventType.RUN_COMPLETED,
+                metadata={"lease_iterator_cleanup_failed": True},
+            )
+
+    monkeypatch.setattr(cli, "ChatRuntime", FakeRuntime)
+    code = asyncio.run(
+        cli._run_chat(
+            "hello",
+            ToolRegistry(),
+            model_config=ModelConfig("https://example.test", "test-key", "fake"),
+            state_db=str(tmp_path / "runs.db"),
+            lease_db=str(tmp_path / "leases.db"),
+        )
+    )
+    assert "Terminal lease cleanup failed" in capsys.readouterr().err
+
+    connection = sqlite3.connect(tmp_path / "runs.db")
+    status, error_code = connection.execute(
+        "SELECT status, error_code FROM runs LIMIT 1"
+    ).fetchone()
+    event_types = [
+        row[0]
+        for row in connection.execute("SELECT event_type FROM run_events ORDER BY sequence")
+    ]
+    connection.close()
+
+    assert code == 1
+    assert status == "completed"
+    assert error_code is None
+    assert event_types[-2:] == ["lease_iterator_cleanup_failed", "run_completed"]
 
 
 def test_cli_release_failure_audits_cleanup_without_rewriting_completed_outcome(

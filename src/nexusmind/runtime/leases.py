@@ -250,6 +250,7 @@ class RunLeaseCoordinator:
         self.lease_release_timeout = lease_release_timeout
         self._guard = guard or RunLeaseOwnershipGuard(clock=clock)
         self._heartbeat_task: asyncio.Task[None] | None = None
+        self._heartbeat_active = False
         self._stream_started = False
         self.release_error: RunLeaseError | None = None
         self.ownership_lost_after_progress = False
@@ -278,6 +279,7 @@ class RunLeaseCoordinator:
             self._generation = lease.generation
             acquired = True
             self._guard.prove(lease, initial=True)
+            self._heartbeat_active = True
             self._heartbeat_task = asyncio.create_task(self._heartbeat())
             while True:
                 self.assert_owned()
@@ -521,15 +523,42 @@ class RunLeaseCoordinator:
         except asyncio.CancelledError:
             self._cancel_store_operation("acquire")
             task.cancel()
-            await self._drain(task)
+            compensation_task = asyncio.create_task(self._compensate_late_acquire(task))
+            deadline = asyncio.get_running_loop().time() + self.lease_release_timeout.total_seconds()
+            while not compensation_task.done():
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    _retain_background_release_task(compensation_task)
+                    raise
+                try:
+                    done, _ = await asyncio.wait({compensation_task}, timeout=remaining)
+                except asyncio.CancelledError:
+                    continue
+                if not done:
+                    _retain_background_release_task(compensation_task)
+                    raise
             raise
+
+    async def _compensate_late_acquire(self, task: asyncio.Task[RunLease]) -> None:
+        try:
+            lease = await asyncio.shield(task)
+            lease = self._validate_owned_lease(lease)
+            await self._store.release(
+                self.run_id,
+                self.owner_id,
+                generation=lease.generation,
+            )
+        except BaseException:
+            return
 
     async def _heartbeat(self) -> None:
         delay = self.heartbeat_interval.total_seconds()
-        while True:
+        while self._heartbeat_active:
             try:
                 await asyncio.sleep(delay)
                 renewed = await self._renew_store()
+                if not self._heartbeat_active:
+                    return
                 self._guard.prove(self._validate_owned_lease(renewed))
             except asyncio.CancelledError:
                 self._cancel_store_operation("renew")
@@ -553,12 +582,26 @@ class RunLeaseCoordinator:
     async def _stop_heartbeat(self) -> None:
         task = self._heartbeat_task
         self._heartbeat_task = None
+        self._heartbeat_active = False
         if task is None:
             return
         task.cancel()
+        deadline = asyncio.get_running_loop().time() + self.lease_release_timeout.total_seconds()
+        while not task.done():
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                _retain_background_release_task(task)
+                return
+            try:
+                done, _ = await asyncio.wait({task}, timeout=remaining)
+            except asyncio.CancelledError:
+                continue
+            if not done:
+                _retain_background_release_task(task)
+                return
         try:
-            await task
-        except asyncio.CancelledError:
+            task.result()
+        except BaseException:
             pass
 
     async def _release(self) -> None:

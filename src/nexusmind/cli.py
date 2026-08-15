@@ -515,6 +515,7 @@ async def _run_chat(
             if event.type in {RuntimeEventType.RUN_COMPLETED, RuntimeEventType.RUN_FAILED} and (
                 event.metadata.get("lease_ownership_lost_after_terminal")
                 or event.metadata.get("lease_release_failed")
+                or event.metadata.get("lease_iterator_cleanup_failed")
             ):
                 cleanup_failed = True
                 execution_completed = event.type is RuntimeEventType.RUN_COMPLETED
@@ -522,10 +523,15 @@ async def _run_chat(
                     execution_completed=execution_completed,
                     lease_ownership_lost_after_terminal=bool(event.metadata.get("lease_ownership_lost_after_terminal")),
                     lease_release_failed=bool(event.metadata.get("lease_release_failed")),
+                    lease_iterator_cleanup_failed=bool(event.metadata.get("lease_iterator_cleanup_failed")),
                     cleanup_error_code=(
                         "lease_release_failed"
                         if event.metadata.get("lease_release_failed")
-                        else "lease_ownership_lost_after_terminal"
+                        else (
+                            "lease_iterator_cleanup_failed"
+                            if event.metadata.get("lease_iterator_cleanup_failed")
+                            else "lease_ownership_lost_after_terminal"
+                        )
                     ),
                 )
                 if store and run_id:
@@ -546,6 +552,15 @@ async def _run_chat(
                                     "lease_release_failed",
                                     datetime.now(timezone.utc),
                                     {"error_code": "lease_release_failed"},
+                                ),
+                            )
+                        if event.metadata.get("lease_iterator_cleanup_failed"):
+                            await store.append_event(
+                                run_id,
+                                RunTraceEvent(
+                                    "lease_iterator_cleanup_failed",
+                                    datetime.now(timezone.utc),
+                                    {"error_code": "lease_iterator_cleanup_failed"},
                                 ),
                             )
                     except StateStoreError:
