@@ -769,6 +769,107 @@ def test_cancellation_during_terminal_iterator_close_preserves_outcome() -> None
     asyncio.run(run())
 
 
+def test_terminal_iterator_close_timeout_still_releases_lease() -> None:
+    async def run() -> None:
+        class Store:
+            def __init__(self) -> None:
+                self.release_calls = 0
+
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id, generation=None):
+                self.release_calls += 1
+
+        class HangingCloseIterator:
+            def __init__(self) -> None:
+                self.close_started = asyncio.Event()
+                self.never_close = asyncio.Event()
+                self.delivered = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.delivered:
+                    raise StopAsyncIteration
+                self.delivered = True
+                return RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
+
+            async def aclose(self):
+                self.close_started.set()
+                await self.never_close.wait()
+
+        store = Store()
+        iterator = HangingCloseIterator()
+        coordinator = RunLeaseCoordinator(
+            store,
+            run_id="run-close-timeout",
+            owner_id="owner-close-timeout",
+            lease_release_timeout=timedelta(milliseconds=20),
+        )
+        events = await asyncio.wait_for(
+            _collect_events(coordinator.stream(iterator)), timeout=0.2
+        )
+
+        assert events[-1].type is RuntimeEventType.RUN_COMPLETED
+        assert events[-1].metadata["lease_iterator_cleanup_failed"] is True
+        assert store.release_calls == 1
+        iterator.never_close.set()
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+
+def test_terminal_iterator_close_failure_still_releases_lease() -> None:
+    async def run() -> None:
+        class Store:
+            def __init__(self) -> None:
+                self.release_calls = 0
+
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id, generation=None):
+                self.release_calls += 1
+
+        class FailingCloseIterator:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if hasattr(self, "delivered"):
+                    raise StopAsyncIteration
+                self.delivered = True
+                return RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
+
+            async def aclose(self):
+                raise OSError("cleanup failed")
+
+        store = Store()
+        coordinator = RunLeaseCoordinator(
+            store, run_id="run-close-failure", owner_id="owner-close-failure"
+        )
+        events = [
+            event
+            async for event in coordinator.stream(FailingCloseIterator())
+        ]
+
+        assert events[-1].type is RuntimeEventType.RUN_COMPLETED
+        assert events[-1].metadata["lease_iterator_cleanup_failed"] is True
+        assert store.release_calls == 1
+
+    asyncio.run(run())
+
+
 def test_renew_rejects_clock_rollback(tmp_path) -> None:
     async def run() -> None:
         clock = MutableClock()
@@ -802,6 +903,12 @@ def test_renew_rejects_nonmonotonic_lease_timestamps(tmp_path) -> None:
         assert await store.inspect("run-nonmonotonic") == lease
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("timeout", (float("nan"), float("inf"), float("-inf"), True))
+def test_sqlite_store_rejects_nonfinite_timeout(tmp_path, timeout) -> None:
+    with pytest.raises(ValueError, match="SQLite lease timeout must be positive"):
+        SQLiteRunLeaseStore(tmp_path / "invalid-timeout.db", timeout=timeout)
 
 
 def test_leased_chat_runtime_rejects_concurrent_executions() -> None:
@@ -852,6 +959,10 @@ def test_leased_chat_runtime_rejects_concurrent_executions() -> None:
         events = await first
         assert events[-1].type is RuntimeEventType.RUN_COMPLETED
         assert store.release_calls == 1
+
+        second_events = [event async for event in runtime.stream_user_message("second")]
+        assert second_events[-1].type is RuntimeEventType.RUN_COMPLETED
+        assert store.release_calls == 2
 
     asyncio.run(run())
 

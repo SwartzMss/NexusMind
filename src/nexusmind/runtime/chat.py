@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timedelta
 
 from nexusmind.models.base import ChatModel
-from nexusmind.runtime.events import RuntimeEvent
+from nexusmind.runtime.events import RuntimeEvent, RuntimeEventType
 from nexusmind.runtime.harness.context import HarnessRequest
 from nexusmind.runtime.harness.limits import HarnessLimits
 from nexusmind.runtime.harness.runner_impl import ToolExecutionCancelled
@@ -86,7 +86,7 @@ class ChatRuntime:
         self._lease_heartbeat_interval = lease_heartbeat_interval
         self._lease_release_timeout = lease_release_timeout
         self._lease_coordinator: RunLeaseCoordinator | None = None
-        self._lease_execution_active = False
+        self._lease_execution_token: object | None = None
 
     async def stream_user_message(
         self,
@@ -95,12 +95,14 @@ class ChatRuntime:
         system_prompt: str | None = None,
         tools: list[ToolDefinition] | None = None,
     ) -> AsyncIterator[RuntimeEvent]:
+        execution_token: object | None = None
         if self._lease_store is not None:
             # The model and tool wrappers share one ownership guard, so a
             # leased runtime must not overlap executions.
-            if self._lease_execution_active:
+            if self._lease_execution_token is not None:
                 raise RuntimeError("Leased ChatRuntime does not support concurrent executions")
-            self._lease_execution_active = True
+            execution_token = object()
+            self._lease_execution_token = execution_token
         execution = None
         try:
             messages: list[Message] = []
@@ -134,11 +136,20 @@ class ChatRuntime:
                 )
                 stream = self._lease_coordinator.stream(stream)
             async for event in stream:
+                if (
+                    execution_token is not None
+                    and event.type in {RuntimeEventType.RUN_COMPLETED, RuntimeEventType.RUN_FAILED}
+                    and self._lease_execution_token is execution_token
+                ):
+                    self._lease_execution_token = None
                 yield event
         finally:
             # Preserve the compatibility snapshot exposed by HarnessRunner.
             if execution is not None:
                 self._harness.state = execution.state
                 self._harness.stop_reason = execution.stop_reason
-            if self._lease_store is not None:
-                self._lease_execution_active = False
+            if (
+                execution_token is not None
+                and self._lease_execution_token is execution_token
+            ):
+                self._lease_execution_token = None

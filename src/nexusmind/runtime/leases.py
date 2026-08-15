@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import math
 import sqlite3
 import sys
 import threading
@@ -415,7 +416,7 @@ class RunLeaseCoordinator:
         except RunLeaseError:
             ownership_lost = True
         await self._stop_heartbeat()
-        await self._close_iterator_barrier(iterator)
+        close_error = await self._close_iterator_barrier(iterator)
         ownership_lost = ownership_lost or self._guard.ownership_error is not None
         await self._release_with_deadline(propagate_cancellation=False)
         metadata = dict(event.metadata)
@@ -423,16 +424,36 @@ class RunLeaseCoordinator:
             metadata["lease_ownership_lost_after_terminal"] = True
         if self.release_error is not None:
             metadata["lease_release_failed"] = True
+        if close_error is not None:
+            metadata["lease_iterator_cleanup_failed"] = True
         return replace(event, metadata=metadata)
 
-    async def _close_iterator_barrier(self, iterator: AsyncIterator[RuntimeEvent]) -> None:
+    async def _close_iterator_barrier(
+        self, iterator: AsyncIterator[RuntimeEvent]
+    ) -> BaseException | None:
         close_task = asyncio.create_task(self._close_iterator(iterator))
+        deadline = asyncio.get_running_loop().time() + self.lease_release_timeout.total_seconds()
         while not close_task.done():
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                close_task.cancel()
+                _retain_background_release_task(close_task)
+                return RunLeaseStoreError("Run lease iterator close timed out")
             try:
-                await asyncio.shield(close_task)
+                await asyncio.wait_for(asyncio.shield(close_task), timeout=remaining)
+            except asyncio.TimeoutError:
+                close_task.cancel()
+                _retain_background_release_task(close_task)
+                return RunLeaseStoreError("Run lease iterator close timed out")
             except asyncio.CancelledError:
                 continue
-        close_task.result()
+            except BaseException as exc:
+                return exc
+        try:
+            close_task.result()
+        except BaseException as exc:
+            return exc
+        return None
 
     async def _release_with_deadline(self, *, propagate_cancellation: bool) -> None:
         release_task = asyncio.create_task(self._release())
@@ -595,7 +616,12 @@ class SQLiteRunLeaseStore:
         self._path = str(db_path)
         if self._path in {"", ":memory:"}:
             raise ValueError("SQLiteRunLeaseStore requires a persistent database path")
-        if timeout <= 0:
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or timeout <= 0
+        ):
             raise ValueError("SQLite lease timeout must be positive")
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._timeout = timeout
