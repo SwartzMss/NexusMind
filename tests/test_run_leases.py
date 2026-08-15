@@ -175,7 +175,7 @@ def test_first_owner_acquires_and_heartbeat_renews_lease(tmp_path) -> None:
 
         acquired = await store.acquire("run-1", "owner-1", timedelta(seconds=10))
         clock.advance(3)
-        renewed = await store.renew("run-1", "owner-1", timedelta(seconds=10))
+        renewed = await store.renew("run-1", "owner-1", timedelta(seconds=10), acquired.generation)
 
         assert acquired.acquired_at == clock.value - timedelta(seconds=3)
         assert renewed.acquired_at == acquired.acquired_at
@@ -191,12 +191,12 @@ def test_second_owner_cannot_acquire_or_renew_unexpired_lease(tmp_path) -> None:
     async def run() -> None:
         store = SQLiteRunLeaseStore(tmp_path / "leases.db", clock=MutableClock())
         await store.initialize()
-        await store.acquire("run-1", "owner-1", timedelta(seconds=10))
+        acquired = await store.acquire("run-1", "owner-1", timedelta(seconds=10))
 
         with pytest.raises(RunLeaseUnavailable):
             await store.acquire("run-1", "owner-2", timedelta(seconds=10))
         with pytest.raises(RunLeaseOwnershipLost):
-            await store.renew("run-1", "owner-2", timedelta(seconds=10))
+            await store.renew("run-1", "owner-2", timedelta(seconds=10), acquired.generation)
         assert (await store.inspect("run-1")).owner_id == "owner-1"
 
     asyncio.run(run())
@@ -230,7 +230,7 @@ def test_expired_takeover_has_one_winner_and_rejects_stale_owner(tmp_path) -> No
         path = tmp_path / "leases.db"
         stores = [SQLiteRunLeaseStore(path, clock=clock) for _ in range(3)]
         await asyncio.gather(*(store.initialize() for store in stores))
-        await stores[0].acquire("run-takeover", "old-owner", timedelta(seconds=5))
+        old_lease = await stores[0].acquire("run-takeover", "old-owner", timedelta(seconds=5))
         clock.advance(6)
 
         results = await asyncio.gather(
@@ -243,9 +243,11 @@ def test_expired_takeover_has_one_winner_and_rejects_stale_owner(tmp_path) -> No
         assert sum(isinstance(result, RunLeaseUnavailable) for result in results) == 1
 
         with pytest.raises(RunLeaseOwnershipLost):
-            await stores[0].renew("run-takeover", "old-owner", timedelta(seconds=10))
+            await stores[0].renew(
+                "run-takeover", "old-owner", timedelta(seconds=10), old_lease.generation
+            )
         with pytest.raises(RunLeaseOwnershipLost):
-            await stores[0].release("run-takeover", "old-owner")
+            await stores[0].release("run-takeover", "old-owner", old_lease.generation)
         assert (await stores[0].inspect("run-takeover")).owner_id == winners[0].owner_id
 
     asyncio.run(run())
@@ -263,8 +265,8 @@ def test_owner_scoped_release_and_different_run_ids_are_isolated(tmp_path) -> No
         assert second.run_id == "run-2"
 
         with pytest.raises(RunLeaseOwnershipLost):
-            await store.release("run-1", "owner-2")
-        await store.release("run-1", "owner-1")
+            await store.release("run-1", "owner-2", first.generation)
+        await store.release("run-1", "owner-1", first.generation)
         assert await store.inspect("run-1") is None
         assert (await store.inspect("run-2")).owner_id == "owner-2"
 
@@ -318,7 +320,7 @@ def test_renew_rechecks_expiry_after_waiting_for_write_lock(tmp_path) -> None:
             lock.execute("BEGIN IMMEDIATE")
             store.begin_immediate_attempted.clear()
             renew_task = asyncio.create_task(
-                store.renew("run-1", "owner-1", timedelta(seconds=10))
+                    store.renew("run-1", "owner-1", timedelta(seconds=10), old_lease.generation)
             )
             await _wait_for_begin_immediate_attempt(
                 renew_task, store.begin_immediate_attempted
@@ -382,6 +384,38 @@ def test_same_owner_new_generation_rejects_stale_renew_and_release(tmp_path) -> 
         with pytest.raises(RunLeaseOwnershipLost):
             await store.release("run-generation", "same-owner", first.generation)
         assert await store.inspect("run-generation") == second
+
+    asyncio.run(run())
+
+
+def test_release_without_generation_cannot_delete_new_same_owner_generation(tmp_path) -> None:
+    async def run() -> None:
+        clock = MutableClock()
+        store = SQLiteRunLeaseStore(tmp_path / "missing-release-generation.db", clock=clock)
+        await store.initialize()
+        await store.acquire("run-missing-generation", "same-owner", timedelta(seconds=5))
+        clock.advance(6)
+        second = await store.acquire("run-missing-generation", "same-owner", timedelta(seconds=5))
+
+        with pytest.raises(ValueError, match="generation is required"):
+            await store.release("run-missing-generation", "same-owner")
+        assert await store.inspect("run-missing-generation") == second
+
+    asyncio.run(run())
+
+
+def test_renew_without_generation_cannot_adopt_new_same_owner_generation(tmp_path) -> None:
+    async def run() -> None:
+        clock = MutableClock()
+        store = SQLiteRunLeaseStore(tmp_path / "missing-renew-generation.db", clock=clock)
+        await store.initialize()
+        await store.acquire("run-missing-generation", "same-owner", timedelta(seconds=5))
+        clock.advance(6)
+        second = await store.acquire("run-missing-generation", "same-owner", timedelta(seconds=5))
+
+        with pytest.raises(ValueError, match="generation is required"):
+            await store.renew("run-missing-generation", "same-owner", timedelta(seconds=5))
+        assert await store.inspect("run-missing-generation") == second
 
     asyncio.run(run())
 
@@ -870,6 +904,90 @@ def test_terminal_iterator_close_failure_still_releases_lease() -> None:
     asyncio.run(run())
 
 
+def test_timed_out_old_release_cannot_clear_next_execution_guard() -> None:
+    async def run() -> None:
+        class Store:
+            def __init__(self) -> None:
+                self.acquire_calls = 0
+                self.release_calls = 0
+                self.first_release_started = asyncio.Event()
+                self.allow_first_release = asyncio.Event()
+
+            async def acquire(self, run_id, owner_id, ttl):
+                self.acquire_calls += 1
+                now = datetime.now(timezone.utc)
+                return RunLease(
+                    run_id,
+                    owner_id,
+                    now,
+                    now,
+                    now + ttl,
+                    generation=f"generation-{self.acquire_calls}",
+                )
+
+            async def renew(self, run_id, owner_id, ttl, generation=None):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id, generation=None):
+                self.release_calls += 1
+                if self.release_calls == 1:
+                    self.first_release_started.set()
+                    try:
+                        await self.allow_first_release.wait()
+                    except asyncio.CancelledError:
+                        await self.allow_first_release.wait()
+
+        store = Store()
+        guard = RunLeaseOwnershipGuard()
+
+        async def first_events():
+            yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
+
+        first = RunLeaseCoordinator(
+            store,
+            run_id="run-release-generation",
+            owner_id="owner-release-generation",
+            lease_release_timeout=timedelta(milliseconds=20),
+            guard=guard,
+        )
+        first_result = await _collect_events(first.stream(first_events()))
+        await store.first_release_started.wait()
+        assert first_result[-1].type is RuntimeEventType.RUN_COMPLETED
+
+        second_started = asyncio.Event()
+        allow_second = asyncio.Event()
+
+        async def second_events():
+            second_started.set()
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            await allow_second.wait()
+            yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
+
+        second = RunLeaseCoordinator(
+            store,
+            run_id="run-release-generation",
+            owner_id="owner-release-generation",
+            lease_release_timeout=timedelta(milliseconds=20),
+            guard=guard,
+        )
+        second_task = asyncio.create_task(_collect_events(second.stream(second_events())))
+        await second_started.wait()
+        assert guard.lease is not None
+        assert guard.lease.generation == "generation-2"
+
+        store.allow_first_release.set()
+        await asyncio.sleep(0)
+        assert guard.lease is not None
+        assert guard.lease.generation == "generation-2"
+
+        allow_second.set()
+        second_result = await second_task
+        assert second_result[-1].type is RuntimeEventType.RUN_COMPLETED
+        assert store.release_calls == 2
+
+    asyncio.run(run())
+
+
 def test_renew_rejects_clock_rollback(tmp_path) -> None:
     async def run() -> None:
         clock = MutableClock()
@@ -1237,7 +1355,7 @@ def test_sqlite_terminal_release_timeout_cannot_delete_after_lock_opens(tmp_path
                     await stream.aclose()
             stored = await store.inspect(seeded.run_id)
             if stored is not None:
-                await store.release(stored.run_id, stored.owner_id)
+                await store.release(stored.run_id, stored.owner_id, stored.generation)
             await store.close()
 
     asyncio.run(run())
@@ -2071,7 +2189,7 @@ def test_expired_owner_cannot_continue_inflight_tool_after_takeover(tmp_path) ->
         assert new_lease.owner_id == "owner-new"
         assert old_task.done()
         assert executor.calls == []
-        await new_store.release("run-takeover-inflight", "owner-new")
+        await new_store.release("run-takeover-inflight", "owner-new", new_lease.generation)
         await old_store.close()
         await new_store.close()
 
