@@ -561,15 +561,18 @@ class RunLeaseCoordinator:
                     return
                 self._guard.prove(self._validate_owned_lease(renewed))
             except asyncio.CancelledError:
-                self._cancel_store_operation("renew")
+                if self._heartbeat_active:
+                    self._cancel_store_operation("renew")
                 raise
             except RunLeaseError as exc:
-                self._guard.fail(exc)
+                if self._heartbeat_active:
+                    self._guard.fail(exc)
                 return
             except Exception as exc:
-                error = RunLeaseStoreError("Run lease heartbeat failed")
-                error.__cause__ = exc
-                self._guard.fail(error)
+                if self._heartbeat_active:
+                    error = RunLeaseStoreError("Run lease heartbeat failed")
+                    error.__cause__ = exc
+                    self._guard.fail(error)
                 return
 
     def _validate_owned_lease(self, lease: object) -> RunLease:
@@ -585,6 +588,7 @@ class RunLeaseCoordinator:
         self._heartbeat_active = False
         if task is None:
             return
+        self._cancel_store_operation("renew")
         task.cancel()
         deadline = asyncio.get_running_loop().time() + self.lease_release_timeout.total_seconds()
         while not task.done():
@@ -677,12 +681,10 @@ class SQLiteRunLeaseStore:
         return await self._run_cancellable_lease_operation("acquire", run_id, owner_id, ttl)
 
     async def renew(
-        self, run_id: str, owner_id: str, ttl: timedelta, generation: str | None = None
+        self, run_id: str, owner_id: str, ttl: timedelta, generation: str
     ) -> RunLease:
         self._require_ready()
         _validate_request(run_id, owner_id, ttl)
-        if generation is None:
-            raise ValueError("SQLite lease generation is required for renewal")
         _validate_identity(generation, "generation")
         return await self._run_cancellable_lease_operation("renew", run_id, owner_id, ttl, generation)
 
@@ -800,12 +802,10 @@ class SQLiteRunLeaseStore:
         _validate_identity(run_id, "run_id")
         return await asyncio.to_thread(self._inspect, run_id)
 
-    async def release(self, run_id: str, owner_id: str, generation: str | None = None) -> None:
+    async def release(self, run_id: str, owner_id: str, generation: str) -> None:
         self._require_ready()
         _validate_identity(run_id, "run_id")
         _validate_identity(owner_id, "owner_id")
-        if generation is None:
-            raise ValueError("SQLite lease generation is required for release")
         _validate_identity(generation, "generation")
         cancellation = threading.Event()
         self._register_release_cancellation(run_id, owner_id, cancellation)

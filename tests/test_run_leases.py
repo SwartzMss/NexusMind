@@ -397,7 +397,7 @@ def test_release_without_generation_cannot_delete_new_same_owner_generation(tmp_
         clock.advance(6)
         second = await store.acquire("run-missing-generation", "same-owner", timedelta(seconds=5))
 
-        with pytest.raises(ValueError, match="generation is required"):
+        with pytest.raises(TypeError):
             await store.release("run-missing-generation", "same-owner")
         assert await store.inspect("run-missing-generation") == second
 
@@ -413,7 +413,7 @@ def test_renew_without_generation_cannot_adopt_new_same_owner_generation(tmp_pat
         clock.advance(6)
         second = await store.acquire("run-missing-generation", "same-owner", timedelta(seconds=5))
 
-        with pytest.raises(ValueError, match="generation is required"):
+        with pytest.raises(TypeError):
             await store.renew("run-missing-generation", "same-owner", timedelta(seconds=5))
         assert await store.inspect("run-missing-generation") == second
 
@@ -866,6 +866,213 @@ def test_cancelled_custom_acquire_that_finishes_late_is_compensated() -> None:
         store.allow_commit.set()
         await asyncio.wait_for(store.release_called.wait(), timeout=0.2)
         assert store.release_generations == ["generation-late"]
+
+    asyncio.run(run())
+
+
+def test_stale_background_heartbeat_failure_cannot_poison_next_execution() -> None:
+    async def run() -> None:
+        class Store:
+            def __init__(self) -> None:
+                self.acquire_calls = 0
+                self.old_renew_started = asyncio.Event()
+                self.allow_old_return = asyncio.Event()
+                self.old_finished = asyncio.Event()
+
+            async def acquire(self, run_id, owner_id, ttl):
+                self.acquire_calls += 1
+                now = datetime.now(timezone.utc)
+                return RunLease(
+                    run_id,
+                    owner_id,
+                    now,
+                    now,
+                    now + ttl,
+                    generation=f"generation-{self.acquire_calls}",
+                )
+
+            async def renew(self, run_id, owner_id, ttl, generation=None):
+                if generation == "generation-1":
+                    self.old_renew_started.set()
+                    try:
+                        await self.allow_old_return.wait()
+                    except asyncio.CancelledError:
+                        await self.allow_old_return.wait()
+                        self.old_finished.set()
+                        raise RunLeaseOwnershipLost("stale heartbeat failed")
+                raise AssertionError("next generation heartbeat should not run")
+
+            async def release(self, run_id, owner_id, generation=None):
+                return None
+
+        guard = RunLeaseOwnershipGuard()
+        store = Store()
+
+        async def first_events():
+            await store.old_renew_started.wait()
+            yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
+
+        first = RunLeaseCoordinator(
+            store,
+            run_id="run-stale-heartbeat-failure",
+            owner_id="owner-stale-heartbeat-failure",
+            heartbeat_interval=timedelta(milliseconds=1),
+            lease_release_timeout=timedelta(milliseconds=20),
+            guard=guard,
+        )
+        first_output = await asyncio.wait_for(
+            _collect_events(first.stream(first_events())), timeout=0.2
+        )
+        assert first_output[-1].type is RuntimeEventType.RUN_COMPLETED
+
+        second_ready = asyncio.Event()
+        second_finish = asyncio.Event()
+
+        async def second_events():
+            second_ready.set()
+            yield RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="still owned")
+            await second_finish.wait()
+            yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
+
+        second = RunLeaseCoordinator(
+            store,
+            run_id="run-stale-heartbeat-failure",
+            owner_id="owner-stale-heartbeat-failure",
+            heartbeat_interval=timedelta(seconds=1),
+            guard=guard,
+        )
+        second_task = asyncio.create_task(
+            _collect_events(second.stream(second_events()))
+        )
+        await second_ready.wait()
+        store.allow_old_return.set()
+        await store.old_finished.wait()
+
+        assert guard.lease is not None
+        assert guard.lease.generation == "generation-2"
+        guard.assert_owned()
+
+        second_finish.set()
+        await second_task
+
+    asyncio.run(run())
+
+
+def test_stale_heartbeat_cancellation_cannot_cancel_next_generation_renew() -> None:
+    async def run() -> None:
+        class Store:
+            def __init__(self) -> None:
+                self.acquire_calls = 0
+                self.renew_tasks = set()
+                self.cancel_renew_calls = 0
+                self.old_renew_started = asyncio.Event()
+                self.allow_old_exit = asyncio.Event()
+                self.next_renew_started = asyncio.Event()
+                self.allow_next_renew = asyncio.Event()
+                self.next_renew_cancelled = asyncio.Event()
+
+            async def acquire(self, run_id, owner_id, ttl):
+                self.acquire_calls += 1
+                now = datetime.now(timezone.utc)
+                return RunLease(
+                    run_id,
+                    owner_id,
+                    now,
+                    now,
+                    now + ttl,
+                    generation=f"generation-{self.acquire_calls}",
+                )
+
+            async def renew(self, run_id, owner_id, ttl, generation=None):
+                task = asyncio.current_task()
+                assert task is not None
+                self.renew_tasks.add(task)
+                try:
+                    if generation == "generation-1":
+                        self.old_renew_started.set()
+                        try:
+                            await asyncio.Event().wait()
+                        except asyncio.CancelledError:
+                            await self.allow_old_exit.wait()
+                            raise
+                    self.next_renew_started.set()
+                    try:
+                        await self.allow_next_renew.wait()
+                    except asyncio.CancelledError:
+                        self.next_renew_cancelled.set()
+                        raise
+                    now = datetime.now(timezone.utc)
+                    return RunLease(
+                        run_id,
+                        owner_id,
+                        now,
+                        now,
+                        now + ttl,
+                        generation=generation,
+                    )
+                finally:
+                    self.renew_tasks.discard(task)
+
+            async def release(self, run_id, owner_id, generation=None):
+                return None
+
+            def cancel_renew(self, run_id, owner_id):
+                self.cancel_renew_calls += 1
+                for task in tuple(self.renew_tasks):
+                    task.cancel()
+
+        guard = RunLeaseOwnershipGuard()
+        store = Store()
+
+        async def first_events():
+            await store.old_renew_started.wait()
+            yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
+
+        first = RunLeaseCoordinator(
+            store,
+            run_id="run-stale-heartbeat-cancel",
+            owner_id="owner-stale-heartbeat-cancel",
+            heartbeat_interval=timedelta(milliseconds=1),
+            lease_release_timeout=timedelta(milliseconds=20),
+            guard=guard,
+        )
+        await asyncio.wait_for(
+            _collect_events(first.stream(first_events())), timeout=0.2
+        )
+
+        second_ready = asyncio.Event()
+        second_finish = asyncio.Event()
+
+        async def second_events():
+            second_ready.set()
+            yield RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="still owned")
+            await second_finish.wait()
+            yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
+
+        second = RunLeaseCoordinator(
+            store,
+            run_id="run-stale-heartbeat-cancel",
+            owner_id="owner-stale-heartbeat-cancel",
+            heartbeat_interval=timedelta(milliseconds=1),
+            guard=guard,
+        )
+        second_task = asyncio.create_task(
+            _collect_events(second.stream(second_events()))
+        )
+        await second_ready.wait()
+        await store.next_renew_started.wait()
+
+        store.allow_old_exit.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert store.cancel_renew_calls == 1
+        assert not store.next_renew_cancelled.is_set()
+        guard.assert_owned()
+
+        store.allow_next_renew.set()
+        second_finish.set()
+        await second_task
 
     asyncio.run(run())
 
@@ -2227,7 +2434,7 @@ def test_terminal_event_audits_ownership_expiry_while_waiting(tmp_path) -> None:
 
             async def renew(self, run_id, owner_id, ttl, generation=None):
                 self.renew_calls += 1
-                return await super().renew(run_id, owner_id, ttl)
+                return await super().renew(run_id, owner_id, ttl, generation)
 
         class PausingCheckpointStore(InMemoryCheckpointStore):
             def __init__(self) -> None:
