@@ -289,6 +289,7 @@ class RunLeaseCoordinator:
         self._heartbeat_active = False
         self._stream_started = False
         self.release_error: RunLeaseError | None = None
+        self.release_ownership_lost = False
         self.ownership_lost_after_progress = False
         self._terminal_cleanup_done = False
         self._generation: str | None = None
@@ -354,7 +355,9 @@ class RunLeaseCoordinator:
             await self._stop_heartbeat()
             close_error: BaseException | None = None
             if not self._terminal_cleanup_done:
-                close_error = await self._close_iterator_barrier(iterator)
+                close_error, unresolved_close_task = await self._close_iterator_barrier(iterator)
+                if unresolved_close_task is not None:
+                    self._mark_execution_uncertain(unresolved_close_task)
             if acquired and not self._terminal_cleanup_done and not self._guard.execution_uncertain:
                 try:
                     await self._release_with_deadline(propagate_cancellation=True)
@@ -479,7 +482,7 @@ class RunLeaseCoordinator:
         except RunLeaseError:
             ownership_lost = True
         await self._stop_heartbeat()
-        close_error = await self._close_iterator_barrier(iterator)
+        close_error, _ = await self._close_iterator_barrier(iterator)
         try:
             self._guard.assert_owned()
         except RunLeaseError:
@@ -489,7 +492,11 @@ class RunLeaseCoordinator:
             propagate_cancellation=False,
             monitor_expiry=terminal_lease is not None,
         )
-        ownership_lost = ownership_lost or expired_during_release
+        ownership_lost = (
+            ownership_lost
+            or expired_during_release
+            or self.release_ownership_lost
+        )
         metadata = dict(event.metadata)
         if ownership_lost:
             metadata["lease_ownership_lost_after_terminal"] = True
@@ -501,7 +508,7 @@ class RunLeaseCoordinator:
 
     async def _close_iterator_barrier(
         self, iterator: AsyncIterator[RuntimeEvent]
-    ) -> BaseException | None:
+    ) -> tuple[BaseException | None, asyncio.Task[object] | None]:
         close_task = asyncio.create_task(self._close_iterator(iterator))
         deadline = asyncio.get_running_loop().time() + self.lease_release_timeout.total_seconds()
         while not close_task.done():
@@ -509,7 +516,7 @@ class RunLeaseCoordinator:
             if remaining <= 0:
                 close_task.cancel()
                 _retain_background_release_task(close_task)
-                return RunLeaseStoreError("Run lease iterator close timed out")
+                return RunLeaseStoreError("Run lease iterator close timed out"), close_task
             try:
                 done, _ = await asyncio.wait({close_task}, timeout=remaining)
             except asyncio.CancelledError:
@@ -517,12 +524,12 @@ class RunLeaseCoordinator:
             if not done:
                 close_task.cancel()
                 _retain_background_release_task(close_task)
-                return RunLeaseStoreError("Run lease iterator close timed out")
+                return RunLeaseStoreError("Run lease iterator close timed out"), close_task
         try:
             close_task.result()
         except BaseException as exc:
-            return exc
-        return None
+            return exc, None
+        return None, None
 
     async def _release_with_deadline(
         self,
@@ -784,6 +791,9 @@ class RunLeaseCoordinator:
                 except RunLeaseError:
                     expired = True
             return expired
+        except RunLeaseOwnershipLost as exc:
+            self.release_ownership_lost = True
+            raise RunLeaseReleaseError("Run lease release failed") from exc
         except RunLeaseError as exc:
             raise RunLeaseReleaseError("Run lease release failed") from exc
         except Exception as exc:

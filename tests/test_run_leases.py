@@ -641,6 +641,82 @@ def test_cooperative_tool_cancellation_does_not_permanently_lock_runtime() -> No
     asyncio.run(run())
 
 
+def test_nonterminal_stubborn_aclose_blocks_runtime_reuse_until_resolved() -> None:
+    async def run() -> None:
+        class Store:
+            def __init__(self) -> None:
+                self.release_calls = 0
+                self.close_started = asyncio.Event()
+                self.allow_close = asyncio.Event()
+
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl, generation=None):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id, generation=None):
+                self.release_calls += 1
+
+        class StubbornCloseIterator:
+            def __init__(self) -> None:
+                self.delivered = False
+                self.first_delivered = asyncio.Event()
+                self.second_started = asyncio.Event()
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if not self.delivered:
+                    self.delivered = True
+                    self.first_delivered.set()
+                    return RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="partial")
+                self.second_started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    raise
+
+            async def aclose(self):
+                store.close_started.set()
+                while not store.allow_close.is_set():
+                    try:
+                        await store.allow_close.wait()
+                    except asyncio.CancelledError:
+                        continue
+
+        store = Store()
+        iterator = StubbornCloseIterator()
+        resolved = asyncio.Event()
+        coordinator = RunLeaseCoordinator(
+            store,
+            run_id="run-stubborn-close",
+            owner_id="owner-stubborn-close",
+            lease_release_timeout=timedelta(milliseconds=20),
+            on_execution_resolved=resolved.set,
+        )
+        task = asyncio.create_task(_collect_events(coordinator.stream(iterator)))
+        await asyncio.wait_for(iterator.first_delivered.wait(), timeout=0.2)
+        await asyncio.wait_for(iterator.second_started.wait(), timeout=0.2)
+        task.cancel()
+        done, _ = await asyncio.wait({task}, timeout=0.2)
+        assert task in done
+        with pytest.raises(asyncio.CancelledError):
+            task.result()
+
+        await asyncio.wait_for(store.close_started.wait(), timeout=0.2)
+        assert coordinator.execution_unresolved is True
+        assert store.release_calls == 0
+
+        store.allow_close.set()
+        await asyncio.wait_for(resolved.wait(), timeout=0.2)
+        assert coordinator.execution_unresolved is False
+
+    asyncio.run(run())
+
+
 def test_nonterminal_release_failure_is_surfaced_when_no_primary_error() -> None:
     async def run() -> None:
         class Store:
@@ -1366,7 +1442,7 @@ def test_stale_heartbeat_cancellation_cannot_cancel_next_generation_renew() -> N
     asyncio.run(run())
 
 
-def test_nonterminal_iterator_close_timeout_still_releases_lease() -> None:
+def test_nonterminal_iterator_close_timeout_keeps_lease_fenced() -> None:
     async def run() -> None:
         class Store:
             def __init__(self) -> None:
@@ -1425,7 +1501,9 @@ def test_nonterminal_iterator_close_timeout_still_releases_lease() -> None:
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=0.2)
         assert iterator.close_started.is_set()
-        assert store.release_calls == 1
+        assert store.release_calls == 0
+        iterator.never_close.set()
+        await asyncio.sleep(0)
 
     asyncio.run(run())
 
@@ -1991,6 +2069,33 @@ def test_terminal_does_not_report_expiry_after_successful_release() -> None:
 
         clock.advance(6)
         assert output[-1].metadata.get("lease_ownership_lost_after_terminal") is None
+
+    asyncio.run(run())
+
+
+def test_terminal_release_ownership_loss_is_audited_separately() -> None:
+    async def run() -> None:
+        class Store:
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl, generation=None):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id, generation=None):
+                raise RunLeaseOwnershipLost("Run lease generation changed")
+
+        async def events():
+            yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
+
+        coordinator = RunLeaseCoordinator(
+            Store(), run_id="run-release-ownership-loss", owner_id="owner-release-ownership-loss"
+        )
+        output = [event async for event in coordinator.stream(events())]
+
+        assert output[-1].metadata["lease_release_failed"] is True
+        assert output[-1].metadata["lease_ownership_lost_after_terminal"] is True
 
     asyncio.run(run())
 
