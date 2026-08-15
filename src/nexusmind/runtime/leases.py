@@ -308,6 +308,10 @@ class RunLeaseCoordinator:
     def execution_uncertain(self) -> bool:
         return self._guard.execution_uncertain
 
+    @property
+    def execution_unresolved(self) -> bool:
+        return self._unresolved_task is not None
+
     async def stream(self, events: AsyncIterator[RuntimeEvent]) -> AsyncIterator[RuntimeEvent]:
         if self._stream_started:
             raise RuntimeError("RunLeaseCoordinator can only be streamed once")
@@ -531,6 +535,7 @@ class RunLeaseCoordinator:
         deadline = asyncio.get_running_loop().time() + self.lease_release_timeout.total_seconds()
         cancelled = False
         expired_during_release = False
+        release_expired = False
         try:
             while not release_task.done():
                 remaining = deadline - asyncio.get_running_loop().time()
@@ -561,7 +566,7 @@ class RunLeaseCoordinator:
                     raise asyncio.CancelledError
                 return expired_during_release
             try:
-                release_task.result()
+                release_expired = bool(release_task.result())
             except asyncio.CancelledError as exc:
                 error = RunLeaseReleaseError("Run lease release cancelled")
                 error.__cause__ = exc
@@ -570,7 +575,7 @@ class RunLeaseCoordinator:
                 self.release_error = exc
             if cancelled and propagate_cancellation:
                 raise asyncio.CancelledError
-            return expired_during_release
+            return expired_during_release or release_expired
         finally:
             if expiry_task is not None and not expiry_task.done():
                 expiry_task.cancel()
@@ -585,13 +590,14 @@ class RunLeaseCoordinator:
         generation = self._generation if operation in {"renew", "release"} else None
         try:
             cancel = getattr(self._store, f"cancel_{operation}", None)
-            if callable(cancel):
-                kwargs: dict[str, object] = {}
-                if _accepts_keyword(cancel, "generation"):
-                    kwargs["generation"] = generation
-                if _accepts_keyword(cancel, "operation_id"):
-                    kwargs["operation_id"] = operation_id
-                cancel(self.run_id, self.owner_id, **kwargs)
+            if not callable(cancel) or not operation_id:
+                return
+            if not _accepts_keyword(cancel, "operation_id"):
+                return
+            kwargs: dict[str, object] = {"operation_id": operation_id}
+            if _accepts_keyword(cancel, "generation"):
+                kwargs["generation"] = generation
+            cancel(self.run_id, self.owner_id, **kwargs)
         except Exception:
             pass
 
@@ -767,9 +773,17 @@ class RunLeaseCoordinator:
         if self._on_execution_resolved is not None:
             self._on_execution_resolved()
 
-    async def _release(self) -> None:
+    async def _release(self) -> bool:
+        expired = False
         try:
             await self._release_store()
+            lease = self._guard.lease
+            if lease is not None:
+                try:
+                    expired = self._guard.is_expired(lease)
+                except RunLeaseError:
+                    expired = True
+            return expired
         except RunLeaseError as exc:
             raise RunLeaseReleaseError("Run lease release failed") from exc
         except Exception as exc:

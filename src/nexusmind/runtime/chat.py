@@ -166,7 +166,7 @@ class ChatRuntime:
                 and self._lease_execution_token is execution_token
             ):
                 coordinator = self._lease_coordinator
-                if coordinator is None or not coordinator.execution_uncertain:
+                if coordinator is None or not coordinator.execution_unresolved:
                     self._lease_execution_token = None
 
     def _clear_lease_execution_token(self, execution_token: object) -> None:

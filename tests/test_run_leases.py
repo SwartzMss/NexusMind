@@ -541,6 +541,106 @@ def test_uncertain_tool_cancellation_keeps_unexpired_lease() -> None:
     asyncio.run(run())
 
 
+def test_cooperative_tool_cancellation_does_not_permanently_lock_runtime() -> None:
+    async def run() -> None:
+        clock = MutableClock()
+
+        class Store:
+            def __init__(self) -> None:
+                self.active: RunLease | None = None
+                self.release_calls = 0
+
+            async def acquire(self, run_id, owner_id, ttl):
+                now = clock()
+                if self.active is not None and not self.active.is_expired(now):
+                    raise RunLeaseUnavailable("Run already has an active execution owner")
+                self.active = RunLease(run_id, owner_id, now, now, now + ttl)
+                return self.active
+
+            async def renew(self, run_id, owner_id, ttl, generation=None):
+                raise AssertionError("heartbeat should not run in this test")
+
+            async def release(self, run_id, owner_id, generation=None):
+                self.release_calls += 1
+                if self.active is not None and self.active.generation == generation:
+                    self.active = None
+
+        class OneToolModel(ChatModel):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def stream(self, messages, tools=None):
+                self.calls += 1
+                yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+                if self.calls == 1:
+                    yield RuntimeEvent(
+                        RuntimeEventType.TOOL_CALL_COMPLETED,
+                        tool_call=ToolCall(id="cooperative-call", name="echo", arguments={}),
+                    )
+                    yield RuntimeEvent(
+                        RuntimeEventType.MODEL_TURN_COMPLETED,
+                        finish_reason="tool_calls",
+                    )
+                else:
+                    yield RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="done")
+                    yield RuntimeEvent(
+                        RuntimeEventType.MODEL_TURN_COMPLETED,
+                        finish_reason="stop",
+                    )
+
+        class CooperativeExecutor(RecordingExecutor):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.cancelled = asyncio.Event()
+                self.calls = 0
+
+            async def execute_with_result_budget(self, call, *, result_budget):
+                self.calls += 1
+                self.started.set()
+                if self.calls == 1:
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        self.cancelled.set()
+                        raise
+                return ToolResult(call_id=call.id, name=call.name, output="ok")
+
+        store = Store()
+        executor = CooperativeExecutor()
+        runtime = ChatRuntime(
+            OneToolModel(),
+            tool_executor=executor,
+            lease_store=store,
+            lease_run_id="run-cooperative-cancel",
+            lease_owner_id="owner-cooperative-cancel",
+            lease_ttl=timedelta(seconds=5),
+            lease_heartbeat_interval=timedelta(seconds=1),
+            lease_clock=clock,
+        )
+        first = asyncio.create_task(
+            _collect_events(runtime.stream_user_message("first", tools=[executor.definition_value]))
+        )
+        await executor.started.wait()
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+
+        assert executor.cancelled.is_set()
+        assert store.release_calls == 0
+        assert runtime._lease_execution_token is None
+
+        with pytest.raises(RunLeaseUnavailable):
+            await _collect_events(runtime.stream_user_message("before-expiry"))
+
+        clock.advance(6)
+        events = await _collect_events(runtime.stream_user_message("after-expiry"))
+        assert events[-1].type is RuntimeEventType.RUN_COMPLETED
+        assert store.release_calls == 1
+
+    asyncio.run(run())
+
+
 def test_nonterminal_release_failure_is_surfaced_when_no_primary_error() -> None:
     async def run() -> None:
         class Store:
@@ -1255,7 +1355,7 @@ def test_stale_heartbeat_cancellation_cannot_cancel_next_generation_renew() -> N
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
-        assert store.cancel_renew_calls == 1
+        assert store.cancel_renew_calls == 0
         assert not store.next_renew_cancelled.is_set()
         guard.assert_owned()
 
@@ -1817,7 +1917,7 @@ def test_cancelled_stream_with_stubborn_iterator_does_not_renew_forever() -> Non
     asyncio.run(run())
 
 
-def test_terminal_audits_expiry_during_release() -> None:
+def test_terminal_audits_expiry_when_release_crosses_ttl_without_yielding() -> None:
     async def run() -> None:
         clock = MutableClock()
 
@@ -1831,7 +1931,6 @@ def test_terminal_audits_expiry_during_release() -> None:
 
             async def release(self, run_id, owner_id, generation=None):
                 clock.advance(6)
-                await asyncio.sleep(0.06)
 
         class TerminalIterator:
             def __aiter__(self):
