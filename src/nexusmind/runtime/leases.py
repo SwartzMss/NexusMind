@@ -318,10 +318,9 @@ class RunLeaseCoordinator:
 
     @staticmethod
     async def _close_iterator(iterator: AsyncIterator[RuntimeEvent]) -> None:
-        try:
-            await iterator.aclose()
-        except (AttributeError, RuntimeError):
-            pass
+        close = getattr(iterator, "aclose", None)
+        if close is not None:
+            await close()
 
     async def _next_event(self, iterator: AsyncIterator[RuntimeEvent]) -> RuntimeEvent:
         next_task = asyncio.create_task(anext(iterator))
@@ -427,6 +426,10 @@ class RunLeaseCoordinator:
             ownership_lost = True
         await self._stop_heartbeat()
         close_error = await self._close_iterator_barrier(iterator)
+        try:
+            self._guard.assert_owned()
+        except RunLeaseError:
+            ownership_lost = True
         ownership_lost = ownership_lost or self._guard.ownership_error is not None
         await self._release_with_deadline(propagate_cancellation=False)
         metadata = dict(event.metadata)

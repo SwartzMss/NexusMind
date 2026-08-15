@@ -1422,6 +1422,135 @@ def test_terminal_iterator_close_failure_still_releases_lease() -> None:
     asyncio.run(run())
 
 
+def test_terminal_iterator_runtimeerror_is_audited() -> None:
+    async def run() -> None:
+        class Store:
+            def __init__(self) -> None:
+                self.release_calls = 0
+
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl, generation=None):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id, generation=None):
+                self.release_calls += 1
+
+        class FailingCloseIterator:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if hasattr(self, "delivered"):
+                    raise StopAsyncIteration
+                self.delivered = True
+                return RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
+
+            async def aclose(self):
+                raise RuntimeError("provider cleanup failed")
+
+        store = Store()
+        coordinator = RunLeaseCoordinator(
+            store, run_id="run-close-runtimeerror", owner_id="owner-close-runtimeerror"
+        )
+        events = [
+            event
+            async for event in coordinator.stream(FailingCloseIterator())
+        ]
+
+        assert events[-1].metadata["lease_iterator_cleanup_failed"] is True
+        assert store.release_calls == 1
+
+    asyncio.run(run())
+
+
+def test_nonterminal_iterator_attributeerror_is_not_swallowed() -> None:
+    async def run() -> None:
+        class Store:
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl, generation=None):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id, generation=None):
+                return None
+
+        class FailingCloseIterator:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if hasattr(self, "delivered"):
+                    raise StopAsyncIteration
+                self.delivered = True
+                return RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="partial")
+
+            async def aclose(self):
+                raise AttributeError("provider cleanup failed")
+
+        coordinator = RunLeaseCoordinator(
+            Store(), run_id="run-close-attributeerror", owner_id="owner-close-attributeerror"
+        )
+        with pytest.raises(RunLeaseStoreError, match="iterator cleanup failed"):
+            [
+                event
+                async for event in coordinator.stream(FailingCloseIterator())
+            ]
+
+    asyncio.run(run())
+
+
+def test_terminal_audits_expiry_during_cleanup_barrier() -> None:
+    async def run() -> None:
+        clock = MutableClock()
+
+        class Store:
+            async def acquire(self, run_id, owner_id, ttl):
+                now = clock()
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl, generation=None):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id, generation=None):
+                return None
+
+        class AdvancingCloseIterator:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if hasattr(self, "delivered"):
+                    raise StopAsyncIteration
+                self.delivered = True
+                return RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
+
+            async def aclose(self):
+                clock.advance(6)
+
+        coordinator = RunLeaseCoordinator(
+            Store(),
+            run_id="run-expiry-during-cleanup",
+            owner_id="owner-expiry-during-cleanup",
+            ttl=timedelta(seconds=5),
+            heartbeat_interval=timedelta(seconds=1),
+            clock=clock,
+        )
+        events = [
+            event
+            async for event in coordinator.stream(AdvancingCloseIterator())
+        ]
+
+        assert events[-1].type is RuntimeEventType.RUN_COMPLETED
+        assert events[-1].metadata["lease_ownership_lost_after_terminal"] is True
+
+    asyncio.run(run())
+
+
 def test_timed_out_old_release_cannot_clear_next_execution_guard() -> None:
     async def run() -> None:
         class Store:
