@@ -19,15 +19,15 @@ from uuid import uuid4
 from nexusmind.runtime.events import RuntimeEvent, RuntimeEventType
 
 
-_BACKGROUND_RELEASE_TASKS: set[asyncio.Task[None]] = set()
+_BACKGROUND_RELEASE_TASKS: set[asyncio.Task[object]] = set()
 
 
-def _retain_background_release_task(task: asyncio.Task[None]) -> None:
+def _retain_background_release_task(task: asyncio.Task[object]) -> None:
     _BACKGROUND_RELEASE_TASKS.add(task)
     task.add_done_callback(_consume_background_release_task)
 
 
-def _consume_background_release_task(task: asyncio.Task[None]) -> None:
+def _consume_background_release_task(task: asyncio.Task[object]) -> None:
     _BACKGROUND_RELEASE_TASKS.discard(task)
     try:
         task.result()
@@ -146,6 +146,7 @@ class RunLeaseOwnershipGuard:
             error = RunLeaseOwnershipLost("Run lease generation changed")
             self._ownership_error = error
             raise error
+
         now = self._now()
         if lease.is_expired(now):
             raise RunLeaseOwnershipLost("Run lease store returned an expired lease")
@@ -153,6 +154,9 @@ class RunLeaseOwnershipGuard:
         self._ownership_error = None
         if not initial:
             self._renewal_event.set()
+
+    def is_expired(self, lease: RunLease) -> bool:
+        return lease.is_expired(self._now())
 
     def fail(self, error: RunLeaseError) -> None:
         if not isinstance(error, RunLeaseError):
@@ -231,6 +235,7 @@ class RunLeaseCoordinator:
         lease_release_timeout: timedelta = timedelta(seconds=10),
         clock: Callable[[], datetime] | None = None,
         guard: RunLeaseOwnershipGuard | None = None,
+        on_execution_resolved: Callable[[], None] | None = None,
     ) -> None:
         _validate_identity(run_id, "run_id")
         resolved_owner_id = uuid4().hex if owner_id is None else owner_id
@@ -256,10 +261,16 @@ class RunLeaseCoordinator:
         self.ownership_lost_after_progress = False
         self._terminal_cleanup_done = False
         self._generation: str | None = None
+        self._on_execution_resolved = on_execution_resolved
+        self._unresolved_task: asyncio.Task[object] | None = None
 
     @property
     def lease(self) -> RunLease | None:
         return self._guard.lease
+
+    @property
+    def execution_uncertain(self) -> bool:
+        return self._guard.execution_uncertain
 
     async def stream(self, events: AsyncIterator[RuntimeEvent]) -> AsyncIterator[RuntimeEvent]:
         if self._stream_started:
@@ -351,12 +362,11 @@ class RunLeaseCoordinator:
                     continue
                 break
         except asyncio.CancelledError:
-            next_task.cancel()
-            expiry_task.cancel()
-            renewal_task.cancel()
-            await self._drain(next_task)
-            await self._drain(expiry_task)
-            await self._drain(renewal_task)
+            next_finished = await self._cancel_task_with_deadline(next_task)
+            await self._cancel_task_with_deadline(expiry_task)
+            await self._cancel_task_with_deadline(renewal_task)
+            if not next_finished:
+                self._mark_execution_uncertain(next_task)
             raise
         finally:
             if not expiry_task.done():
@@ -396,9 +406,12 @@ class RunLeaseCoordinator:
         if ownership_error is None:
             ownership_error = RunLeaseStoreError("Run lease heartbeat stopped unexpectedly")
             self._guard.fail(ownership_error)
-        next_task.cancel()
+        next_finished = await self._cancel_task_with_deadline(next_task)
+        if not next_finished:
+            self._mark_execution_uncertain(next_task)
+            raise ownership_error
         try:
-            event = await next_task
+            event = next_task.result()
         except BaseException:
             self.ownership_lost_after_progress = True
             raise ownership_error
@@ -420,6 +433,7 @@ class RunLeaseCoordinator:
         self, event: RuntimeEvent, iterator: AsyncIterator[RuntimeEvent]
     ) -> RuntimeEvent:
         ownership_lost = False
+        terminal_lease = self._guard.lease
         try:
             self._guard.assert_owned()
         except RunLeaseError:
@@ -432,6 +446,12 @@ class RunLeaseCoordinator:
             ownership_lost = True
         ownership_lost = ownership_lost or self._guard.ownership_error is not None
         await self._release_with_deadline(propagate_cancellation=False)
+        if terminal_lease is not None:
+            try:
+                if self._guard.is_expired(terminal_lease):
+                    ownership_lost = True
+            except RunLeaseError:
+                ownership_lost = True
         metadata = dict(event.metadata)
         if ownership_lost:
             metadata["lease_ownership_lost_after_terminal"] = True
@@ -612,6 +632,45 @@ class RunLeaseCoordinator:
             task.result()
         except BaseException:
             pass
+
+    async def _cancel_task_with_deadline(self, task: asyncio.Task[object]) -> bool:
+        if task.done():
+            try:
+                task.result()
+            except BaseException:
+                pass
+            return True
+        task.cancel()
+        deadline = asyncio.get_running_loop().time() + self.lease_release_timeout.total_seconds()
+        while not task.done():
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                _retain_background_release_task(task)
+                return False
+            try:
+                done, _ = await asyncio.wait({task}, timeout=remaining)
+            except asyncio.CancelledError:
+                continue
+            if not done:
+                _retain_background_release_task(task)
+                return False
+        try:
+            task.result()
+        except BaseException:
+            pass
+        return True
+
+    def _mark_execution_uncertain(self, task: asyncio.Task[object]) -> None:
+        self._guard.mark_execution_uncertain()
+        self._unresolved_task = task
+        task.add_done_callback(self._execution_resolved)
+
+    def _execution_resolved(self, task: asyncio.Task[object]) -> None:
+        if self._unresolved_task is not task:
+            return
+        self._unresolved_task = None
+        if self._on_execution_resolved is not None:
+            self._on_execution_resolved()
 
     async def _release(self) -> None:
         try:

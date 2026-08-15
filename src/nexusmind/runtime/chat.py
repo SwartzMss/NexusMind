@@ -134,6 +134,9 @@ class ChatRuntime:
                     heartbeat_interval=self._lease_heartbeat_interval,
                     lease_release_timeout=self._lease_release_timeout,
                     guard=self._lease_guard,
+                    on_execution_resolved=lambda: self._clear_lease_execution_token(
+                        execution_token
+                    ),
                 )
                 stream = self._lease_coordinator.stream(stream)
             async for event in stream:
@@ -162,4 +165,10 @@ class ChatRuntime:
                 execution_token is not None
                 and self._lease_execution_token is execution_token
             ):
-                self._lease_execution_token = None
+                coordinator = self._lease_coordinator
+                if coordinator is None or not coordinator.execution_uncertain:
+                    self._lease_execution_token = None
+
+    def _clear_lease_execution_token(self, execution_token: object) -> None:
+        if self._lease_execution_token is execution_token:
+            self._lease_execution_token = None

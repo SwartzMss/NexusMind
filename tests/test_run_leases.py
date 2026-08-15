@@ -1551,6 +1551,127 @@ def test_terminal_audits_expiry_during_cleanup_barrier() -> None:
     asyncio.run(run())
 
 
+def test_cancelled_stream_with_stubborn_iterator_does_not_renew_forever() -> None:
+    async def run() -> None:
+        class Store:
+            def __init__(self) -> None:
+                self.renew_calls = 0
+                self.release_calls = 0
+
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(
+                    run_id,
+                    owner_id,
+                    now,
+                    now,
+                    now + ttl,
+                    generation="generation-stubborn",
+                )
+
+            async def renew(self, run_id, owner_id, ttl, generation=None):
+                self.renew_calls += 1
+                now = datetime.now(timezone.utc)
+                return RunLease(
+                    run_id,
+                    owner_id,
+                    now,
+                    now,
+                    now + ttl,
+                    generation=generation,
+                )
+
+            async def release(self, run_id, owner_id, generation=None):
+                self.release_calls += 1
+
+        class StubbornIterator:
+            def __init__(self) -> None:
+                self.started = asyncio.Event()
+                self.allow_exit = asyncio.Event()
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                self.started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    await self.allow_exit.wait()
+                    raise
+
+        store = Store()
+        iterator = StubbornIterator()
+        coordinator = RunLeaseCoordinator(
+            store,
+            run_id="run-stubborn-cancel",
+            owner_id="owner-stubborn-cancel",
+            heartbeat_interval=timedelta(milliseconds=5),
+            lease_release_timeout=timedelta(milliseconds=20),
+        )
+        task = asyncio.create_task(_collect_events(coordinator.stream(iterator)))
+        await iterator.started.wait()
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=0.2)
+        renew_calls = store.renew_calls
+        await asyncio.sleep(0.05)
+
+        assert coordinator.execution_uncertain is True
+        assert store.release_calls == 0
+        assert store.renew_calls == renew_calls
+
+        iterator.allow_exit.set()
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+
+def test_terminal_audits_expiry_during_release() -> None:
+    async def run() -> None:
+        clock = MutableClock()
+
+        class Store:
+            async def acquire(self, run_id, owner_id, ttl):
+                now = clock()
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl, generation=None):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id, generation=None):
+                clock.advance(6)
+
+        class TerminalIterator:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if hasattr(self, "delivered"):
+                    raise StopAsyncIteration
+                self.delivered = True
+                return RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
+
+        coordinator = RunLeaseCoordinator(
+            Store(),
+            run_id="run-expiry-during-release",
+            owner_id="owner-expiry-during-release",
+            ttl=timedelta(seconds=5),
+            heartbeat_interval=timedelta(seconds=1),
+            clock=clock,
+        )
+        events = [
+            event
+            async for event in coordinator.stream(TerminalIterator())
+        ]
+
+        assert events[-1].type is RuntimeEventType.RUN_COMPLETED
+        assert events[-1].metadata["lease_ownership_lost_after_terminal"] is True
+
+    asyncio.run(run())
+
+
 def test_timed_out_old_release_cannot_clear_next_execution_guard() -> None:
     async def run() -> None:
         class Store:
