@@ -448,7 +448,7 @@ def test_expiry_watchdog_cancels_inflight_tool_while_renew_blocked() -> None:
                 now = datetime.now(timezone.utc)
                 return RunLease(run_id, owner_id, now, now, now + timedelta(milliseconds=60))
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 await asyncio.Event().wait()
 
             async def release(self, run_id, owner_id, generation=None):
@@ -503,7 +503,7 @@ def test_uncertain_tool_cancellation_keeps_unexpired_lease() -> None:
                 now = datetime.now(timezone.utc)
                 return RunLease(run_id, owner_id, now, now, now + timedelta(seconds=5))
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 await tool_started.wait()
                 raise RunLeaseStoreError("heartbeat failed")
 
@@ -548,7 +548,7 @@ def test_nonterminal_release_failure_is_surfaced_when_no_primary_error() -> None
                 now = datetime.now(timezone.utc)
                 return RunLease(run_id, owner_id, now, now, now + ttl)
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 raise AssertionError("heartbeat should not run")
 
             async def release(self, run_id, owner_id, generation=None):
@@ -679,7 +679,7 @@ def test_guard_uncertainty_does_not_leak_into_next_execution() -> None:
                 now = datetime.now(timezone.utc)
                 return RunLease(run_id, owner_id, now, now, now + ttl)
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 raise AssertionError("heartbeat should not run")
 
             async def release(self, run_id, owner_id, generation=None):
@@ -721,6 +721,208 @@ def test_guard_uncertainty_does_not_leak_into_next_execution() -> None:
     asyncio.run(run())
 
 
+def test_legacy_owner_only_store_is_rejected_without_mutation() -> None:
+    async def run() -> None:
+        class LegacyStore:
+            def __init__(self) -> None:
+                self.release_calls = 0
+
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(
+                    run_id,
+                    owner_id,
+                    now,
+                    now,
+                    now + ttl,
+                    generation="generation-1",
+                )
+
+            async def renew(self, run_id, owner_id, ttl):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id):
+                self.release_calls += 1
+
+        async def events():
+            yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
+
+        store = LegacyStore()
+        coordinator = RunLeaseCoordinator(
+            store,
+            run_id="run-legacy-store",
+            owner_id="owner-legacy-store",
+        )
+        output = [event async for event in coordinator.stream(events())]
+
+        assert output[-1].metadata["lease_release_failed"] is True
+        assert store.release_calls == 0
+
+    asyncio.run(run())
+
+
+def test_nonterminal_iterator_close_timeout_still_releases_lease() -> None:
+    async def run() -> None:
+        class Store:
+            def __init__(self) -> None:
+                self.release_calls = 0
+
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(
+                    run_id,
+                    owner_id,
+                    now,
+                    now,
+                    now + ttl,
+                    generation="generation-1",
+                )
+
+            async def renew(self, run_id, owner_id, ttl, generation=None):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id, generation=None):
+                self.release_calls += 1
+
+        class HangingCloseIterator:
+            def __init__(self) -> None:
+                self.delivered = False
+                self.close_started = asyncio.Event()
+                self.never_close = asyncio.Event()
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if not self.delivered:
+                    self.delivered = True
+                    return RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="partial")
+                await asyncio.Event().wait()
+
+            async def aclose(self):
+                self.close_started.set()
+                await self.never_close.wait()
+
+        store = Store()
+        iterator = HangingCloseIterator()
+        coordinator = RunLeaseCoordinator(
+            store,
+            run_id="run-nonterminal-close-timeout",
+            owner_id="owner-nonterminal-close-timeout",
+            lease_release_timeout=timedelta(milliseconds=20),
+        )
+        task = asyncio.create_task(_collect_events(coordinator.stream(iterator)))
+        await asyncio.sleep(0)
+        while not iterator.delivered:
+            await asyncio.sleep(0)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=0.2)
+        assert iterator.close_started.is_set()
+        assert store.release_calls == 1
+
+    asyncio.run(run())
+
+
+def test_nonterminal_iterator_close_failure_still_releases_lease() -> None:
+    async def run() -> None:
+        class Store:
+            def __init__(self) -> None:
+                self.release_calls = 0
+
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(
+                    run_id,
+                    owner_id,
+                    now,
+                    now,
+                    now + ttl,
+                    generation="generation-1",
+                )
+
+            async def renew(self, run_id, owner_id, ttl, generation=None):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id, generation=None):
+                self.release_calls += 1
+
+        class FailingIterator:
+            def __init__(self) -> None:
+                self.delivered = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.delivered:
+                    raise RuntimeError("stream failed")
+                self.delivered = True
+                return RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="partial")
+
+            async def aclose(self):
+                raise OSError("iterator cleanup failed")
+
+        store = Store()
+        coordinator = RunLeaseCoordinator(
+            store,
+            run_id="run-nonterminal-close-failure",
+            owner_id="owner-nonterminal-close-failure",
+        )
+        with pytest.raises(RuntimeError, match="stream failed"):
+            [event async for event in coordinator.stream(FailingIterator())]
+        assert store.release_calls == 1
+
+    asyncio.run(run())
+
+
+def test_initial_ownership_proof_failure_releases_acquired_lease() -> None:
+    async def run() -> None:
+        store_clock = MutableClock()
+        guard_clock = MutableClock()
+        guard_clock.advance(6)
+
+        class Store:
+            def __init__(self) -> None:
+                self.release_calls = 0
+
+            async def acquire(self, run_id, owner_id, ttl):
+                now = store_clock()
+                return RunLease(
+                    run_id,
+                    owner_id,
+                    now,
+                    now,
+                    now + ttl,
+                    generation="generation-1",
+                )
+
+            async def renew(self, run_id, owner_id, ttl, generation=None):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id, generation=None):
+                self.release_calls += 1
+
+        async def events():
+            if False:
+                yield RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="unused")
+
+        store = Store()
+        coordinator = RunLeaseCoordinator(
+            store,
+            run_id="run-initial-proof-failure",
+            owner_id="owner-initial-proof-failure",
+            ttl=timedelta(seconds=5),
+            guard=RunLeaseOwnershipGuard(clock=guard_clock),
+        )
+        with pytest.raises(RunLeaseOwnershipLost):
+            [event async for event in coordinator.stream(events())]
+        assert store.release_calls == 1
+
+    asyncio.run(run())
+
+
 def test_terminal_closes_wrapped_iterator() -> None:
     async def run() -> None:
         class Store:
@@ -728,7 +930,7 @@ def test_terminal_closes_wrapped_iterator() -> None:
                 now = datetime.now(timezone.utc)
                 return RunLease(run_id, owner_id, now, now, now + ttl)
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 raise AssertionError("heartbeat should not run")
 
             async def release(self, run_id, owner_id, generation=None):
@@ -761,7 +963,7 @@ def test_cancellation_during_terminal_iterator_close_preserves_outcome() -> None
                 now = datetime.now(timezone.utc)
                 return RunLease(run_id, owner_id, now, now, now + ttl)
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 raise AssertionError("heartbeat should not run")
 
             async def release(self, run_id, owner_id, generation=None):
@@ -813,7 +1015,7 @@ def test_terminal_iterator_close_timeout_still_releases_lease() -> None:
                 now = datetime.now(timezone.utc)
                 return RunLease(run_id, owner_id, now, now, now + ttl)
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 raise AssertionError("heartbeat should not run")
 
             async def release(self, run_id, owner_id, generation=None):
@@ -869,7 +1071,7 @@ def test_terminal_iterator_close_failure_still_releases_lease() -> None:
                 now = datetime.now(timezone.utc)
                 return RunLease(run_id, owner_id, now, now, now + ttl)
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 raise AssertionError("heartbeat should not run")
 
             async def release(self, run_id, owner_id, generation=None):
@@ -1039,7 +1241,7 @@ def test_leased_chat_runtime_rejects_concurrent_executions() -> None:
                 now = datetime.now(timezone.utc)
                 return RunLease(run_id, owner_id, now, now, now + ttl)
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 raise AssertionError("heartbeat should not run")
 
             async def release(self, run_id, owner_id, generation=None):
@@ -1114,6 +1316,20 @@ def test_coordinator_rejects_invalid_lease_release_timeout(lease_release_timeout
         )
 
 
+def test_coordinator_rejects_empty_owner_id() -> None:
+    with pytest.raises(ValueError, match="owner_id must be a non-empty string"):
+        RunLeaseCoordinator(object(), run_id="run-empty-owner", owner_id="")
+
+
+def test_coordinator_rejects_zero_heartbeat_interval() -> None:
+    with pytest.raises(ValueError, match="Heartbeat interval must be positive"):
+        RunLeaseCoordinator(
+            object(),
+            run_id="run-zero-heartbeat",
+            heartbeat_interval=timedelta(0),
+        )
+
+
 class CountingTextModel(ChatModel):
     def __init__(self) -> None:
         self.calls = 0
@@ -1142,13 +1358,13 @@ def test_chat_runtime_preserves_prior_positional_lease_clock_slot() -> None:
             async def acquire(self, run_id, owner_id, ttl):
                 return RunLease(run_id, owner_id, now, now, now + ttl)
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 raise AssertionError("heartbeat should not run")
 
             async def inspect(self, run_id):
                 return None
 
-            async def release(self, run_id, owner_id):
+            async def release(self, run_id, owner_id, generation=None):
                 self.released = True
 
         store = PositionalLeaseStore()
@@ -1408,14 +1624,14 @@ def test_heartbeat_ownership_loss_blocks_next_tool() -> None:
                 now = datetime.now(timezone.utc)
                 return RunLease(run_id, owner_id, now, now, now + ttl)
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 self.renew_failed.set()
                 raise RunLeaseStoreError("heartbeat persistence failed")
 
             async def inspect(self, run_id):
                 return None
 
-            async def release(self, run_id, owner_id):
+            async def release(self, run_id, owner_id, generation=None):
                 return None
 
         store = HeartbeatFailureStore()
@@ -1453,13 +1669,13 @@ def test_release_failure_is_surfaced_after_terminal_event() -> None:
                 now = datetime.now(timezone.utc)
                 return RunLease(run_id, owner_id, now, now, now + ttl)
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 raise AssertionError("heartbeat should not run")
 
             async def inspect(self, run_id):
                 return None
 
-            async def release(self, run_id, owner_id):
+            async def release(self, run_id, owner_id, generation=None):
                 raise RunLeaseStoreError("release persistence failed")
 
         runtime = ChatRuntime(
@@ -1493,10 +1709,10 @@ def test_terminal_event_is_not_delivered_until_lease_is_released() -> None:
                 now = datetime.now(timezone.utc)
                 return RunLease(run_id, owner_id, now, now, now + ttl)
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 raise AssertionError("heartbeat should not run")
 
-            async def release(self, run_id, owner_id):
+            async def release(self, run_id, owner_id, generation=None):
                 self.released.set()
 
         store = TrackingStore()
@@ -1531,10 +1747,10 @@ def test_cancellation_during_terminal_release_preserves_terminal_outcome() -> No
                 now = datetime.now(timezone.utc)
                 return RunLease(run_id, owner_id, now, now, now + ttl)
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 raise AssertionError("heartbeat should not run")
 
-            async def release(self, run_id, owner_id):
+            async def release(self, run_id, owner_id, generation=None):
                 self.release_started.set()
                 await self.allow_release.wait()
 
@@ -1572,13 +1788,13 @@ def test_terminal_release_timeout_preserves_terminal_outcome() -> None:
                 now = datetime.now(timezone.utc)
                 return RunLease(run_id, owner_id, now, now, now + ttl)
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 raise AssertionError("heartbeat should not run")
 
             async def inspect(self, run_id):
                 return None
 
-            async def release(self, run_id, owner_id):
+            async def release(self, run_id, owner_id, generation=None):
                 self.release_started.set()
                 try:
                     await self.never_release.wait()
@@ -1617,13 +1833,13 @@ def test_self_cancelled_terminal_release_preserves_terminal_outcome() -> None:
                 now = datetime.now(timezone.utc)
                 return RunLease(run_id, owner_id, now, now, now + ttl)
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 raise AssertionError("heartbeat should not run")
 
             async def inspect(self, run_id):
                 return None
 
-            async def release(self, run_id, owner_id):
+            async def release(self, run_id, owner_id, generation=None):
                 self.release_calls += 1
                 raise asyncio.CancelledError()
 
@@ -1659,13 +1875,13 @@ def test_timed_out_terminal_release_task_is_retained_until_it_finishes() -> None
                 now = datetime.now(timezone.utc)
                 return RunLease(run_id, owner_id, now, now, now + ttl)
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 raise AssertionError("heartbeat should not run")
 
             async def inspect(self, run_id):
                 return None
 
-            async def release(self, run_id, owner_id):
+            async def release(self, run_id, owner_id, generation=None):
                 self.release_started.set()
                 task = asyncio.current_task()
                 assert task is not None
@@ -1724,13 +1940,13 @@ def test_cancellation_cannot_extend_terminal_release_timeout() -> None:
                 now = datetime.now(timezone.utc)
                 return RunLease(run_id, owner_id, now, now, now + ttl)
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 raise AssertionError("heartbeat should not run")
 
             async def inspect(self, run_id):
                 return None
 
-            async def release(self, run_id, owner_id):
+            async def release(self, run_id, owner_id, generation=None):
                 self.release_started.set()
                 try:
                     await self.never_release.wait()
@@ -1821,12 +2037,12 @@ def test_heartbeat_loss_during_terminal_checkpoint_preserves_all_outcomes(
                 now = datetime.now(timezone.utc)
                 return RunLease(run_id, owner_id, now, now, now + ttl)
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 await self.checkpoint_store.terminal_started.wait()
                 self.renew_failed.set()
                 raise RunLeaseStoreError("heartbeat failed during terminal checkpoint")
 
-            async def release(self, run_id, owner_id):
+            async def release(self, run_id, owner_id, generation=None):
                 return None
 
         class OutcomeModel(ChatModel):
@@ -1900,7 +2116,7 @@ def test_terminal_event_audits_ownership_expiry_while_waiting(tmp_path) -> None:
                 super().__init__(*args, **kwargs)
                 self.renew_calls = 0
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 self.renew_calls += 1
                 return await super().renew(run_id, owner_id, ttl)
 
@@ -1964,7 +2180,7 @@ def test_heartbeat_loss_during_policy_blocks_tool_execution() -> None:
                 now = datetime.now(timezone.utc)
                 return RunLease(run_id, owner_id, now, now, now + ttl)
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 await policy.started.wait()
                 self.renew_failed.set()
                 raise RunLeaseStoreError("heartbeat failed during policy")
@@ -1972,7 +2188,7 @@ def test_heartbeat_loss_during_policy_blocks_tool_execution() -> None:
             async def inspect(self, run_id):
                 return None
 
-            async def release(self, run_id, owner_id):
+            async def release(self, run_id, owner_id, generation=None):
                 return None
 
         class BlockingPolicy:
@@ -2029,12 +2245,12 @@ def test_heartbeat_loss_cancels_inflight_tool() -> None:
                 now = datetime.now(timezone.utc)
                 return RunLease(run_id, owner_id, now, now, now + ttl)
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 await executor.started.wait()
                 self.renew_failed.set()
                 raise RunLeaseStoreError("heartbeat failed during tool")
 
-            async def release(self, run_id, owner_id):
+            async def release(self, run_id, owner_id, generation=None):
                 return None
 
         class BlockingExecutor(RecordingExecutor):
@@ -2087,12 +2303,12 @@ def test_heartbeat_loss_cancels_inflight_model() -> None:
                 now = datetime.now(timezone.utc)
                 return RunLease(run_id, owner_id, now, now, now + ttl)
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 await model.started.wait()
                 self.renew_failed.set()
                 raise RunLeaseStoreError("heartbeat failed during model")
 
-            async def release(self, run_id, owner_id):
+            async def release(self, run_id, owner_id, generation=None):
                 return None
 
         class BlockingModel(ChatModel):
@@ -2134,11 +2350,11 @@ def test_heartbeat_loss_cancels_inflight_model() -> None:
 def test_expired_owner_cannot_continue_inflight_tool_after_takeover(tmp_path) -> None:
     async def run() -> None:
         class FailingOwnerStore(SQLiteRunLeaseStore):
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 await executor.started.wait()
                 raise RunLeaseStoreError("owner heartbeat failed")
 
-            async def release(self, run_id, owner_id):
+            async def release(self, run_id, owner_id, generation=None):
                 raise RunLeaseStoreError("owner release failed")
 
         class BlockingExecutor(RecordingExecutor):
@@ -2203,13 +2419,13 @@ def test_lease_expiry_during_policy_blocks_tool_execution() -> None:
                 now = clock()
                 return RunLease(run_id, owner_id, now, now, now + ttl)
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 await asyncio.Event().wait()
 
             async def inspect(self, run_id):
                 return None
 
-            async def release(self, run_id, owner_id):
+            async def release(self, run_id, owner_id, generation=None):
                 return None
 
         class BlockingPolicy:
@@ -2365,12 +2581,12 @@ def test_cli_ownership_loss_after_tool_progress_marks_trace_incomplete(
                 now = datetime.now(timezone.utc)
                 return RunLease(run_id, owner_id, now, now, now + ttl)
 
-            async def renew(self, run_id, owner_id, ttl):
+            async def renew(self, run_id, owner_id, ttl, generation=None):
                 await executor.started.wait()
                 self.renew_failed.set()
                 raise RunLeaseStoreError("heartbeat failed while tool was running")
 
-            async def release(self, run_id, owner_id):
+            async def release(self, run_id, owner_id, generation=None):
                 return None
 
         class BlockingExecutor(RecordingExecutor):
@@ -2463,10 +2679,10 @@ def test_cli_release_failure_audits_cleanup_without_rewriting_completed_outcome(
             now = datetime.now(timezone.utc)
             return RunLease(run_id, owner_id, now, now, now + ttl)
 
-        async def renew(self, run_id, owner_id, ttl):
+        async def renew(self, run_id, owner_id, ttl, generation=None):
             raise AssertionError("heartbeat should not run")
 
-        async def release(self, run_id, owner_id):
+        async def release(self, run_id, owner_id, generation=None):
             raise RunLeaseStoreError("release persistence failed")
 
     monkeypatch.setattr(cli, "SQLiteRunLeaseStore", lambda path: ReleaseFailureStore())
@@ -2519,10 +2735,10 @@ def test_cli_release_timeout_audits_cleanup_without_rewriting_completed_outcome(
             now = datetime.now(timezone.utc)
             return RunLease(run_id, owner_id, now, now, now + ttl)
 
-        async def renew(self, run_id, owner_id, ttl):
+        async def renew(self, run_id, owner_id, ttl, generation=None):
             raise AssertionError("heartbeat should not run")
 
-        async def release(self, run_id, owner_id):
+        async def release(self, run_id, owner_id, generation=None):
             self.release_started.set()
             try:
                 await self.never_release.wait()

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import math
 import sqlite3
 import sys
@@ -102,7 +101,7 @@ class RunLeaseStore(Protocol):
         ...
 
     async def renew(
-        self, run_id: str, owner_id: str, ttl: timedelta, generation: str | None = None
+        self, run_id: str, owner_id: str, ttl: timedelta, generation: str
     ) -> RunLease:
         ...
 
@@ -110,7 +109,7 @@ class RunLeaseStore(Protocol):
         ...
 
     async def release(
-        self, run_id: str, owner_id: str, generation: str | None = None
+        self, run_id: str, owner_id: str, generation: str
     ) -> None:
         ...
 
@@ -234,11 +233,11 @@ class RunLeaseCoordinator:
         guard: RunLeaseOwnershipGuard | None = None,
     ) -> None:
         _validate_identity(run_id, "run_id")
-        resolved_owner_id = owner_id or uuid4().hex
+        resolved_owner_id = uuid4().hex if owner_id is None else owner_id
         _validate_identity(resolved_owner_id, "owner_id")
         if type(ttl) is not timedelta or ttl <= timedelta(0):
             raise ValueError("Run lease ttl must be a positive timedelta")
-        interval = heartbeat_interval or ttl / 3
+        interval = ttl / 3 if heartbeat_interval is None else heartbeat_interval
         if type(interval) is not timedelta or interval <= timedelta(0) or interval >= ttl:
             raise ValueError("Heartbeat interval must be positive and shorter than the lease ttl")
         if type(lease_release_timeout) is not timedelta or lease_release_timeout <= timedelta(0):
@@ -276,9 +275,9 @@ class RunLeaseCoordinator:
             except Exception as exc:
                 raise RunLeaseStoreError("Run lease acquisition failed") from exc
             lease = self._validate_owned_lease(lease)
-            self._guard.prove(lease, initial=True)
             self._generation = lease.generation
             acquired = True
+            self._guard.prove(lease, initial=True)
             self._heartbeat_task = asyncio.create_task(self._heartbeat())
             while True:
                 self.assert_owned()
@@ -300,8 +299,9 @@ class RunLeaseCoordinator:
         finally:
             active_error = sys.exc_info()[1]
             await self._stop_heartbeat()
+            close_error: BaseException | None = None
             if not self._terminal_cleanup_done:
-                await self._close_iterator(iterator)
+                close_error = await self._close_iterator_barrier(iterator)
             if acquired and not self._terminal_cleanup_done and not self._guard.execution_uncertain:
                 try:
                     await self._release_with_deadline(propagate_cancellation=True)
@@ -311,6 +311,8 @@ class RunLeaseCoordinator:
                         raise
                 if self.release_error is not None and active_error is None:
                     raise self.release_error
+            if close_error is not None and active_error is None and self.release_error is None:
+                raise RunLeaseStoreError("Run lease iterator cleanup failed") from close_error
 
     @staticmethod
     async def _close_iterator(iterator: AsyncIterator[RuntimeEvent]) -> None:
@@ -444,15 +446,13 @@ class RunLeaseCoordinator:
                 _retain_background_release_task(close_task)
                 return RunLeaseStoreError("Run lease iterator close timed out")
             try:
-                await asyncio.wait_for(asyncio.shield(close_task), timeout=remaining)
-            except asyncio.TimeoutError:
+                done, _ = await asyncio.wait({close_task}, timeout=remaining)
+            except asyncio.CancelledError:
+                continue
+            if not done:
                 close_task.cancel()
                 _retain_background_release_task(close_task)
                 return RunLeaseStoreError("Run lease iterator close timed out")
-            except asyncio.CancelledError:
-                continue
-            except BaseException as exc:
-                return exc
         try:
             close_task.result()
         except BaseException as exc:
@@ -573,38 +573,18 @@ class RunLeaseCoordinator:
                 self._guard.clear(self._generation)
 
     async def _renew_store(self) -> RunLease:
-        renew = self._store.renew
-        if self._accepts_generation(renew):
-            return await renew(
-                self.run_id, self.owner_id, self.ttl,
-                generation=self._generation,
-            )
-        renewed = await renew(self.run_id, self.owner_id, self.ttl)
-        # Legacy stores do not return a stable generation. Preserve the
-        # coordinator's acquisition generation so compatibility does not
-        # manufacture a false ownership loss on every heartbeat.
-        if self._generation is not None:
-            renewed = replace(renewed, generation=self._generation)
-        return renewed
+        return await self._store.renew(
+            self.run_id,
+            self.owner_id,
+            self.ttl,
+            generation=self._generation,
+        )
 
     async def _release_store(self) -> None:
-        release = self._store.release
-        if self._accepts_generation(release):
-            await release(
-                self.run_id, self.owner_id,
-                generation=self._generation,
-            )
-        else:
-            await release(self.run_id, self.owner_id)
-
-    @staticmethod
-    def _accepts_generation(method: object) -> bool:
-        try:
-            parameters = inspect.signature(method).parameters.values()
-        except (TypeError, ValueError):
-            return False
-        return any(parameter.name == "generation" for parameter in parameters) or any(
-            parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters
+        await self._store.release(
+            self.run_id,
+            self.owner_id,
+            generation=self._generation,
         )
 
 
