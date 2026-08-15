@@ -224,6 +224,8 @@ nexusmind chat `
 
 `--lease-db` 会在模型或工具执行前原子获取 SQLite 租约，并在运行期间 heartbeat；活动租约冲突、续租失败或 owner 不匹配都会 fail closed。正常完成、失败和取消会尝试按 owner 释放租约；崩溃后的租约只有到期后才能被新 owner 接管。`--lease-run-id` 可省略，此时复用 Run History/checkpoint 的 `run_id`，若两者都未启用则生成新 ID。租约数据独立于 Harness checkpoint，建议使用单独的数据库文件。
 
+模型 Provider、工具执行器和异步事件迭代器必须遵守 cooperative cancellation contract：收到 `asyncio.CancelledError` 后应在有限时间内结束，不得无限吞掉取消。运行时会对当前迭代任务停止 heartbeat、保留租约到 TTL 并阻止同一 `ChatRuntime` 复用，避免未知的后台执行与新 owner 重叠；但 Python 的 `asyncio.run()` 无法强制终止任意不合作的 coroutine，因此 Host 若需要进程级硬 shutdown，应将 Provider 隔离到可终止的 worker process。
+
 工具定义的默认风险级别是 `UNSPECIFIED`，默认策略会要求审批；确认只读工具时应显式设置 `ToolRiskLevel.READ_ONLY`。
 
 ## 开发验证

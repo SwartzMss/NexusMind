@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import math
 import sqlite3
 import sys
@@ -33,6 +34,23 @@ def _consume_background_release_task(task: asyncio.Task[object]) -> None:
         task.result()
     except BaseException:
         pass
+
+
+def _accepts_keyword(function: Callable[..., object], name: str) -> bool:
+    try:
+        parameters = inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+
+
+def _resolve_operation_id(operation_id: str | None) -> str:
+    if operation_id is None:
+        return uuid4().hex
+    _validate_identity(operation_id, "operation_id")
+    return operation_id
 
 
 class RunLeaseError(RuntimeError):
@@ -97,11 +115,19 @@ class RunLease:
 
 
 class RunLeaseStore(Protocol):
-    async def acquire(self, run_id: str, owner_id: str, ttl: timedelta) -> RunLease:
+    async def acquire(
+        self, run_id: str, owner_id: str, ttl: timedelta, *, operation_id: str | None = None
+    ) -> RunLease:
         ...
 
     async def renew(
-        self, run_id: str, owner_id: str, ttl: timedelta, generation: str
+        self,
+        run_id: str,
+        owner_id: str,
+        ttl: timedelta,
+        generation: str,
+        *,
+        operation_id: str | None = None,
     ) -> RunLease:
         ...
 
@@ -109,7 +135,12 @@ class RunLeaseStore(Protocol):
         ...
 
     async def release(
-        self, run_id: str, owner_id: str, generation: str
+        self,
+        run_id: str,
+        owner_id: str,
+        generation: str,
+        *,
+        operation_id: str | None = None,
     ) -> None:
         ...
 
@@ -263,6 +294,11 @@ class RunLeaseCoordinator:
         self._generation: str | None = None
         self._on_execution_resolved = on_execution_resolved
         self._unresolved_task: asyncio.Task[object] | None = None
+        self._store_operation_ids: dict[str, str | None] = {
+            "acquire": None,
+            "renew": None,
+            "release": None,
+        }
 
     @property
     def lease(self) -> RunLease | None:
@@ -445,13 +481,11 @@ class RunLeaseCoordinator:
         except RunLeaseError:
             ownership_lost = True
         ownership_lost = ownership_lost or self._guard.ownership_error is not None
-        await self._release_with_deadline(propagate_cancellation=False)
-        if terminal_lease is not None:
-            try:
-                if self._guard.is_expired(terminal_lease):
-                    ownership_lost = True
-            except RunLeaseError:
-                ownership_lost = True
+        expired_during_release = await self._release_with_deadline(
+            propagate_cancellation=False,
+            monitor_expiry=terminal_lease is not None,
+        )
+        ownership_lost = ownership_lost or expired_during_release
         metadata = dict(event.metadata)
         if ownership_lost:
             metadata["lease_ownership_lost_after_terminal"] = True
@@ -486,48 +520,78 @@ class RunLeaseCoordinator:
             return exc
         return None
 
-    async def _release_with_deadline(self, *, propagate_cancellation: bool) -> None:
+    async def _release_with_deadline(
+        self,
+        *,
+        propagate_cancellation: bool,
+        monitor_expiry: bool = False,
+    ) -> bool:
         release_task = asyncio.create_task(self._release())
+        expiry_task = asyncio.create_task(self._wait_for_expiry()) if monitor_expiry else None
         deadline = asyncio.get_running_loop().time() + self.lease_release_timeout.total_seconds()
         cancelled = False
-        while not release_task.done():
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                break
+        expired_during_release = False
+        try:
+            while not release_task.done():
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                wait_set = {release_task}
+                if expiry_task is not None and not expiry_task.done():
+                    wait_set.add(expiry_task)
+                try:
+                    done, _ = await asyncio.wait(
+                        wait_set,
+                        timeout=remaining,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                except asyncio.CancelledError:
+                    cancelled = True
+                    continue
+                if expiry_task is not None and expiry_task in done and not release_task.done():
+                    expired_during_release = True
+            if not release_task.done():
+                self.release_error = RunLeaseReleaseError("Run lease release timed out")
+                self._cancel_store_release()
+                release_task.cancel()
+                if self._generation is not None:
+                    self._guard.clear(self._generation)
+                _retain_background_release_task(release_task)
+                if cancelled and propagate_cancellation:
+                    raise asyncio.CancelledError
+                return expired_during_release
             try:
-                await asyncio.wait({release_task}, timeout=remaining)
-            except asyncio.CancelledError:
-                cancelled = True
-                continue
-        if not release_task.done():
-            self.release_error = RunLeaseReleaseError("Run lease release timed out")
-            self._cancel_store_release()
-            release_task.cancel()
-            if self._generation is not None:
-                self._guard.clear(self._generation)
-            _retain_background_release_task(release_task)
+                release_task.result()
+            except asyncio.CancelledError as exc:
+                error = RunLeaseReleaseError("Run lease release cancelled")
+                error.__cause__ = exc
+                self.release_error = error
+            except RunLeaseError as exc:
+                self.release_error = exc
             if cancelled and propagate_cancellation:
                 raise asyncio.CancelledError
-            return
-        try:
-            release_task.result()
-        except asyncio.CancelledError as exc:
-            error = RunLeaseReleaseError("Run lease release cancelled")
-            error.__cause__ = exc
-            self.release_error = error
-        except RunLeaseError as exc:
-            self.release_error = exc
-        if cancelled and propagate_cancellation:
-            raise asyncio.CancelledError
+            return expired_during_release
+        finally:
+            if expiry_task is not None and not expiry_task.done():
+                expiry_task.cancel()
+            if expiry_task is not None:
+                await self._drain(expiry_task)
 
     def _cancel_store_release(self) -> None:
         self._cancel_store_operation("release")
 
     def _cancel_store_operation(self, operation: str) -> None:
+        operation_id = self._store_operation_ids.get(operation)
+        generation = self._generation if operation in {"renew", "release"} else None
         try:
             cancel = getattr(self._store, f"cancel_{operation}", None)
             if callable(cancel):
-                cancel(self.run_id, self.owner_id)
+                kwargs: dict[str, object] = {}
+                if _accepts_keyword(cancel, "generation"):
+                    kwargs["generation"] = generation
+                if _accepts_keyword(cancel, "operation_id"):
+                    kwargs["operation_id"] = operation_id
+                cancel(self.run_id, self.owner_id, **kwargs)
         except Exception:
             pass
 
@@ -538,11 +602,39 @@ class RunLeaseCoordinator:
         except BaseException:
             pass
 
+    @staticmethod
+    async def _call_store(
+        function: Callable[..., object], *args: object, **kwargs: object
+    ) -> object:
+        accepted = {
+            name: value
+            for name, value in kwargs.items()
+            if name != "operation_id" or _accepts_keyword(function, name)
+        }
+        result = function(*args, **accepted)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
     def assert_owned(self) -> None:
         self._guard.assert_owned()
 
     async def _acquire_store(self) -> RunLease:
-        task = asyncio.create_task(self._store.acquire(self.run_id, self.owner_id, self.ttl))
+        operation_id = uuid4().hex
+        self._store_operation_ids["acquire"] = operation_id
+        try:
+            task = asyncio.create_task(
+                self._call_store(
+                    self._store.acquire,
+                    self.run_id,
+                    self.owner_id,
+                    self.ttl,
+                    operation_id=operation_id,
+                )
+            )
+        except BaseException:
+            self._store_operation_ids["acquire"] = None
+            raise
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
@@ -563,6 +655,9 @@ class RunLeaseCoordinator:
                     _retain_background_release_task(compensation_task)
                     raise
             raise
+        finally:
+            if self._store_operation_ids.get("acquire") == operation_id:
+                self._store_operation_ids["acquire"] = None
 
     async def _compensate_late_acquire(self, task: asyncio.Task[RunLease]) -> None:
         try:
@@ -684,19 +779,35 @@ class RunLeaseCoordinator:
                 self._guard.clear(self._generation)
 
     async def _renew_store(self) -> RunLease:
-        return await self._store.renew(
-            self.run_id,
-            self.owner_id,
-            self.ttl,
-            generation=self._generation,
-        )
+        operation_id = uuid4().hex
+        self._store_operation_ids["renew"] = operation_id
+        try:
+            return await self._call_store(
+                self._store.renew,
+                self.run_id,
+                self.owner_id,
+                self.ttl,
+                generation=self._generation,
+                operation_id=operation_id,
+            )
+        finally:
+            if self._store_operation_ids.get("renew") == operation_id:
+                self._store_operation_ids["renew"] = None
 
     async def _release_store(self) -> None:
-        await self._store.release(
-            self.run_id,
-            self.owner_id,
-            generation=self._generation,
-        )
+        operation_id = uuid4().hex
+        self._store_operation_ids["release"] = operation_id
+        try:
+            await self._call_store(
+                self._store.release,
+                self.run_id,
+                self.owner_id,
+                generation=self._generation,
+                operation_id=operation_id,
+            )
+        finally:
+            if self._store_operation_ids.get("release") == operation_id:
+                self._store_operation_ids["release"] = None
 
 
 class SQLiteRunLeaseStore:
@@ -724,12 +835,12 @@ class SQLiteRunLeaseStore:
         self._initialized = False
         self._closed = False
         self._release_cancellations_lock = threading.Lock()
-        self._release_cancellations: dict[
-            tuple[str, str], set[threading.Event]
-        ] = {}
         self._lease_cancellations: dict[
-            tuple[str, str, str], set[threading.Event]
+            tuple[str, str, str, str, str | None], set[threading.Event]
         ] = {}
+        # Kept as a compatibility view for callers that inspected the old
+        # release-only registry while the implementation was owner-scoped.
+        self._release_cancellations = self._lease_cancellations
 
     async def initialize(self) -> None:
         await asyncio.to_thread(self._initialize)
@@ -739,25 +850,53 @@ class SQLiteRunLeaseStore:
     async def close(self) -> None:
         self._closed = True
 
-    async def acquire(self, run_id: str, owner_id: str, ttl: timedelta) -> RunLease:
+    async def acquire(
+        self,
+        run_id: str,
+        owner_id: str,
+        ttl: timedelta,
+        *,
+        operation_id: str | None = None,
+    ) -> RunLease:
         self._require_ready()
         _validate_request(run_id, owner_id, ttl)
-        return await self._run_cancellable_lease_operation("acquire", run_id, owner_id, ttl)
+        resolved_operation_id = _resolve_operation_id(operation_id)
+        return await self._run_cancellable_lease_operation(
+            "acquire", run_id, owner_id, ttl, operation_id=resolved_operation_id
+        )
 
     async def renew(
-        self, run_id: str, owner_id: str, ttl: timedelta, generation: str
+        self,
+        run_id: str,
+        owner_id: str,
+        ttl: timedelta,
+        generation: str,
+        *,
+        operation_id: str | None = None,
     ) -> RunLease:
         self._require_ready()
         _validate_request(run_id, owner_id, ttl)
         _validate_identity(generation, "generation")
-        return await self._run_cancellable_lease_operation("renew", run_id, owner_id, ttl, generation)
+        resolved_operation_id = _resolve_operation_id(operation_id)
+        return await self._run_cancellable_lease_operation(
+            "renew",
+            run_id,
+            owner_id,
+            ttl,
+            generation,
+            operation_id=resolved_operation_id,
+        )
 
     async def _run_cancellable_lease_operation(
         self, operation: str, run_id: str, owner_id: str, ttl: timedelta,
         generation: str | None = None,
+        *,
+        operation_id: str,
     ) -> RunLease:
         cancellation = threading.Event()
-        self._register_lease_cancellation(operation, run_id, owner_id, cancellation)
+        self._register_lease_cancellation(
+            operation, run_id, owner_id, generation, operation_id, cancellation
+        )
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._timeout
         try:
@@ -794,7 +933,9 @@ class SQLiteRunLeaseStore:
                     raise RunLeaseStoreError(f"SQLite lease {operation} failed: database is locked")
                 await asyncio.sleep(0)
         finally:
-            self._unregister_lease_cancellation(operation, run_id, owner_id, cancellation)
+            self._unregister_lease_cancellation(
+                operation, run_id, owner_id, generation, operation_id, cancellation
+            )
 
     async def _compensating_release(self, lease: RunLease) -> None:
         """Remove an acquire that committed after its caller was cancelled."""
@@ -833,27 +974,81 @@ class SQLiteRunLeaseStore:
                 cancellation.set()
         return attempt.result()
 
-    def cancel_acquire(self, run_id: str, owner_id: str) -> None:
-        self._cancel_lease_operation("acquire", run_id, owner_id)
+    def cancel_acquire(
+        self,
+        run_id: str,
+        owner_id: str,
+        *,
+        operation_id: str,
+    ) -> None:
+        self._cancel_lease_operation(
+            "acquire", run_id, owner_id, operation_id=operation_id
+        )
 
-    def cancel_renew(self, run_id: str, owner_id: str) -> None:
-        self._cancel_lease_operation("renew", run_id, owner_id)
+    def cancel_renew(
+        self,
+        run_id: str,
+        owner_id: str,
+        *,
+        generation: str,
+        operation_id: str,
+    ) -> None:
+        self._cancel_lease_operation(
+            "renew",
+            run_id,
+            owner_id,
+            generation=generation,
+            operation_id=operation_id,
+        )
 
-    def _cancel_lease_operation(self, operation: str, run_id: str, owner_id: str) -> None:
+    def _cancel_lease_operation(
+        self,
+        operation: str,
+        run_id: str,
+        owner_id: str,
+        *,
+        generation: str | None = None,
+        operation_id: str,
+    ) -> None:
         _validate_identity(run_id, "run_id")
         _validate_identity(owner_id, "owner_id")
+        if generation is not None:
+            _validate_identity(generation, "generation")
+        _validate_identity(operation_id, "operation_id")
         with self._release_cancellations_lock:
-            cancellations = tuple(self._lease_cancellations.get((operation, run_id, owner_id), ()))
+            cancellations = tuple(
+                self._lease_cancellations.get(
+                    (operation, run_id, owner_id, operation_id, generation), ()
+                )
+            )
         for cancellation in cancellations:
             cancellation.set()
 
-    def _register_lease_cancellation(self, operation, run_id, owner_id, cancellation):
+    def _register_lease_cancellation(
+        self,
+        operation: str,
+        run_id: str,
+        owner_id: str,
+        generation: str | None,
+        operation_id: str,
+        cancellation: threading.Event,
+    ) -> None:
         with self._release_cancellations_lock:
-            self._lease_cancellations.setdefault((operation, run_id, owner_id), set()).add(cancellation)
+            self._lease_cancellations.setdefault(
+                (operation, run_id, owner_id, operation_id, generation), set()
+            ).add(cancellation)
 
-    def _unregister_lease_cancellation(self, operation, run_id, owner_id, cancellation):
+    def _unregister_lease_cancellation(
+        self,
+        operation: str,
+        run_id: str,
+        owner_id: str,
+        generation: str | None,
+        operation_id: str,
+        cancellation: threading.Event,
+    ) -> None:
         with self._release_cancellations_lock:
-            key = (operation, run_id, owner_id)
+            key = (operation, run_id, owner_id, operation_id, generation)
             cancellations = self._lease_cancellations.get(key)
             if cancellations is None:
                 return
@@ -866,13 +1061,28 @@ class SQLiteRunLeaseStore:
         _validate_identity(run_id, "run_id")
         return await asyncio.to_thread(self._inspect, run_id)
 
-    async def release(self, run_id: str, owner_id: str, generation: str) -> None:
+    async def release(
+        self,
+        run_id: str,
+        owner_id: str,
+        generation: str,
+        *,
+        operation_id: str | None = None,
+    ) -> None:
         self._require_ready()
         _validate_identity(run_id, "run_id")
         _validate_identity(owner_id, "owner_id")
         _validate_identity(generation, "generation")
+        resolved_operation_id = _resolve_operation_id(operation_id)
         cancellation = threading.Event()
-        self._register_release_cancellation(run_id, owner_id, cancellation)
+        self._register_lease_cancellation(
+            "release",
+            run_id,
+            owner_id,
+            generation,
+            resolved_operation_id,
+            cancellation,
+        )
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._timeout
         try:
@@ -909,43 +1119,32 @@ class SQLiteRunLeaseStore:
                     raise RunLeaseStoreError("SQLite lease release failed: database is locked")
                 await asyncio.sleep(0)
         finally:
-            self._unregister_release_cancellation(run_id, owner_id, cancellation)
+            self._unregister_lease_cancellation(
+                "release",
+                run_id,
+                owner_id,
+                generation,
+                resolved_operation_id,
+                cancellation,
+            )
 
-    def cancel_release(self, run_id: str, owner_id: str) -> None:
+    def cancel_release(
+        self,
+        run_id: str,
+        owner_id: str,
+        *,
+        generation: str,
+        operation_id: str,
+    ) -> None:
         _validate_identity(run_id, "run_id")
         _validate_identity(owner_id, "owner_id")
-        with self._release_cancellations_lock:
-            cancellations = tuple(
-                self._release_cancellations.get((run_id, owner_id), ())
-            )
-        for cancellation in cancellations:
-            cancellation.set()
-
-    def _register_release_cancellation(
-        self,
-        run_id: str,
-        owner_id: str,
-        cancellation: threading.Event,
-    ) -> None:
-        with self._release_cancellations_lock:
-            self._release_cancellations.setdefault((run_id, owner_id), set()).add(
-                cancellation
-            )
-
-    def _unregister_release_cancellation(
-        self,
-        run_id: str,
-        owner_id: str,
-        cancellation: threading.Event,
-    ) -> None:
-        key = (run_id, owner_id)
-        with self._release_cancellations_lock:
-            cancellations = self._release_cancellations.get(key)
-            if cancellations is None:
-                return
-            cancellations.discard(cancellation)
-            if not cancellations:
-                del self._release_cancellations[key]
+        self._cancel_lease_operation(
+            "release",
+            run_id,
+            owner_id,
+            generation=generation,
+            operation_id=operation_id,
+        )
 
     @staticmethod
     async def _drain_release_attempt(

@@ -667,6 +667,195 @@ def test_cancelled_acquire_compensates_after_writer_lock_wait(tmp_path) -> None:
     asyncio.run(run())
 
 
+def test_cancelling_one_acquire_does_not_cancel_parallel_same_owner_acquire(tmp_path) -> None:
+    class BlockingAcquireStore(SQLiteRunLeaseStore):
+        def __init__(self, path):
+            super().__init__(path)
+            self.started = [threading.Event(), threading.Event()]
+            self.allow = [threading.Event(), threading.Event()]
+            self.calls = 0
+            self.calls_lock = threading.Lock()
+
+        def _acquire(
+            self, run_id, owner_id, ttl, generation=None, cancellation=None, timeout=None
+        ):
+            with self.calls_lock:
+                index = self.calls
+                self.calls += 1
+            self.started[index].set()
+            while not cancellation.is_set() and not self.allow[index].wait(0.001):
+                pass
+            if cancellation.is_set():
+                return leases_module._SQLiteLeaseAttempt.CANCELLED
+            now = datetime.now(timezone.utc)
+            return RunLease(
+                run_id,
+                owner_id,
+                now,
+                now,
+                now + ttl,
+                generation=f"generation-{index}",
+            )
+
+    async def run() -> None:
+        store = BlockingAcquireStore(tmp_path / "parallel-acquire-cancel.db")
+        await store.initialize()
+        first = asyncio.create_task(
+            store.acquire(
+                "run-parallel-acquire",
+                "same-owner",
+                timedelta(seconds=5),
+                operation_id="acquire-first",
+            )
+        )
+        second = asyncio.create_task(
+            store.acquire(
+                "run-parallel-acquire",
+                "same-owner",
+                timedelta(seconds=5),
+                operation_id="acquire-second",
+            )
+        )
+        await asyncio.gather(
+            asyncio.to_thread(store.started[0].wait, 1),
+            asyncio.to_thread(store.started[1].wait, 1),
+        )
+
+        store.cancel_acquire(
+            "run-parallel-acquire", "same-owner", operation_id="acquire-first"
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert not second.done()
+
+        store.allow[1].set()
+        lease = await second
+        assert lease.generation == "generation-1"
+        await store.close()
+
+    asyncio.run(run())
+
+
+def test_old_generation_cancel_renew_does_not_cancel_new_generation(tmp_path) -> None:
+    class BlockingRenewStore(SQLiteRunLeaseStore):
+        def __init__(self, path):
+            super().__init__(path)
+            self.started = {"generation-1": threading.Event(), "generation-2": threading.Event()}
+            self.allow = {"generation-1": threading.Event(), "generation-2": threading.Event()}
+
+        def _renew(
+            self, run_id, owner_id, ttl, generation=None, cancellation=None, timeout=None
+        ):
+            self.started[generation].set()
+            while not cancellation.is_set() and not self.allow[generation].wait(0.001):
+                pass
+            if cancellation.is_set():
+                return leases_module._SQLiteLeaseAttempt.CANCELLED
+            now = datetime.now(timezone.utc)
+            return RunLease(run_id, owner_id, now, now, now + ttl, generation=generation)
+
+    async def run() -> None:
+        store = BlockingRenewStore(tmp_path / "generation-renew-cancel.db")
+        await store.initialize()
+        first = asyncio.create_task(
+            store.renew(
+                "run-generation-cancel",
+                "same-owner",
+                timedelta(seconds=5),
+                "generation-1",
+                operation_id="renew-first",
+            )
+        )
+        second = asyncio.create_task(
+            store.renew(
+                "run-generation-cancel",
+                "same-owner",
+                timedelta(seconds=5),
+                "generation-2",
+                operation_id="renew-second",
+            )
+        )
+        await asyncio.gather(
+            asyncio.to_thread(store.started["generation-1"].wait, 1),
+            asyncio.to_thread(store.started["generation-2"].wait, 1),
+        )
+
+        store.cancel_renew(
+            "run-generation-cancel",
+            "same-owner",
+            generation="generation-1",
+            operation_id="renew-first",
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert not second.done()
+
+        store.allow["generation-2"].set()
+        lease = await second
+        assert lease.generation == "generation-2"
+        await store.close()
+
+    asyncio.run(run())
+
+
+def test_old_generation_cancel_release_does_not_cancel_new_generation(tmp_path) -> None:
+    class BlockingReleaseStore(SQLiteRunLeaseStore):
+        def __init__(self, path):
+            super().__init__(path)
+            self.started = {"generation-1": threading.Event(), "generation-2": threading.Event()}
+            self.allow = {"generation-1": threading.Event(), "generation-2": threading.Event()}
+
+        def _release_attempt(
+            self, run_id, owner_id, generation, cancellation, timeout
+        ):
+            self.started[generation].set()
+            while not cancellation.is_set() and not self.allow[generation].wait(0.001):
+                pass
+            if cancellation.is_set():
+                return leases_module._SQLiteReleaseAttempt.CANCELLED
+            return leases_module._SQLiteReleaseAttempt.RELEASED
+
+    async def run() -> None:
+        store = BlockingReleaseStore(tmp_path / "generation-release-cancel.db")
+        await store.initialize()
+        first = asyncio.create_task(
+            store.release(
+                "run-generation-cancel",
+                "same-owner",
+                "generation-1",
+                operation_id="release-first",
+            )
+        )
+        second = asyncio.create_task(
+            store.release(
+                "run-generation-cancel",
+                "same-owner",
+                "generation-2",
+                operation_id="release-second",
+            )
+        )
+        await asyncio.gather(
+            asyncio.to_thread(store.started["generation-1"].wait, 1),
+            asyncio.to_thread(store.started["generation-2"].wait, 1),
+        )
+
+        store.cancel_release(
+            "run-generation-cancel",
+            "same-owner",
+            generation="generation-1",
+            operation_id="release-first",
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert not second.done()
+
+        store.allow["generation-2"].set()
+        await second
+        await store.close()
+
+    asyncio.run(run())
+
+
 def test_guard_uncertainty_does_not_leak_into_next_execution() -> None:
     async def run() -> None:
         class Store:
@@ -1642,6 +1831,7 @@ def test_terminal_audits_expiry_during_release() -> None:
 
             async def release(self, run_id, owner_id, generation=None):
                 clock.advance(6)
+                await asyncio.sleep(0.06)
 
         class TerminalIterator:
             def __aiter__(self):
@@ -1668,6 +1858,40 @@ def test_terminal_audits_expiry_during_release() -> None:
 
         assert events[-1].type is RuntimeEventType.RUN_COMPLETED
         assert events[-1].metadata["lease_ownership_lost_after_terminal"] is True
+
+    asyncio.run(run())
+
+
+def test_terminal_does_not_report_expiry_after_successful_release() -> None:
+    async def run() -> None:
+        clock = MutableClock()
+
+        class Store:
+            async def acquire(self, run_id, owner_id, ttl):
+                now = clock()
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl, generation=None):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id, generation=None):
+                return None
+
+        async def events():
+            yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
+
+        coordinator = RunLeaseCoordinator(
+            Store(),
+            run_id="run-expiry-after-release",
+            owner_id="owner-expiry-after-release",
+            ttl=timedelta(seconds=5),
+            heartbeat_interval=timedelta(seconds=1),
+            clock=clock,
+        )
+        output = [event async for event in coordinator.stream(events())]
+
+        clock.advance(6)
+        assert output[-1].metadata.get("lease_ownership_lost_after_terminal") is None
 
     asyncio.run(run())
 
