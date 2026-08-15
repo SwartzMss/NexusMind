@@ -86,6 +86,7 @@ class ChatRuntime:
         self._lease_heartbeat_interval = lease_heartbeat_interval
         self._lease_release_timeout = lease_release_timeout
         self._lease_coordinator: RunLeaseCoordinator | None = None
+        self._lease_execution_active = False
 
     async def stream_user_message(
         self,
@@ -94,40 +95,50 @@ class ChatRuntime:
         system_prompt: str | None = None,
         tools: list[ToolDefinition] | None = None,
     ) -> AsyncIterator[RuntimeEvent]:
-        messages: list[Message] = []
-        if system_prompt:
-            messages.append(Message(role=MessageRole.SYSTEM, content=system_prompt))
-        messages.append(Message(role=MessageRole.USER, content=content))
-        request = HarnessRequest(
-            messages=tuple(messages),
-            tools=tuple(tools or ()),
-            limits=self._harness.limits,
-        )
-        execution = self._harness.create_execution(request)
-        stream = execution.stream()
-        if self._checkpoint_store is not None:
-            stream = CheckpointCoordinator(
-                execution,
-                self._checkpoint_store,
-                run_id=self._checkpoint_run_id,
-                start_sequence=self._checkpoint_sequence,
-                save_terminal=self._save_terminal_checkpoint,
-            ).stream()
         if self._lease_store is not None:
-            self._lease_coordinator = RunLeaseCoordinator(
-                self._lease_store,
-                run_id=self._lease_run_id,
-                owner_id=self._lease_owner_id,
-                ttl=self._lease_ttl,
-                heartbeat_interval=self._lease_heartbeat_interval,
-                lease_release_timeout=self._lease_release_timeout,
-                guard=self._lease_guard,
-            )
-            stream = self._lease_coordinator.stream(stream)
+            # The model and tool wrappers share one ownership guard, so a
+            # leased runtime must not overlap executions.
+            if self._lease_execution_active:
+                raise RuntimeError("Leased ChatRuntime does not support concurrent executions")
+            self._lease_execution_active = True
+        execution = None
         try:
+            messages: list[Message] = []
+            if system_prompt:
+                messages.append(Message(role=MessageRole.SYSTEM, content=system_prompt))
+            messages.append(Message(role=MessageRole.USER, content=content))
+            request = HarnessRequest(
+                messages=tuple(messages),
+                tools=tuple(tools or ()),
+                limits=self._harness.limits,
+            )
+            execution = self._harness.create_execution(request)
+            stream = execution.stream()
+            if self._checkpoint_store is not None:
+                stream = CheckpointCoordinator(
+                    execution,
+                    self._checkpoint_store,
+                    run_id=self._checkpoint_run_id,
+                    start_sequence=self._checkpoint_sequence,
+                    save_terminal=self._save_terminal_checkpoint,
+                ).stream()
+            if self._lease_store is not None:
+                self._lease_coordinator = RunLeaseCoordinator(
+                    self._lease_store,
+                    run_id=self._lease_run_id,
+                    owner_id=self._lease_owner_id,
+                    ttl=self._lease_ttl,
+                    heartbeat_interval=self._lease_heartbeat_interval,
+                    lease_release_timeout=self._lease_release_timeout,
+                    guard=self._lease_guard,
+                )
+                stream = self._lease_coordinator.stream(stream)
             async for event in stream:
                 yield event
         finally:
             # Preserve the compatibility snapshot exposed by HarnessRunner.
-            self._harness.state = execution.state
-            self._harness.stop_reason = execution.stop_reason
+            if execution is not None:
+                self._harness.state = execution.state
+                self._harness.stop_reason = execution.stop_reason
+            if self._lease_store is not None:
+                self._lease_execution_active = False

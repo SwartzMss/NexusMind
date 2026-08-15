@@ -717,6 +717,58 @@ def test_terminal_closes_wrapped_iterator() -> None:
     asyncio.run(run())
 
 
+def test_cancellation_during_terminal_iterator_close_preserves_outcome() -> None:
+    async def run() -> None:
+        class Store:
+            def __init__(self) -> None:
+                self.released = asyncio.Event()
+
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id, generation=None):
+                self.released.set()
+
+        class PausingIterator:
+            def __init__(self) -> None:
+                self.close_started = asyncio.Event()
+                self.allow_close = asyncio.Event()
+                self.delivered = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.delivered:
+                    raise StopAsyncIteration
+                self.delivered = True
+                return RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
+
+            async def aclose(self):
+                self.close_started.set()
+                await self.allow_close.wait()
+
+        store = Store()
+        iterator = PausingIterator()
+        coordinator = RunLeaseCoordinator(store, run_id="run-close-cancel", owner_id="owner-close-cancel")
+        task = asyncio.create_task(_collect_events(coordinator.stream(iterator)))
+        await iterator.close_started.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        iterator.allow_close.set()
+        events = await task
+
+        assert events[-1].type is RuntimeEventType.RUN_COMPLETED
+        assert store.released.is_set()
+
+    asyncio.run(run())
+
+
 def test_renew_rejects_clock_rollback(tmp_path) -> None:
     async def run() -> None:
         clock = MutableClock()
@@ -728,6 +780,78 @@ def test_renew_rejects_clock_rollback(tmp_path) -> None:
         with pytest.raises(RunLeaseStoreError, match="clock moved backwards"):
             await store.renew("run-clock-rollback", "owner", timedelta(seconds=10), lease.generation)
         assert await store.inspect("run-clock-rollback") == lease
+
+    asyncio.run(run())
+
+
+def test_renew_rejects_nonmonotonic_lease_timestamps(tmp_path) -> None:
+    async def run() -> None:
+        clock = MutableClock()
+        store = SQLiteRunLeaseStore(tmp_path / "nonmonotonic-renew.db", clock=clock)
+        await store.initialize()
+        lease = await store.acquire("run-nonmonotonic", "owner", timedelta(seconds=10))
+
+        clock.advance(1)
+        with pytest.raises(RunLeaseStoreError, match="Lease expiry did not advance"):
+            await store.renew("run-nonmonotonic", "owner", timedelta(seconds=1), lease.generation)
+        assert await store.inspect("run-nonmonotonic") == lease
+
+        clock.value = lease.heartbeat_at
+        with pytest.raises(RunLeaseStoreError, match="Lease heartbeat did not advance"):
+            await store.renew("run-nonmonotonic", "owner", timedelta(seconds=10), lease.generation)
+        assert await store.inspect("run-nonmonotonic") == lease
+
+    asyncio.run(run())
+
+
+def test_leased_chat_runtime_rejects_concurrent_executions() -> None:
+    async def run() -> None:
+        class Store:
+            def __init__(self) -> None:
+                self.release_calls = 0
+
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id, generation=None):
+                self.release_calls += 1
+
+        class PausingModel(ChatModel):
+            def __init__(self) -> None:
+                self.started = asyncio.Event()
+                self.allow_finish = asyncio.Event()
+
+            async def stream(self, messages, tools=None):
+                self.started.set()
+                yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+                await self.allow_finish.wait()
+                yield RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="done")
+                yield RuntimeEvent(RuntimeEventType.MODEL_TURN_COMPLETED, finish_reason="stop")
+
+        store = Store()
+        model = PausingModel()
+        runtime = ChatRuntime(
+            model,
+            lease_store=store,
+            lease_run_id="run-concurrent-runtime",
+            lease_owner_id="owner-concurrent-runtime",
+            lease_heartbeat_interval=timedelta(seconds=1),
+        )
+        first = asyncio.create_task(_collect_events(runtime.stream_user_message("first")))
+        await model.started.wait()
+
+        second = asyncio.create_task(_collect_events(runtime.stream_user_message("second")))
+        with pytest.raises(RuntimeError, match="does not support concurrent executions"):
+            await second
+
+        model.allow_finish.set()
+        events = await first
+        assert events[-1].type is RuntimeEventType.RUN_COMPLETED
+        assert store.release_calls == 1
 
     asyncio.run(run())
 

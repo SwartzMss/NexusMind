@@ -282,8 +282,7 @@ class RunLeaseCoordinator:
                 except StopAsyncIteration:
                     break
                 if event.type in {RuntimeEventType.RUN_COMPLETED, RuntimeEventType.RUN_FAILED}:
-                    event = await self._finalize_terminal(event)
-                    await self._close_iterator(iterator)
+                    event = await self._finalize_terminal(event, iterator)
                     self._terminal_cleanup_done = True
                     yield event
                     break
@@ -407,13 +406,16 @@ class RunLeaseCoordinator:
             # observable even while a renew call is blocked.
             await asyncio.sleep(min(delay, 0.05))
 
-    async def _finalize_terminal(self, event: RuntimeEvent) -> RuntimeEvent:
+    async def _finalize_terminal(
+        self, event: RuntimeEvent, iterator: AsyncIterator[RuntimeEvent]
+    ) -> RuntimeEvent:
         ownership_lost = False
         try:
             self._guard.assert_owned()
         except RunLeaseError:
             ownership_lost = True
         await self._stop_heartbeat()
+        await self._close_iterator_barrier(iterator)
         ownership_lost = ownership_lost or self._guard.ownership_error is not None
         await self._release_with_deadline(propagate_cancellation=False)
         metadata = dict(event.metadata)
@@ -422,6 +424,15 @@ class RunLeaseCoordinator:
         if self.release_error is not None:
             metadata["lease_release_failed"] = True
         return replace(event, metadata=metadata)
+
+    async def _close_iterator_barrier(self, iterator: AsyncIterator[RuntimeEvent]) -> None:
+        close_task = asyncio.create_task(self._close_iterator(iterator))
+        while not close_task.done():
+            try:
+                await asyncio.shield(close_task)
+            except asyncio.CancelledError:
+                continue
+        close_task.result()
 
     async def _release_with_deadline(self, *, propagate_cancellation: bool) -> None:
         release_task = asyncio.create_task(self._release())
@@ -1007,10 +1018,15 @@ class SQLiteRunLeaseStore:
                     raise RunLeaseOwnershipLost("Run lease generation changed")
                 if now < current.heartbeat_at:
                     raise RunLeaseStoreError("Lease clock moved backwards during renewal")
+                if now <= current.heartbeat_at:
+                    raise RunLeaseStoreError("Lease heartbeat did not advance")
                 if current.is_expired(now):
                     raise RunLeaseOwnershipLost("Run lease expired before renewal")
+                expires_at = now + ttl
+                if expires_at <= current.expires_at:
+                    raise RunLeaseStoreError("Lease expiry did not advance")
                 lease = RunLease(
-                    run_id, owner_id, current.acquired_at, now, now + ttl,
+                    run_id, owner_id, current.acquired_at, now, expires_at,
                     generation=current.generation,
                 )
                 cursor = db.execute(
