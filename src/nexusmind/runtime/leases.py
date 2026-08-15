@@ -162,6 +162,13 @@ class RunLeaseOwnershipGuard:
     def clear(self) -> None:
         self._lease = None
 
+    def begin_execution(self) -> None:
+        """Reset per-execution proof state before acquiring a new lease."""
+        self._lease = None
+        self._ownership_error = None
+        self._execution_uncertain = False
+        self._renewal_event.clear()
+
     @property
     def execution_uncertain(self) -> bool:
         return self._execution_uncertain
@@ -255,6 +262,7 @@ class RunLeaseCoordinator:
         if self._stream_started:
             raise RuntimeError("RunLeaseCoordinator can only be streamed once")
         self._stream_started = True
+        self._guard.begin_execution()
         acquired = False
         iterator = events.__aiter__()
         try:
@@ -275,6 +283,7 @@ class RunLeaseCoordinator:
                     break
                 if event.type in {RuntimeEventType.RUN_COMPLETED, RuntimeEventType.RUN_FAILED}:
                     event = await self._finalize_terminal(event)
+                    await self._close_iterator(iterator)
                     self._terminal_cleanup_done = True
                     yield event
                     break
@@ -288,10 +297,7 @@ class RunLeaseCoordinator:
             active_error = sys.exc_info()[1]
             await self._stop_heartbeat()
             if not self._terminal_cleanup_done:
-                try:
-                    await iterator.aclose()
-                except (AttributeError, RuntimeError):
-                    pass
+                await self._close_iterator(iterator)
             if acquired and not self._terminal_cleanup_done and not self._guard.execution_uncertain:
                 try:
                     await self._release_with_deadline(propagate_cancellation=True)
@@ -301,6 +307,13 @@ class RunLeaseCoordinator:
                         raise
                 if self.release_error is not None and active_error is None:
                     raise self.release_error
+
+    @staticmethod
+    async def _close_iterator(iterator: AsyncIterator[RuntimeEvent]) -> None:
+        try:
+            await iterator.aclose()
+        except (AttributeError, RuntimeError):
+            pass
 
     async def _next_event(self, iterator: AsyncIterator[RuntimeEvent]) -> RuntimeEvent:
         next_task = asyncio.create_task(anext(iterator))
@@ -656,9 +669,17 @@ class SQLiteRunLeaseStore:
         release_task = asyncio.create_task(
             self.release(lease.run_id, lease.owner_id, lease.generation)
         )
+        deadline = asyncio.get_running_loop().time() + self._timeout
         while not release_task.done():
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                _retain_background_release_task(release_task)
+                return
             try:
-                await asyncio.shield(release_task)
+                await asyncio.wait_for(asyncio.shield(release_task), timeout=remaining)
+            except asyncio.TimeoutError:
+                _retain_background_release_task(release_task)
+                return
             except asyncio.CancelledError:
                 continue
         try:
@@ -944,14 +965,6 @@ class SQLiteRunLeaseStore:
                     db.rollback()
                     return _SQLiteLeaseAttempt.CANCELLED  # type: ignore[return-value]
                 db.commit()
-                if cancellation is not None and cancellation.is_set():
-                    db.execute("BEGIN IMMEDIATE")
-                    db.execute(
-                        "DELETE FROM run_leases WHERE run_id = ? AND owner_id = ? AND generation = ?",
-                        (lease.run_id, lease.owner_id, lease.generation),
-                    )
-                    db.commit()
-                    return _SQLiteLeaseAttempt.CANCELLED  # type: ignore[return-value]
                 return lease
         except (RunLeaseUnavailable, RunLeaseStoreError):
             raise
@@ -992,6 +1005,8 @@ class SQLiteRunLeaseStore:
                     raise RunLeaseOwnershipLost("Run lease is owned by another owner")
                 if generation is not None and current.generation != generation:
                     raise RunLeaseOwnershipLost("Run lease generation changed")
+                if now < current.heartbeat_at:
+                    raise RunLeaseStoreError("Lease clock moved backwards during renewal")
                 if current.is_expired(now):
                     raise RunLeaseOwnershipLost("Run lease expired before renewal")
                 lease = RunLease(

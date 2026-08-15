@@ -574,6 +574,164 @@ def test_cancelled_acquire_after_commit_does_not_leave_ghost_lease(tmp_path) -> 
     asyncio.run(run())
 
 
+def test_cancelled_acquire_compensates_after_writer_lock_wait(tmp_path) -> None:
+    class CommitPausedConnection(sqlite3.Connection):
+        armed = False
+        committed = threading.Event()
+        allow_return = threading.Event()
+
+        def commit(self) -> None:
+            super().commit()
+            if type(self).armed:
+                type(self).committed.set()
+                type(self).allow_return.wait(1)
+
+    class CommitPausedStore(SQLiteRunLeaseStore):
+        def _connect(self, timeout=None):
+            resolved_timeout = self._timeout if timeout is None else timeout
+            return sqlite3.connect(
+                self._path,
+                timeout=resolved_timeout,
+                isolation_level=None,
+                factory=CommitPausedConnection,
+            )
+
+    async def run() -> None:
+        path = tmp_path / "cancel-acquire-lock.db"
+        store = CommitPausedStore(path, timeout=1)
+        await store.initialize()
+        holder = sqlite3.connect(path, isolation_level=None)
+        task = None
+        CommitPausedConnection.armed = True
+        try:
+            task = asyncio.create_task(
+                store.acquire("run-cancel-acquire-lock", "owner", timedelta(seconds=5))
+            )
+            assert await asyncio.to_thread(CommitPausedConnection.committed.wait, 1)
+            task.cancel()
+            holder.execute("BEGIN IMMEDIATE")
+            CommitPausedConnection.allow_return.set()
+            await asyncio.sleep(0.1)
+            holder.rollback()
+            holder.close()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert await store.inspect("run-cancel-acquire-lock") is None
+        finally:
+            CommitPausedConnection.armed = False
+            CommitPausedConnection.allow_return.set()
+            if task is not None and not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            with suppress(Exception):
+                holder.rollback()
+            with suppress(Exception):
+                holder.close()
+            await store.close()
+
+    asyncio.run(run())
+
+
+def test_guard_uncertainty_does_not_leak_into_next_execution() -> None:
+    async def run() -> None:
+        class Store:
+            def __init__(self) -> None:
+                self.acquire_calls = 0
+                self.release_calls = 0
+
+            async def acquire(self, run_id, owner_id, ttl):
+                self.acquire_calls += 1
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id, generation=None):
+                self.release_calls += 1
+
+        store = Store()
+        guard = RunLeaseOwnershipGuard()
+
+        async def first_events():
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+            guard.mark_execution_uncertain()
+
+        first = RunLeaseCoordinator(
+            store,
+            run_id="run-uncertainty-reset",
+            owner_id="owner-uncertainty-reset",
+            heartbeat_interval=timedelta(seconds=1),
+            guard=guard,
+        )
+        events = [event async for event in first.stream(first_events())]
+        assert events[-1].type is RuntimeEventType.MODEL_STARTED
+        assert store.release_calls == 0
+
+        async def second_events():
+            yield RuntimeEvent(RuntimeEventType.MODEL_STARTED)
+
+        second = RunLeaseCoordinator(
+            store,
+            run_id="run-uncertainty-reset",
+            owner_id="owner-uncertainty-reset",
+            heartbeat_interval=timedelta(seconds=1),
+            guard=guard,
+        )
+        events = [event async for event in second.stream(second_events())]
+        assert events[-1].type is RuntimeEventType.MODEL_STARTED
+        assert store.acquire_calls == 2
+        assert store.release_calls == 1
+
+    asyncio.run(run())
+
+
+def test_terminal_closes_wrapped_iterator() -> None:
+    async def run() -> None:
+        class Store:
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id, generation=None):
+                return None
+
+        closed = asyncio.Event()
+
+        async def wrapped_events():
+            try:
+                yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
+            finally:
+                closed.set()
+
+        coordinator = RunLeaseCoordinator(Store(), run_id="run-close", owner_id="owner-close")
+        events = [event async for event in coordinator.stream(wrapped_events())]
+
+        assert events[-1].type is RuntimeEventType.RUN_COMPLETED
+        assert closed.is_set()
+
+    asyncio.run(run())
+
+
+def test_renew_rejects_clock_rollback(tmp_path) -> None:
+    async def run() -> None:
+        clock = MutableClock()
+        store = SQLiteRunLeaseStore(tmp_path / "clock-rollback.db", clock=clock)
+        await store.initialize()
+        lease = await store.acquire("run-clock-rollback", "owner", timedelta(seconds=10))
+        clock.value -= timedelta(seconds=1)
+
+        with pytest.raises(RunLeaseStoreError, match="clock moved backwards"):
+            await store.renew("run-clock-rollback", "owner", timedelta(seconds=10), lease.generation)
+        assert await store.inspect("run-clock-rollback") == lease
+
+    asyncio.run(run())
+
+
 def test_invalid_or_closed_store_fails_with_public_errors(tmp_path) -> None:
     async def run() -> None:
         path = tmp_path / "leases.db"
