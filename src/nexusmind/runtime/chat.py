@@ -87,6 +87,7 @@ class ChatRuntime:
         self._lease_release_timeout = lease_release_timeout
         self._lease_coordinator: RunLeaseCoordinator | None = None
         self._lease_execution_token: object | None = None
+        self._latest_execution_token: object | None = None
 
     async def stream_user_message(
         self,
@@ -95,14 +96,14 @@ class ChatRuntime:
         system_prompt: str | None = None,
         tools: list[ToolDefinition] | None = None,
     ) -> AsyncIterator[RuntimeEvent]:
-        execution_token: object | None = None
+        execution_token = object()
         if self._lease_store is not None:
             # The model and tool wrappers share one ownership guard, so a
             # leased runtime must not overlap executions.
             if self._lease_execution_token is not None:
                 raise RuntimeError("Leased ChatRuntime does not support concurrent executions")
-            execution_token = object()
             self._lease_execution_token = execution_token
+        self._latest_execution_token = execution_token
         execution = None
         try:
             messages: list[Message] = []
@@ -137,6 +138,12 @@ class ChatRuntime:
                 stream = self._lease_coordinator.stream(stream)
             async for event in stream:
                 if (
+                    event.type in {RuntimeEventType.RUN_COMPLETED, RuntimeEventType.RUN_FAILED}
+                    and self._latest_execution_token is execution_token
+                ):
+                    self._harness.state = execution.state
+                    self._harness.stop_reason = execution.stop_reason
+                if (
                     execution_token is not None
                     and event.type in {RuntimeEventType.RUN_COMPLETED, RuntimeEventType.RUN_FAILED}
                     and self._lease_execution_token is execution_token
@@ -145,7 +152,10 @@ class ChatRuntime:
                 yield event
         finally:
             # Preserve the compatibility snapshot exposed by HarnessRunner.
-            if execution is not None:
+            if (
+                execution is not None
+                and self._latest_execution_token is execution_token
+            ):
                 self._harness.state = execution.state
                 self._harness.stop_reason = execution.stop_reason
             if (

@@ -1603,6 +1603,104 @@ def test_leased_chat_runtime_rejects_concurrent_executions() -> None:
     asyncio.run(run())
 
 
+def test_old_terminal_stream_close_cannot_overwrite_new_execution_snapshot() -> None:
+    async def run() -> None:
+        class Store:
+            def __init__(self) -> None:
+                self.acquire_calls = 0
+
+            async def acquire(self, run_id, owner_id, ttl):
+                self.acquire_calls += 1
+                now = datetime.now(timezone.utc)
+                return RunLease(
+                    run_id,
+                    owner_id,
+                    now,
+                    now,
+                    now + ttl,
+                    generation=f"generation-{self.acquire_calls}",
+                )
+
+            async def renew(self, run_id, owner_id, ttl, generation=None):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id, generation=None):
+                return None
+
+        async def next_terminal(stream):
+            while True:
+                event = await anext(stream)
+                if event.type is RuntimeEventType.RUN_COMPLETED:
+                    return event
+
+        runtime = ChatRuntime(
+            CountingTextModel(),
+            lease_store=Store(),
+            lease_run_id="run-snapshot-race",
+            lease_owner_id="owner-snapshot-race",
+            lease_heartbeat_interval=timedelta(seconds=1),
+        )
+        first_stream = runtime.stream_user_message("first")
+        await next_terminal(first_stream)
+        first_state = runtime._harness.state
+        assert first_state is not None
+
+        second_events = [
+            event async for event in runtime.stream_user_message("second")
+        ]
+        assert second_events[-1].type is RuntimeEventType.RUN_COMPLETED
+        second_state = runtime._harness.state
+        assert second_state is not first_state
+
+        await first_stream.aclose()
+        assert runtime._harness.state is second_state
+
+    asyncio.run(run())
+
+
+def test_leased_runtime_can_be_reused_across_asyncio_run_calls() -> None:
+    class Store:
+        def __init__(self) -> None:
+            self.acquire_calls = 0
+
+        async def acquire(self, run_id, owner_id, ttl):
+            self.acquire_calls += 1
+            now = datetime.now(timezone.utc)
+            return RunLease(
+                run_id,
+                owner_id,
+                now,
+                now,
+                now + ttl,
+                generation=f"generation-{self.acquire_calls}",
+            )
+
+        async def renew(self, run_id, owner_id, ttl, generation=None):
+            raise AssertionError("heartbeat should not run")
+
+        async def release(self, run_id, owner_id, generation=None):
+            return None
+
+    store = Store()
+    runtime = ChatRuntime(
+        CountingTextModel(),
+        lease_store=store,
+        lease_run_id="run-cross-loop",
+        lease_owner_id="owner-cross-loop",
+        lease_heartbeat_interval=timedelta(seconds=1),
+    )
+
+    async def collect_once(content):
+        return [event async for event in runtime.stream_user_message(content)]
+
+    first = asyncio.run(collect_once("first"))
+    second = asyncio.run(collect_once("second"))
+
+    assert first[-1].type is RuntimeEventType.RUN_COMPLETED
+    assert second[-1].type is RuntimeEventType.RUN_COMPLETED
+    assert store.acquire_calls == 2
+
+
 def test_invalid_or_closed_store_fails_with_public_errors(tmp_path) -> None:
     async def run() -> None:
         path = tmp_path / "leases.db"

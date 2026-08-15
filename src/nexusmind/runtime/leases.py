@@ -168,7 +168,7 @@ class RunLeaseOwnershipGuard:
         self._lease = None
         self._ownership_error = None
         self._execution_uncertain = False
-        self._renewal_event.clear()
+        self._renewal_event = asyncio.Event()
 
     @property
     def execution_uncertain(self) -> bool:
@@ -339,6 +339,8 @@ class RunLeaseCoordinator:
                     {next_task, heartbeat_task, expiry_task, renewal_task},
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+                if renewal_task in done:
+                    renewal_task.result()
                 if renewal_task in done and heartbeat_task not in done:
                     if next_task in done:
                         break
