@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import signal
 import subprocess
 from pathlib import Path
 import stat
@@ -87,6 +86,13 @@ def test_windows_job_preflight_reports_stable_config_error(monkeypatch) -> None:
 
     with pytest.raises(CommandConfigError, match="Windows job support"):
         command_module._validate_windows_job_support()
+
+
+def test_command_profiles_reject_unsupported_platform(monkeypatch) -> None:
+    monkeypatch.setattr(command_module.os, "name", "posix")
+
+    with pytest.raises(CommandConfigError, match="Windows only"):
+        command_module.validate_command_execution_platform()
 
 
 def test_command_config_loads_profiles_and_dynamic_schema(tmp_path: Path) -> None:
@@ -236,75 +242,6 @@ def test_run_command_reports_start_error_when_executable_disappears_after_load(t
     assert "could not be started" in result.error.message
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX executable permission check")
-def test_command_profile_rejects_non_executable_file(tmp_path: Path) -> None:
-    tool = tmp_path / "tool"
-    tool.write_text("#!/bin/sh\n", encoding="utf-8")
-    tool.chmod(0o644)
-    config_path = tmp_path / "commands.json"
-    _write_config(config_path, {"bad": {"argv": [str(tool)], "cwd": ".", "timeout_seconds": 5}})
-
-    with pytest.raises(CommandConfigError, match="not executable"):
-        load_command_config(config_path, Workspace(tmp_path))
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX supervisor pipe protocol")
-def test_posix_target_cannot_forge_cleanup_status_file(tmp_path: Path) -> None:
-    marker = tmp_path / "forged-marker.txt"
-    pid_path = tmp_path / "detached.pid"
-    config_path = tmp_path / "commands.json"
-    child_code = (
-        "import os,pathlib,time; "
-        f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid())); "
-        f"time.sleep(10); pathlib.Path({str(marker)!r}).write_text('alive')"
-    )
-    code = (
-        "import json,os,pathlib,signal,subprocess,sys,tempfile; "
-        "fake=pathlib.Path(tempfile.gettempdir())/'nexusmind-command-forged'/'status.json'; "
-        "fake.parent.mkdir(exist_ok=True); "
-        "fake.write_text(json.dumps({'target_started':True,'start_succeeded':True,'root_exit_code':0,'cleanup_succeeded':True}), encoding='utf-8'); "
-        f"subprocess.Popen([sys.executable,'-c',{child_code!r}],start_new_session=True,"
-        "env={'PATH': os.environ.get('PATH','')},stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
-        "os.kill(os.getppid(), signal.SIGKILL)"
-    )
-    _write_config(config_path, {"forge": {"argv": [sys.executable, "-c", code], "cwd": ".", "timeout_seconds": 5}})
-    executor = ToolExecutor(_registry(RunCommandTool(load_command_config(config_path, Workspace(tmp_path)))))
-
-    try:
-        result = asyncio.run(executor.execute(ToolCall(id="1", name="run_command", arguments={"profile": "forge"})))
-    finally:
-        deadline = time.monotonic() + 2
-        while not pid_path.exists() and time.monotonic() < deadline:
-            time.sleep(0.02)
-        if pid_path.exists():
-            try:
-                os.kill(int(pid_path.read_text(encoding="ascii")), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-
-    assert result.error is not None
-    assert result.error.code is ToolErrorCode.EXECUTION_FAILED
-    assert not marker.exists()
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX supervisor signal behavior")
-@pytest.mark.parametrize("supervisor_signal", [signal.SIGTERM, signal.SIGINT])
-def test_posix_target_cannot_signal_supervisor_into_normal_result(
-    tmp_path: Path,
-    supervisor_signal: signal.Signals,
-) -> None:
-    config_path = tmp_path / "commands.json"
-    code = f"import os,signal; os.kill(os.getppid(), {int(supervisor_signal)})"
-    _write_config(config_path, {"signal": {"argv": [sys.executable, "-c", code], "cwd": ".", "timeout_seconds": 5}})
-    executor = ToolExecutor(_registry(RunCommandTool(load_command_config(config_path, Workspace(tmp_path)))))
-
-    result = asyncio.run(executor.execute(ToolCall(id="1", name="run_command", arguments={"profile": "signal"})))
-
-    assert result.error is not None
-    assert result.error.code is ToolErrorCode.EXECUTION_FAILED
-    assert "status could not be verified" in result.error.message
-
-
 def test_process_budget_reserves_start_slot_atomically() -> None:
     budget = ProcessExecutionBudget(ProcessExecutionLimits(max_process_starts=1, max_total_duration_seconds=300))
 
@@ -430,32 +367,6 @@ def test_tool_executor_cancellation_cleans_up_process(tmp_path: Path) -> None:
     assert not marker.exists()
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor initialization")
-def test_immediate_cancellation_after_supervisor_spawn_preserves_cancellation(
-    tmp_path: Path, monkeypatch
-) -> None:
-    config_path = tmp_path / "commands.json"
-    _write_config(
-        config_path,
-        {"slow": {"argv": [sys.executable, "-c", "import time; time.sleep(2)"], "cwd": ".", "timeout_seconds": 10}},
-    )
-    tool = RunCommandTool(load_command_config(config_path, Workspace(tmp_path)))
-    executor = ToolExecutor(_registry(tool), timeout=20)
-    real_create_subprocess_exec = command_module.asyncio.create_subprocess_exec
-
-    async def create_and_cancel(*args, **kwargs):
-        process = await real_create_subprocess_exec(*args, **kwargs)
-        task = asyncio.current_task()
-        assert task is not None
-        asyncio.get_running_loop().call_soon(task.cancel)
-        return process
-
-    monkeypatch.setattr(command_module.asyncio, "create_subprocess_exec", create_and_cancel)
-
-    with pytest.raises(asyncio.CancelledError):
-        asyncio.run(executor.execute(ToolCall(id="1", name="run_command", arguments={"profile": "slow"})))
-
-
 def test_cancellation_preserves_cancelled_error_when_cleanup_fails(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "commands.json"
     _write_config(config_path, {"slow": {"argv": [sys.executable, "-c", "import time; time.sleep(2)"], "cwd": ".", "timeout_seconds": 10}})
@@ -477,37 +388,6 @@ def test_cancellation_preserves_cancelled_error_when_cleanup_fails(monkeypatch, 
         asyncio.run(run_and_cancel())
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX process group cleanup")
-def test_cancellation_cleans_process_group_once(tmp_path: Path, monkeypatch) -> None:
-    marker = tmp_path / "marker.txt"
-    config_path = tmp_path / "commands.json"
-    code = f"import pathlib,time; time.sleep(2); pathlib.Path({str(marker)!r}).write_text('alive')"
-    _write_config(config_path, {"slow": {"argv": [sys.executable, "-c", code], "cwd": ".", "timeout_seconds": 10}})
-    executor = ToolExecutor(_registry(RunCommandTool(load_command_config(config_path, Workspace(tmp_path)))), timeout=20)
-    real_killpg = os.killpg
-    calls: list[int] = []
-
-    def counting_killpg(pid: int, sig: int) -> None:
-        calls.append(sig)
-        real_killpg(pid, sig)
-
-    monkeypatch.setattr(command_module.os, "killpg", counting_killpg)
-
-    async def run_and_cancel() -> None:
-        task = asyncio.create_task(executor.execute(ToolCall(id="1", name="run_command", arguments={"profile": "slow"})))
-        await asyncio.sleep(0.2)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-    asyncio.run(run_and_cancel())
-    time.sleep(2.5)
-
-    assert calls.count(signal.SIGTERM) <= 1
-    assert calls.count(signal.SIGKILL) <= 1
-    assert not marker.exists()
-
-
 def test_profile_timeout_cleans_up_child_process(tmp_path: Path) -> None:
     marker = tmp_path / "child-marker.txt"
     config_path = tmp_path / "commands.json"
@@ -525,114 +405,8 @@ def test_profile_timeout_cleans_up_child_process(tmp_path: Path) -> None:
     assert not marker.exists()
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX signal semantics")
-def test_profile_timeout_kills_child_that_ignores_sigterm(tmp_path: Path) -> None:
-    marker = tmp_path / "child-marker.txt"
-    config_path = tmp_path / "commands.json"
-    child_code = (
-        "import pathlib,signal,sys,time; "
-        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-        "sys.stdout.close(); sys.stderr.close(); "
-        f"time.sleep(3); pathlib.Path({str(marker)!r}).write_text('alive')"
-    )
-    parent_code = f"import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',{child_code!r}]); time.sleep(10)"
-    _write_config(config_path, {"tree": {"argv": [sys.executable, "-c", parent_code], "cwd": ".", "timeout_seconds": 1}})
-    executor = ToolExecutor(_registry(RunCommandTool(load_command_config(config_path, Workspace(tmp_path)))), timeout=10)
-
-    result = asyncio.run(executor.execute(ToolCall(id="1", name="run_command", arguments={"profile": "tree"})))
-    time.sleep(3.5)
-
-    assert result.error is None
-    assert result.output["timed_out"] is True
-    assert result.output["exit_code"] is None
-    assert not marker.exists()
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX detached process cleanup")
-def test_profile_timeout_kills_detached_setsid_child(tmp_path: Path) -> None:
-    marker = tmp_path / "detached-marker.txt"
-    config_path = tmp_path / "commands.json"
-    child_code = f"import pathlib,time; time.sleep(3); pathlib.Path({str(marker)!r}).write_text('alive')"
-    parent_code = (
-        f"import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',{child_code!r}],"
-        "start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); time.sleep(10)"
-    )
-    _write_config(config_path, {"tree": {"argv": [sys.executable, "-c", parent_code], "cwd": ".", "timeout_seconds": 1}})
-    executor = ToolExecutor(_registry(RunCommandTool(load_command_config(config_path, Workspace(tmp_path)))), timeout=20)
-
-    result = asyncio.run(executor.execute(ToolCall(id="1", name="run_command", arguments={"profile": "tree"})))
-    time.sleep(3.5)
-
-    assert result.error is None
-    assert result.output["timed_out"] is True
-    assert result.output["exit_code"] is None
-    assert not marker.exists()
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX detached process cleanup")
-def test_profile_timeout_kills_detached_child_with_clean_environment(tmp_path: Path) -> None:
-    marker = tmp_path / "clean-env-marker.txt"
-    config_path = tmp_path / "commands.json"
-    child_code = f"import pathlib,time; time.sleep(3); pathlib.Path({str(marker)!r}).write_text('alive')"
-    parent_code = (
-        "import os,subprocess,sys,time; "
-        f"subprocess.Popen([sys.executable,'-c',{child_code!r}],"
-        "start_new_session=True,env={'PATH': os.environ.get('PATH','')},"
-        "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); time.sleep(10)"
-    )
-    _write_config(config_path, {"tree": {"argv": [sys.executable, "-c", parent_code], "cwd": ".", "timeout_seconds": 1}})
-    executor = ToolExecutor(_registry(RunCommandTool(load_command_config(config_path, Workspace(tmp_path)))), timeout=20)
-
-    result = asyncio.run(executor.execute(ToolCall(id="1", name="run_command", arguments={"profile": "tree"})))
-    time.sleep(3.5)
-
-    assert result.error is None
-    assert result.output["timed_out"] is True
-    assert result.output["exit_code"] is None
-    assert not marker.exists()
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX supervisor isolation")
-def test_run_command_cleanup_does_not_kill_unrelated_child_process(tmp_path: Path) -> None:
-    unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
-    marker = tmp_path / "clean-env-marker.txt"
-    config_path = tmp_path / "commands.json"
-    child_code = f"import pathlib,time; time.sleep(3); pathlib.Path({str(marker)!r}).write_text('alive')"
-    parent_code = (
-        "import os,subprocess,sys,time; "
-        f"subprocess.Popen([sys.executable,'-c',{child_code!r}],"
-        "start_new_session=True,env={'PATH': os.environ.get('PATH','')},"
-        "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); time.sleep(10)"
-    )
-    try:
-        _write_config(config_path, {"tree": {"argv": [sys.executable, "-c", parent_code], "cwd": ".", "timeout_seconds": 1}})
-        executor = ToolExecutor(_registry(RunCommandTool(load_command_config(config_path, Workspace(tmp_path)))), timeout=20)
-
-        result = asyncio.run(executor.execute(ToolCall(id="1", name="run_command", arguments={"profile": "tree"})))
-        time.sleep(3.5)
-
-        assert result.error is None
-        assert result.output["timed_out"] is True
-        assert result.output["exit_code"] is None
-        assert not marker.exists()
-        assert unrelated.poll() is None
-    finally:
-        unrelated.terminate()
-        try:
-            unrelated.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            unrelated.kill()
-            unrelated.wait(timeout=2)
-
-
 def test_run_command_cleanup_timeout_budget_matches_platform() -> None:
-    if os.name == "nt":
-        assert command_module._command_cleanup_timeout_budget() == command_module.COMMAND_CLEANUP_GRACE_SECONDS * 4
-    else:
-        assert command_module._command_cleanup_timeout_budget() == (
-            command_module.COMMAND_POSIX_SUPERVISOR_CLEANUP_SECONDS
-            + (command_module.COMMAND_CLEANUP_GRACE_SECONDS * 3)
-        )
+    assert command_module._command_cleanup_timeout_budget() == command_module.COMMAND_CLEANUP_GRACE_SECONDS * 4
 
 
 def test_forced_cleanup_skips_hard_kill_after_soft_reap() -> None:
@@ -689,31 +463,6 @@ def test_successful_parent_exit_cleans_up_child_with_closed_pipe(tmp_path: Path)
     )
     _write_config(config_path, {"tree": {"argv": [sys.executable, "-c", parent_code], "cwd": ".", "timeout_seconds": 5}})
     executor = ToolExecutor(_registry(RunCommandTool(load_command_config(config_path, Workspace(tmp_path)))), timeout=10)
-
-    result = asyncio.run(executor.execute(ToolCall(id="1", name="run_command", arguments={"profile": "tree"})))
-    time.sleep(3.5)
-
-    assert result.error is None
-    assert result.output["timed_out"] is False
-    assert not marker.exists()
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX supervisor cleanup")
-def test_successful_parent_exit_cleans_up_detached_child_that_ignores_sigterm(tmp_path: Path) -> None:
-    marker = tmp_path / "ignored-detached-marker.txt"
-    config_path = tmp_path / "commands.json"
-    child_code = (
-        "import pathlib,signal,sys,time; "
-        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-        "sys.stdout.close(); sys.stderr.close(); "
-        f"time.sleep(3); pathlib.Path({str(marker)!r}).write_text('alive')"
-    )
-    parent_code = (
-        f"import subprocess,sys; subprocess.Popen([sys.executable,'-c',{child_code!r}],"
-        "start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)"
-    )
-    _write_config(config_path, {"tree": {"argv": [sys.executable, "-c", parent_code], "cwd": ".", "timeout_seconds": 5}})
-    executor = ToolExecutor(_registry(RunCommandTool(load_command_config(config_path, Workspace(tmp_path)))), timeout=20)
 
     result = asyncio.run(executor.execute(ToolCall(id="1", name="run_command", arguments={"profile": "tree"})))
     time.sleep(3.5)
