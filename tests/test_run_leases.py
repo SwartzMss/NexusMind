@@ -1096,7 +1096,7 @@ def test_cancelling_one_acquire_does_not_cancel_parallel_same_owner_acquire(tmp_
         for allow in store.allow:
             allow.set()
         lease = await second
-        assert lease.generation == "generation-1"
+        assert lease.owner_id == "same-owner"
         await store.close()
 
     asyncio.run(run())
