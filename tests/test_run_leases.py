@@ -777,6 +777,52 @@ def test_shared_guard_cannot_be_reused_while_an_execution_is_active() -> None:
     guard.end_execution(second_token)
 
 
+def test_ended_guard_session_cannot_prove_ownership() -> None:
+    guard = RunLeaseOwnershipGuard()
+    now = datetime.now(timezone.utc)
+    token = guard.begin_execution()
+    guard.prove(
+        RunLease("run-ended-session", "owner-ended-session", now, now, now + timedelta(seconds=10)),
+        initial=True,
+    )
+    guard.end_execution(token)
+
+    with pytest.raises(RunLeaseOwnershipLost, match="No active lease execution session"):
+        guard.assert_owned()
+
+
+def test_iterator_creation_failure_releases_guard_session() -> None:
+    async def run() -> None:
+        class Store:
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl, generation=None):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id, generation=None):
+                return None
+
+        class BrokenIterator:
+            def __aiter__(self):
+                raise RuntimeError("iterator construction failed")
+
+        guard = RunLeaseOwnershipGuard()
+        first = RunLeaseCoordinator(Store(), run_id="run-broken-iterator", owner_id="owner-a", guard=guard)
+        with pytest.raises(RuntimeError, match="iterator construction failed"):
+            [event async for event in first.stream(BrokenIterator())]
+
+        async def events():
+            yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
+
+        second = RunLeaseCoordinator(Store(), run_id="run-recovered", owner_id="owner-b", guard=guard)
+        output = [event async for event in second.stream(events())]
+        assert output[-1].type is RuntimeEventType.RUN_COMPLETED
+
+    asyncio.run(run())
+
+
 def test_nonterminal_release_failure_is_surfaced_when_no_primary_error() -> None:
     async def run() -> None:
         class Store:
@@ -2123,6 +2169,41 @@ def test_terminal_does_not_report_expiry_after_successful_release() -> None:
             Store(),
             run_id="run-expiry-after-release",
             owner_id="owner-expiry-after-release",
+            ttl=timedelta(seconds=5),
+            heartbeat_interval=timedelta(seconds=1),
+            clock=clock,
+        )
+        output = [event async for event in coordinator.stream(events())]
+
+        assert output[-1].metadata.get("lease_ownership_lost_after_terminal") is None
+
+    asyncio.run(run())
+
+
+def test_precise_successful_release_overrides_late_expiry_watchdog() -> None:
+    async def run() -> None:
+        clock = MutableClock()
+
+        class Store:
+            async def acquire(self, run_id, owner_id, ttl):
+                now = clock()
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl, generation=None):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id, generation=None):
+                clock.advance(6)
+                await asyncio.sleep(0.06)
+                return False
+
+        async def events():
+            yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
+
+        coordinator = RunLeaseCoordinator(
+            Store(),
+            run_id="run-precise-release",
+            owner_id="owner-precise-release",
             ttl=timedelta(seconds=5),
             heartbeat_interval=timedelta(seconds=1),
             clock=clock,
@@ -3622,6 +3703,7 @@ def test_lease_expiry_during_policy_blocks_tool_execution() -> None:
 def test_heartbeat_loss_before_next_model_blocks_model_call() -> None:
     async def run() -> None:
         guard = RunLeaseOwnershipGuard()
+        guard.begin_execution()
         now = datetime.now(timezone.utc)
         guard.prove(RunLease("run-model", "owner-model", now, now, now + timedelta(seconds=10)))
         model = CountingTextModel()
@@ -3637,6 +3719,7 @@ def test_heartbeat_loss_before_next_model_blocks_model_call() -> None:
 
 def test_ownership_loss_cannot_be_cleared_by_a_late_renewal() -> None:
     guard = RunLeaseOwnershipGuard()
+    guard.begin_execution()
     now = datetime.now(timezone.utc)
     lease = RunLease("run-irreversible", "owner-1", now, now, now + timedelta(seconds=10))
     guard.prove(lease, initial=True)

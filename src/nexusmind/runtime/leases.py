@@ -237,6 +237,8 @@ class RunLeaseOwnershipGuard:
         return max(0.0, (self._lease.expires_at - self._now()).total_seconds())
 
     def assert_owned(self) -> None:
+        if self._active_execution_token is None:
+            raise RunLeaseOwnershipLost("No active lease execution session")
         if self._ownership_error is not None:
             raise self._ownership_error
         if self._lease is None:
@@ -332,8 +334,9 @@ class RunLeaseCoordinator:
         self._stream_started = True
         self._execution_token = self._guard.begin_execution()
         acquired = False
-        iterator = events.__aiter__()
+        iterator: AsyncIterator[RuntimeEvent] | None = None
         try:
+            iterator = events.__aiter__()
             try:
                 lease = await self._acquire_store()
             except RunLeaseError:
@@ -368,7 +371,7 @@ class RunLeaseCoordinator:
             active_error = sys.exc_info()[1]
             await self._stop_heartbeat()
             close_error: BaseException | None = None
-            if not self._terminal_cleanup_done:
+            if not self._terminal_cleanup_done and iterator is not None:
                 close_error, unresolved_close_task = await self._close_iterator_barrier(iterator)
                 if unresolved_close_task is not None:
                     self._mark_execution_uncertain(unresolved_close_task)
@@ -559,7 +562,7 @@ class RunLeaseCoordinator:
         deadline = asyncio.get_running_loop().time() + self.lease_release_timeout.total_seconds()
         cancelled = False
         expired_during_release = False
-        release_expired = False
+        release_expiry: bool | None = None
         try:
             while not release_task.done():
                 remaining = deadline - asyncio.get_running_loop().time()
@@ -590,7 +593,7 @@ class RunLeaseCoordinator:
                     raise asyncio.CancelledError
                 return expired_during_release
             try:
-                release_expired = bool(release_task.result())
+                release_expiry = release_task.result()
             except asyncio.CancelledError as exc:
                 error = RunLeaseReleaseError("Run lease release cancelled")
                 error.__cause__ = exc
@@ -599,7 +602,9 @@ class RunLeaseCoordinator:
                 self.release_error = exc
             if cancelled and propagate_cancellation:
                 raise asyncio.CancelledError
-            return expired_during_release or release_expired
+            if release_expiry is not None:
+                return release_expiry
+            return expired_during_release
         finally:
             if expiry_task is not None and not expiry_task.done():
                 expiry_task.cancel()
@@ -807,10 +812,9 @@ class RunLeaseCoordinator:
             self._guard.end_execution(self._execution_token)
             self._execution_token = None
 
-    async def _release(self) -> bool:
+    async def _release(self) -> bool | None:
         try:
-            result = await self._release_store()
-            return result is True
+            return await self._release_store()
         except RunLeaseOwnershipLost as exc:
             self.release_ownership_lost = True
             raise RunLeaseReleaseError("Run lease release failed") from exc
