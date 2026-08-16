@@ -75,6 +75,7 @@ class RunLeaseReleaseError(RunLeaseStoreError):
 
 class _SQLiteReleaseAttempt(Enum):
     RELEASED = auto()
+    RELEASED_EXPIRED = auto()
     BUSY = auto()
     CANCELLED = auto()
 
@@ -141,7 +142,7 @@ class RunLeaseStore(Protocol):
         generation: str,
         *,
         operation_id: str | None = None,
-    ) -> None:
+    ) -> bool | None:
         ...
 
 
@@ -158,6 +159,7 @@ class RunLeaseOwnershipGuard:
         self._lease: RunLease | None = None
         self._ownership_error: RunLeaseError | None = None
         self._execution_uncertain = False
+        self._active_execution_token: object | None = None
         self._renewal_event = asyncio.Event()
 
     @property
@@ -198,12 +200,22 @@ class RunLeaseOwnershipGuard:
         if self._lease is not None and self._lease.generation == generation:
             self._lease = None
 
-    def begin_execution(self) -> None:
-        """Reset per-execution proof state before acquiring a new lease."""
+    def begin_execution(self) -> object:
+        """Start one isolated execution proof session."""
+        if self._active_execution_token is not None:
+            raise RunLeaseUnavailable("Run lease ownership guard is already in use")
         self._lease = None
         self._ownership_error = None
         self._execution_uncertain = False
         self._renewal_event = asyncio.Event()
+        token = object()
+        self._active_execution_token = token
+        return token
+
+    def end_execution(self, token: object) -> None:
+        """End a session without allowing a stale coordinator to end a newer one."""
+        if self._active_execution_token is token:
+            self._active_execution_token = None
 
     @property
     def execution_uncertain(self) -> bool:
@@ -293,8 +305,9 @@ class RunLeaseCoordinator:
         self.ownership_lost_after_progress = False
         self._terminal_cleanup_done = False
         self._generation: str | None = None
+        self._execution_token: object | None = None
         self._on_execution_resolved = on_execution_resolved
-        self._unresolved_task: asyncio.Task[object] | None = None
+        self._unresolved_tasks: set[asyncio.Task[object]] = set()
         self._store_operation_ids: dict[str, str | None] = {
             "acquire": None,
             "renew": None,
@@ -311,13 +324,13 @@ class RunLeaseCoordinator:
 
     @property
     def execution_unresolved(self) -> bool:
-        return self._unresolved_task is not None
+        return bool(self._unresolved_tasks)
 
     async def stream(self, events: AsyncIterator[RuntimeEvent]) -> AsyncIterator[RuntimeEvent]:
         if self._stream_started:
             raise RuntimeError("RunLeaseCoordinator can only be streamed once")
         self._stream_started = True
-        self._guard.begin_execution()
+        self._execution_token = self._guard.begin_execution()
         acquired = False
         iterator = events.__aiter__()
         try:
@@ -342,6 +355,7 @@ class RunLeaseCoordinator:
                 if event.type in {RuntimeEventType.RUN_COMPLETED, RuntimeEventType.RUN_FAILED}:
                     event = await self._finalize_terminal(event, iterator)
                     self._terminal_cleanup_done = True
+                    self._end_execution_if_resolved()
                     yield event
                     break
                 try:
@@ -358,17 +372,20 @@ class RunLeaseCoordinator:
                 close_error, unresolved_close_task = await self._close_iterator_barrier(iterator)
                 if unresolved_close_task is not None:
                     self._mark_execution_uncertain(unresolved_close_task)
-            if acquired and not self._terminal_cleanup_done and not self._guard.execution_uncertain:
-                try:
-                    await self._release_with_deadline(propagate_cancellation=True)
-                except RunLeaseError as exc:
-                    self.release_error = exc
-                    if active_error is None:
-                        raise
-                if self.release_error is not None and active_error is None:
-                    raise self.release_error
-            if close_error is not None and active_error is None and self.release_error is None:
-                raise RunLeaseStoreError("Run lease iterator cleanup failed") from close_error
+            try:
+                if acquired and not self._terminal_cleanup_done and not self._guard.execution_uncertain:
+                    try:
+                        await self._release_with_deadline(propagate_cancellation=True)
+                    except RunLeaseError as exc:
+                        self.release_error = exc
+                        if active_error is None:
+                            raise
+                    if self.release_error is not None and active_error is None:
+                        raise self.release_error
+                if close_error is not None and active_error is None and self.release_error is None:
+                    raise RunLeaseStoreError("Run lease iterator cleanup failed") from close_error
+            finally:
+                self._end_execution_if_resolved()
 
     @staticmethod
     async def _close_iterator(iterator: AsyncIterator[RuntimeEvent]) -> None:
@@ -770,27 +787,30 @@ class RunLeaseCoordinator:
 
     def _mark_execution_uncertain(self, task: asyncio.Task[object]) -> None:
         self._guard.mark_execution_uncertain()
-        self._unresolved_task = task
+        if task in self._unresolved_tasks:
+            return
+        self._unresolved_tasks.add(task)
         task.add_done_callback(self._execution_resolved)
 
     def _execution_resolved(self, task: asyncio.Task[object]) -> None:
-        if self._unresolved_task is not task:
+        if task not in self._unresolved_tasks:
             return
-        self._unresolved_task = None
+        self._unresolved_tasks.discard(task)
+        if self._unresolved_tasks:
+            return
+        self._end_execution_if_resolved()
         if self._on_execution_resolved is not None:
             self._on_execution_resolved()
 
+    def _end_execution_if_resolved(self) -> None:
+        if not self.execution_unresolved and self._execution_token is not None:
+            self._guard.end_execution(self._execution_token)
+            self._execution_token = None
+
     async def _release(self) -> bool:
-        expired = False
         try:
-            await self._release_store()
-            lease = self._guard.lease
-            if lease is not None:
-                try:
-                    expired = self._guard.is_expired(lease)
-                except RunLeaseError:
-                    expired = True
-            return expired
+            result = await self._release_store()
+            return result is True
         except RunLeaseOwnershipLost as exc:
             self.release_ownership_lost = True
             raise RunLeaseReleaseError("Run lease release failed") from exc
@@ -818,11 +838,11 @@ class RunLeaseCoordinator:
             if self._store_operation_ids.get("renew") == operation_id:
                 self._store_operation_ids["renew"] = None
 
-    async def _release_store(self) -> None:
+    async def _release_store(self) -> object:
         operation_id = uuid4().hex
         self._store_operation_ids["release"] = operation_id
         try:
-            await self._call_store(
+            return await self._call_store(
                 self._store.release,
                 self.run_id,
                 self.owner_id,
@@ -1092,7 +1112,7 @@ class SQLiteRunLeaseStore:
         generation: str,
         *,
         operation_id: str | None = None,
-    ) -> None:
+    ) -> bool:
         self._require_ready()
         _validate_identity(run_id, "run_id")
         _validate_identity(owner_id, "owner_id")
@@ -1132,11 +1152,17 @@ class SQLiteRunLeaseStore:
                         result = await self._drain_release_attempt(attempt, cancellation)
                     except BaseException:
                         raise cancelled
-                    if result is _SQLiteReleaseAttempt.RELEASED:
-                        return
+                    if result in {
+                        _SQLiteReleaseAttempt.RELEASED,
+                        _SQLiteReleaseAttempt.RELEASED_EXPIRED,
+                    }:
+                        return result is _SQLiteReleaseAttempt.RELEASED_EXPIRED
                     raise cancelled
-                if result is _SQLiteReleaseAttempt.RELEASED:
-                    return
+                if result in {
+                    _SQLiteReleaseAttempt.RELEASED,
+                    _SQLiteReleaseAttempt.RELEASED_EXPIRED,
+                }:
+                    return result is _SQLiteReleaseAttempt.RELEASED_EXPIRED
                 if result is _SQLiteReleaseAttempt.CANCELLED:
                     raise asyncio.CancelledError()
                 if loop.time() >= deadline:
@@ -1431,7 +1457,7 @@ class SQLiteRunLeaseStore:
                     db.rollback()
                     return _SQLiteReleaseAttempt.CANCELLED
                 row = db.execute(
-                    "SELECT owner_id, generation FROM run_leases WHERE run_id = ?",
+                    "SELECT owner_id, generation, expires_at FROM run_leases WHERE run_id = ?",
                     (run_id,),
                 ).fetchone()
                 if row is None:
@@ -1440,6 +1466,7 @@ class SQLiteRunLeaseStore:
                     raise RunLeaseOwnershipLost("Run lease is owned by another owner")
                 if generation is not None and row[1] != generation:
                     raise RunLeaseOwnershipLost("Run lease generation changed")
+                expired_before_delete = _decode_time(row[2]) <= self._now()
                 # The legacy two-argument API remains accepted for existing
                 # stores, while coordinator callers pass the generation and
                 # get ABA-safe owner scoping.
@@ -1458,7 +1485,11 @@ class SQLiteRunLeaseStore:
                     db.rollback()
                     return _SQLiteReleaseAttempt.CANCELLED
                 db.commit()
-                return _SQLiteReleaseAttempt.RELEASED
+                return (
+                    _SQLiteReleaseAttempt.RELEASED_EXPIRED
+                    if expired_before_delete
+                    else _SQLiteReleaseAttempt.RELEASED
+                )
         except (RunLeaseOwnershipLost, RunLeaseStoreError):
             raise
         except sqlite3.OperationalError as exc:

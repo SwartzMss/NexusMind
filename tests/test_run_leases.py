@@ -717,6 +717,66 @@ def test_nonterminal_stubborn_aclose_blocks_runtime_reuse_until_resolved() -> No
     asyncio.run(run())
 
 
+def test_multiple_unresolved_tasks_do_not_clear_execution_early() -> None:
+    async def run() -> None:
+        resolved = asyncio.Event()
+        guard = RunLeaseOwnershipGuard()
+        coordinator = RunLeaseCoordinator(
+            object(),
+            run_id="run-multiple-unresolved",
+            owner_id="owner-multiple-unresolved",
+            on_execution_resolved=resolved.set,
+            guard=guard,
+        )
+        coordinator._execution_token = guard.begin_execution()
+        first_gate = asyncio.Event()
+        second_gate = asyncio.Event()
+
+        async def wait_for(gate: asyncio.Event) -> None:
+            await gate.wait()
+
+        first = asyncio.create_task(wait_for(first_gate))
+        second = asyncio.create_task(wait_for(second_gate))
+        coordinator._mark_execution_uncertain(first)
+        coordinator._mark_execution_uncertain(second)
+
+        second_gate.set()
+        await asyncio.sleep(0)
+        assert coordinator.execution_unresolved is True
+        assert not resolved.is_set()
+
+        first_gate.set()
+        await asyncio.wait_for(resolved.wait(), timeout=0.2)
+        assert coordinator.execution_unresolved is False
+
+    asyncio.run(run())
+
+
+def test_shared_guard_cannot_be_reused_while_an_execution_is_active() -> None:
+    guard = RunLeaseOwnershipGuard()
+    now = datetime.now(timezone.utc)
+    first_token = guard.begin_execution()
+    guard.prove(
+        RunLease("run-shared-guard-a", "owner-a", now, now, now + timedelta(seconds=10)),
+        initial=True,
+    )
+    guard.fail(RunLeaseOwnershipLost("first execution lost ownership"))
+
+    with pytest.raises(RunLeaseUnavailable):
+        guard.begin_execution()
+    with pytest.raises(RunLeaseOwnershipLost, match="first execution"):
+        guard.assert_owned()
+
+    guard.end_execution(first_token)
+    second_token = guard.begin_execution()
+    guard.prove(
+        RunLease("run-shared-guard-b", "owner-b", now, now, now + timedelta(seconds=10)),
+        initial=True,
+    )
+    guard.assert_owned()
+    guard.end_execution(second_token)
+
+
 def test_nonterminal_release_failure_is_surfaced_when_no_primary_error() -> None:
     async def run() -> None:
         class Store:
@@ -2009,6 +2069,7 @@ def test_terminal_audits_expiry_when_release_crosses_ttl_without_yielding() -> N
 
             async def release(self, run_id, owner_id, generation=None):
                 clock.advance(6)
+                return True
 
         class TerminalIterator:
             def __aiter__(self):
@@ -2052,6 +2113,7 @@ def test_terminal_does_not_report_expiry_after_successful_release() -> None:
                 raise AssertionError("heartbeat should not run")
 
             async def release(self, run_id, owner_id, generation=None):
+                clock.advance(6)
                 return None
 
         async def events():
@@ -2067,7 +2129,6 @@ def test_terminal_does_not_report_expiry_after_successful_release() -> None:
         )
         output = [event async for event in coordinator.stream(events())]
 
-        clock.advance(6)
         assert output[-1].metadata.get("lease_ownership_lost_after_terminal") is None
 
     asyncio.run(run())
