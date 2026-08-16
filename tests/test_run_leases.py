@@ -1661,6 +1661,7 @@ def test_nonterminal_iterator_close_timeout_keeps_lease_fenced() -> None:
                 self.delivered = False
                 self.close_started = asyncio.Event()
                 self.never_close = asyncio.Event()
+                self.close_finished = asyncio.Event()
 
             def __aiter__(self):
                 return self
@@ -1673,11 +1674,14 @@ def test_nonterminal_iterator_close_timeout_keeps_lease_fenced() -> None:
 
             async def aclose(self):
                 self.close_started.set()
-                while not self.never_close.is_set():
-                    try:
-                        await self.never_close.wait()
-                    except asyncio.CancelledError:
-                        continue
+                try:
+                    while not self.never_close.is_set():
+                        try:
+                            await self.never_close.wait()
+                        except asyncio.CancelledError:
+                            continue
+                finally:
+                    self.close_finished.set()
 
         store = Store()
         iterator = HangingCloseIterator()
@@ -1698,7 +1702,7 @@ def test_nonterminal_iterator_close_timeout_keeps_lease_fenced() -> None:
         assert iterator.close_started.is_set()
         assert store.release_calls == 0
         iterator.never_close.set()
-        await asyncio.sleep(0)
+        await asyncio.wait_for(iterator.close_finished.wait(), timeout=0.2)
 
     asyncio.run(run())
 
@@ -2413,6 +2417,7 @@ def test_timed_out_old_release_cannot_clear_next_execution_guard() -> None:
                 self.release_calls = 0
                 self.first_release_started = asyncio.Event()
                 self.allow_first_release = asyncio.Event()
+                self.first_release_finished = asyncio.Event()
 
             async def acquire(self, run_id, owner_id, ttl):
                 self.acquire_calls += 1
@@ -2437,6 +2442,8 @@ def test_timed_out_old_release_cannot_clear_next_execution_guard() -> None:
                         await self.allow_first_release.wait()
                     except asyncio.CancelledError:
                         await self.allow_first_release.wait()
+                    finally:
+                        self.first_release_finished.set()
 
         store = Store()
         guard = RunLeaseOwnershipGuard()
@@ -2477,7 +2484,7 @@ def test_timed_out_old_release_cannot_clear_next_execution_guard() -> None:
         assert guard.lease.generation == "generation-2"
 
         store.allow_first_release.set()
-        await asyncio.sleep(0)
+        await asyncio.wait_for(store.first_release_finished.wait(), timeout=0.2)
         assert guard.lease is not None
         assert guard.lease.generation == "generation-2"
 

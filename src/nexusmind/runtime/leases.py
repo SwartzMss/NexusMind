@@ -275,6 +275,10 @@ class RunLeaseCoordinator:
     The coordinator sits outside the Harness state machine. It checks the
     locally proven lease before advancing the wrapped stream, so a lost lease
     cannot advance to another model or tool operation.
+
+    If the store exposes a callable ``clock`` property, that clock is the
+    authoritative source for the guard as well. The ``clock`` argument is
+    only used for stores without such a property.
     """
 
     def __init__(
@@ -879,7 +883,12 @@ class RunLeaseCoordinator:
 
 
 class SQLiteRunLeaseStore:
-    """SQLite lease store with transactional acquisition and takeover."""
+    """SQLite lease store with transactional acquisition and takeover.
+
+    A custom ``clock`` is an injection facility for tests. Every store that
+    accesses the same database must share the same authoritative clock source;
+    SQLite does not coordinate clock skew between independent store instances.
+    """
 
     def __init__(
         self,

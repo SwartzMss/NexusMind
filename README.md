@@ -226,6 +226,8 @@ nexusmind chat `
 
 模型 Provider、工具执行器和异步事件迭代器必须遵守 cooperative cancellation contract：收到 `asyncio.CancelledError` 后应在有限时间内结束，不得无限吞掉取消。运行时会对当前迭代任务停止 heartbeat、保留租约到 TTL 并阻止同一 `ChatRuntime` 复用，避免未知的后台执行与新 owner 重叠；但 Python 的 `asyncio.run()` 无法强制终止任意不合作的 coroutine，因此 Host 若需要进程级硬 shutdown，应将 Provider 隔离到可终止的 worker process。
 
+SQLite 租约的 `clock` 是测试注入点。生产环境应让所有访问同一个 lease database 的 `SQLiteRunLeaseStore` 使用默认 UTC 时钟；如果注入自定义时钟，所有 contender 必须共享同一个 authoritative clock source。SQLite 文件不会协调不同 store 实例之间的时钟偏差，因此不同时间源可能让本地 ownership proof 滞后于数据库 takeover。对暴露 `clock` 的 store，`RunLeaseCoordinator` 会将 guard 绑定到 store 时钟；传入 coordinator 的 `clock` 只适用于未暴露 authoritative clock 的自定义 store。
+
 工具定义的默认风险级别是 `UNSPECIFIED`，默认策略会要求审批；确认只读工具时应显式设置 `ToolRiskLevel.READ_ONLY`。
 
 ## 开发验证
