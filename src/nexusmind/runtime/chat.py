@@ -151,7 +151,9 @@ class ChatRuntime:
                     and event.type in {RuntimeEventType.RUN_COMPLETED, RuntimeEventType.RUN_FAILED}
                     and self._lease_execution_token is execution_token
                 ):
-                    self._lease_execution_token = None
+                    coordinator = self._lease_coordinator
+                    if coordinator is None or not coordinator.execution_unresolved:
+                        self._lease_execution_token = None
                 yield event
         finally:
             # Preserve the compatibility snapshot exposed by HarnessRunner.

@@ -717,6 +717,85 @@ def test_nonterminal_stubborn_aclose_blocks_runtime_reuse_until_resolved() -> No
     asyncio.run(run())
 
 
+def test_resolved_anext_during_close_does_not_release_guard_session() -> None:
+    async def run() -> None:
+        class Store:
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl, generation=None):
+                raise AssertionError("heartbeat should not run")
+
+            async def release(self, run_id, owner_id, generation=None):
+                raise AssertionError("uncertain execution must not release")
+
+        class StubbornIterator:
+            def __init__(self) -> None:
+                self.delivered = False
+                self.next_started = asyncio.Event()
+                self.allow_next = asyncio.Event()
+                self.next_finished = asyncio.Event()
+                self.close_started = asyncio.Event()
+                self.allow_close = asyncio.Event()
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if not self.delivered:
+                    self.delivered = True
+                    return RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="partial")
+                self.next_started.set()
+                while not self.allow_next.is_set():
+                    try:
+                        await self.allow_next.wait()
+                    except asyncio.CancelledError:
+                        continue
+                self.next_finished.set()
+                raise StopAsyncIteration
+
+            async def aclose(self):
+                self.close_started.set()
+                while not self.allow_close.is_set():
+                    try:
+                        await self.allow_close.wait()
+                    except asyncio.CancelledError:
+                        continue
+
+        store = Store()
+        iterator = StubbornIterator()
+        guard = RunLeaseOwnershipGuard()
+        resolved = asyncio.Event()
+        coordinator = RunLeaseCoordinator(
+            store,
+            run_id="run-resolved-anext-during-close",
+            owner_id="owner-resolved-anext-during-close",
+            lease_release_timeout=timedelta(milliseconds=20),
+            guard=guard,
+            on_execution_resolved=resolved.set,
+        )
+        task = asyncio.create_task(_collect_events(coordinator.stream(iterator)))
+        await asyncio.wait_for(iterator.next_started.wait(), timeout=0.2)
+        task.cancel()
+        await asyncio.wait_for(iterator.close_started.wait(), timeout=0.2)
+        done, _ = await asyncio.wait({task}, timeout=0.2)
+        assert task in done
+        assert coordinator.execution_unresolved is True
+
+        iterator.allow_next.set()
+        await asyncio.wait_for(iterator.next_finished.wait(), timeout=0.2)
+        assert coordinator.execution_unresolved is True
+        with pytest.raises(RunLeaseUnavailable):
+            guard.begin_execution()
+
+        iterator.allow_close.set()
+        await asyncio.wait_for(resolved.wait(), timeout=0.2)
+        assert coordinator.execution_unresolved is False
+
+    asyncio.run(run())
+
+
 def test_multiple_unresolved_tasks_do_not_clear_execution_early() -> None:
     async def run() -> None:
         resolved = asyncio.Event()
@@ -739,6 +818,7 @@ def test_multiple_unresolved_tasks_do_not_clear_execution_early() -> None:
         second = asyncio.create_task(wait_for(second_gate))
         coordinator._mark_execution_uncertain(first)
         coordinator._mark_execution_uncertain(second)
+        coordinator._cleanup_complete = True
 
         second_gate.set()
         await asyncio.sleep(0)
@@ -1588,7 +1668,11 @@ def test_nonterminal_iterator_close_timeout_keeps_lease_fenced() -> None:
 
             async def aclose(self):
                 self.close_started.set()
-                await self.never_close.wait()
+                while not self.never_close.is_set():
+                    try:
+                        await self.never_close.wait()
+                    except asyncio.CancelledError:
+                        continue
 
         store = Store()
         iterator = HangingCloseIterator()
@@ -1827,15 +1911,23 @@ def test_terminal_iterator_close_timeout_still_releases_lease() -> None:
 
             async def aclose(self):
                 self.close_started.set()
-                await self.never_close.wait()
+                while not self.never_close.is_set():
+                    try:
+                        await self.never_close.wait()
+                    except asyncio.CancelledError:
+                        continue
 
         store = Store()
         iterator = HangingCloseIterator()
+        guard = RunLeaseOwnershipGuard()
+        resolved = asyncio.Event()
         coordinator = RunLeaseCoordinator(
             store,
             run_id="run-close-timeout",
             owner_id="owner-close-timeout",
             lease_release_timeout=timedelta(milliseconds=20),
+            guard=guard,
+            on_execution_resolved=resolved.set,
         )
         events = await asyncio.wait_for(
             _collect_events(coordinator.stream(iterator)), timeout=0.2
@@ -1844,8 +1936,33 @@ def test_terminal_iterator_close_timeout_still_releases_lease() -> None:
         assert events[-1].type is RuntimeEventType.RUN_COMPLETED
         assert events[-1].metadata["lease_iterator_cleanup_failed"] is True
         assert store.release_calls == 1
+        assert coordinator.execution_unresolved is True
+
+        async def second_events():
+            yield RuntimeEvent(RuntimeEventType.RUN_COMPLETED)
+
+        second = RunLeaseCoordinator(
+            store,
+            run_id="run-close-timeout-second",
+            owner_id="owner-close-timeout-second",
+            guard=guard,
+        )
+        with pytest.raises(RunLeaseUnavailable):
+            [event async for event in second.stream(second_events())]
+
         iterator.never_close.set()
-        await asyncio.sleep(0)
+        await asyncio.wait_for(resolved.wait(), timeout=0.2)
+        assert coordinator.execution_unresolved is False
+        second_recovered = RunLeaseCoordinator(
+            store,
+            run_id="run-close-timeout-second-recovered",
+            owner_id="owner-close-timeout-second-recovered",
+            guard=guard,
+        )
+        second_events_result = [
+            event async for event in second_recovered.stream(second_events())
+        ]
+        assert second_events_result[-1].type is RuntimeEventType.RUN_COMPLETED
 
     asyncio.run(run())
 

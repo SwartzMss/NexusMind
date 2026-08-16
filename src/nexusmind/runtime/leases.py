@@ -306,6 +306,7 @@ class RunLeaseCoordinator:
         self.release_ownership_lost = False
         self.ownership_lost_after_progress = False
         self._terminal_cleanup_done = False
+        self._cleanup_complete = False
         self._generation: str | None = None
         self._execution_token: object | None = None
         self._on_execution_resolved = on_execution_resolved
@@ -358,7 +359,8 @@ class RunLeaseCoordinator:
                 if event.type in {RuntimeEventType.RUN_COMPLETED, RuntimeEventType.RUN_FAILED}:
                     event = await self._finalize_terminal(event, iterator)
                     self._terminal_cleanup_done = True
-                    self._end_execution_if_resolved()
+                    self._cleanup_complete = True
+                    self._try_finish_execution()
                     yield event
                     break
                 try:
@@ -388,7 +390,8 @@ class RunLeaseCoordinator:
                 if close_error is not None and active_error is None and self.release_error is None:
                     raise RunLeaseStoreError("Run lease iterator cleanup failed") from close_error
             finally:
-                self._end_execution_if_resolved()
+                self._cleanup_complete = True
+                self._try_finish_execution()
 
     @staticmethod
     async def _close_iterator(iterator: AsyncIterator[RuntimeEvent]) -> None:
@@ -502,7 +505,9 @@ class RunLeaseCoordinator:
         except RunLeaseError:
             ownership_lost = True
         await self._stop_heartbeat()
-        close_error, _ = await self._close_iterator_barrier(iterator)
+        close_error, unresolved_close_task = await self._close_iterator_barrier(iterator)
+        if unresolved_close_task is not None:
+            self._mark_execution_uncertain(unresolved_close_task)
         try:
             self._guard.assert_owned()
         except RunLeaseError:
@@ -801,16 +806,18 @@ class RunLeaseCoordinator:
         if task not in self._unresolved_tasks:
             return
         self._unresolved_tasks.discard(task)
-        if self._unresolved_tasks:
-            return
-        self._end_execution_if_resolved()
-        if self._on_execution_resolved is not None:
-            self._on_execution_resolved()
+        self._try_finish_execution()
 
-    def _end_execution_if_resolved(self) -> None:
-        if not self.execution_unresolved and self._execution_token is not None:
+    def _try_finish_execution(self) -> None:
+        if (
+            self._cleanup_complete
+            and not self.execution_unresolved
+            and self._execution_token is not None
+        ):
             self._guard.end_execution(self._execution_token)
             self._execution_token = None
+            if self._on_execution_resolved is not None:
+                self._on_execution_resolved()
 
     async def _release(self) -> bool | None:
         try:
