@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import hashlib
 
 import pytest
@@ -12,6 +11,7 @@ from nexusmind.knowledge import stable_document_id
 def test_source_has_stable_identity_and_keeps_generic_metadata() -> None:
     metadata = {"directory": "docs", "labels": ["product"]}
     source = KnowledgeSource(
+        source_id="source-1",
         source_type=KnowledgeSourceType.LOCAL_DIRECTORY,
         display_name="Product docs",
         logical_location="docs",
@@ -20,6 +20,7 @@ def test_source_has_stable_identity_and_keeps_generic_metadata() -> None:
     metadata["labels"].append("changed")
 
     renamed_source = KnowledgeSource(
+        source_id="source-1",
         source_type=KnowledgeSourceType.LOCAL_DIRECTORY,
         display_name="Renamed product docs",
         logical_location="docs",
@@ -28,9 +29,9 @@ def test_source_has_stable_identity_and_keeps_generic_metadata() -> None:
     assert source.metadata == {"directory": "docs", "labels": ["product"]}
 
 
-def test_source_identity_requires_logical_location_when_id_is_not_provided() -> None:
-    with pytest.raises(ValueError):
-        KnowledgeSource(source_type="custom", display_name="Docs", logical_location=None)  # type: ignore[arg-type]
+def test_source_requires_explicit_id_but_allows_missing_logical_location() -> None:
+    with pytest.raises(TypeError):
+        KnowledgeSource(source_type="custom", display_name="Docs")  # type: ignore[call-arg]
 
     explicit = KnowledgeSource(source_id="source-1", source_type="custom", display_name="Docs")
     assert explicit.source_id == "source-1"
@@ -49,24 +50,19 @@ def test_stable_id_encoding_preserves_part_boundaries() -> None:
     assert stable_document_id("a\x00b", "c") != stable_document_id("a", "b\x00c")
 
 
-def test_document_tracks_source_content_metadata_and_timestamps() -> None:
-    imported_at = datetime(2026, 8, 16, tzinfo=timezone.utc)
+def test_document_tracks_source_content_and_metadata() -> None:
     document = Document(
         source_id="local-docs",
         logical_path="guides/intro.md",
         content="hello",
         content_type="text/markdown",
         metadata={"title": "Introduction"},
-        imported_at=imported_at,
-        updated_at=imported_at,
     )
 
     assert document.source_id == "local-docs"
     assert document.content_type == "text/markdown"
     assert document.metadata == {"title": "Introduction"}
     assert document.content_hash == compute_content_hash("hello")
-    assert document.imported_at == imported_at
-    assert document.updated_at == imported_at
 
 
 def test_document_content_hash_detects_changes_for_same_logical_document() -> None:
@@ -80,10 +76,18 @@ def test_document_content_hash_detects_changes_for_same_logical_document() -> No
         original.has_content_changed(Document(source_id="other", logical_path="notes.txt", content="two"))
 
 
-def test_content_hash_is_utf8_sha256_and_rejects_inconsistent_values() -> None:
+def test_content_hash_is_utf8_sha256_and_is_derived() -> None:
     assert compute_content_hash("你好") == hashlib.sha256("你好".encode("utf-8")).hexdigest()
-    with pytest.raises(ValueError):
-        Document(source_id="docs", logical_path="a.txt", content="one", content_hash="0" * 64)
+    with pytest.raises(TypeError):
+        Document(source_id="docs", logical_path="a.txt", content="one", content_hash="0" * 64)  # type: ignore[call-arg]
+
+
+def test_document_id_is_derived_from_identity() -> None:
+    document = Document(source_id="docs", logical_path="a.txt", content="one")
+
+    assert document.document_id == stable_document_id("docs", "a.txt")
+    with pytest.raises(TypeError):
+        Document(source_id="docs", logical_path="a.txt", content="one", document_id="custom")  # type: ignore[call-arg]
 
 
 def test_document_rejects_non_text_content() -> None:

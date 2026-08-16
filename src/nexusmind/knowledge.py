@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
 import hashlib
 import json
@@ -43,13 +42,6 @@ def _stable_id(prefix: str, *parts: str) -> str:
     return f"{prefix}-{hashlib.sha256(canonical).hexdigest()}"
 
 
-def stable_source_id(source_type: KnowledgeSourceType | str, logical_location: str) -> str:
-    """Create a stable source ID from source type and logical location."""
-
-    source_value = source_type.value if isinstance(source_type, KnowledgeSourceType) else _require_text(source_type, "source_type")
-    return _stable_id("source", source_value, _require_text(logical_location, "logical_location"))
-
-
 def stable_document_id(source_id: str, logical_path: str) -> str:
     """Create a stable document ID from source and source-relative identity."""
 
@@ -60,28 +52,26 @@ def stable_document_id(source_id: str, logical_path: str) -> str:
 class KnowledgeSource:
     """The origin of one or more knowledge documents."""
 
+    source_id: str
     source_type: KnowledgeSourceType | str
     display_name: str
     logical_location: str | None = None
-    source_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
-        source_value = self.source_type.value if isinstance(self.source_type, KnowledgeSourceType) else _require_text(self.source_type, "source_type")
-        display_name = _require_text(self.display_name, "display_name")
-        source_id = self.source_id
-        if source_id is None:
-            logical_location = _require_text(self.logical_location, "logical_location")
-            source_id = stable_source_id(source_value, logical_location)
+        source_id = _require_text(self.source_id, "source_id")
+        if isinstance(self.source_type, KnowledgeSourceType):
+            source_type = self.source_type
         else:
-            source_id = _require_text(source_id, "source_id")
-            logical_location = self.logical_location
-            if logical_location is not None:
-                logical_location = _require_text(logical_location, "logical_location")
+            source_type = _require_text(self.source_type, "source_type")
+        display_name = _require_text(self.display_name, "display_name")
+        logical_location = self.logical_location
+        if logical_location is not None:
+            logical_location = _require_text(logical_location, "logical_location")
         if not isinstance(self.metadata, Mapping):
             raise TypeError("KnowledgeSource metadata must be a mapping")
 
-        object.__setattr__(self, "source_type", self.source_type)
+        object.__setattr__(self, "source_type", source_type)
         object.__setattr__(self, "display_name", display_name)
         object.__setattr__(self, "logical_location", logical_location)
         object.__setattr__(self, "source_id", source_id)
@@ -97,10 +87,8 @@ class Document:
     content: str
     content_type: str = "text/plain"
     metadata: dict[str, Any] = field(default_factory=dict, repr=False)
-    document_id: str | None = None
-    content_hash: str | None = None
-    imported_at: datetime | None = None
-    updated_at: datetime | None = None
+    document_id: str = field(init=False)
+    content_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
         source_id = _require_text(self.source_id, "source_id")
@@ -110,10 +98,7 @@ class Document:
             raise TypeError("Document metadata must be a mapping")
 
         calculated_hash = compute_content_hash(self.content)
-        if self.content_hash is not None and self.content_hash != calculated_hash:
-            raise ValueError("content_hash does not match content")
-        document_id = self.document_id or stable_document_id(source_id, logical_path)
-        document_id = _require_text(document_id, "document_id")
+        document_id = stable_document_id(source_id, logical_path)
 
         object.__setattr__(self, "source_id", source_id)
         object.__setattr__(self, "logical_path", logical_path)
@@ -142,5 +127,4 @@ __all__ = [
     "KnowledgeSourceType",
     "compute_content_hash",
     "stable_document_id",
-    "stable_source_id",
 ]
