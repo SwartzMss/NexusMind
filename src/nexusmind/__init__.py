@@ -1,6 +1,23 @@
 """NexusMind minimal model runtime."""
 
-__all__ = ["__version__"]
+from .knowledge import (
+    Document,
+    KnowledgeDocument,
+    KnowledgeSource,
+    KnowledgeSourceType,
+    SourceType,
+    compute_content_hash,
+)
+
+__all__ = [
+    "Document",
+    "KnowledgeDocument",
+    "KnowledgeSource",
+    "KnowledgeSourceType",
+    "SourceType",
+    "compute_content_hash",
+    "__version__",
+]
 
 __version__ = "0.1.0"
 
