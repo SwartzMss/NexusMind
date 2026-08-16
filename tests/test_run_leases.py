@@ -1402,6 +1402,7 @@ def test_cancelled_stream_with_stubborn_iterator_does_not_renew_forever() -> Non
                 self.delivered = False
                 self.next_started = asyncio.Event()
                 self.allow_next_exit = asyncio.Event()
+                self.next_finished = asyncio.Event()
 
             def __aiter__(self):
                 return self
@@ -1415,6 +1416,8 @@ def test_cancelled_stream_with_stubborn_iterator_does_not_renew_forever() -> Non
                     await self.allow_next_exit.wait()
                 except asyncio.CancelledError:
                     await self.allow_next_exit.wait()
+                finally:
+                    self.next_finished.set()
                 raise StopAsyncIteration
 
         store = Store()
@@ -1440,6 +1443,7 @@ def test_cancelled_stream_with_stubborn_iterator_does_not_renew_forever() -> Non
 
         iterator.allow_next_exit.set()
         store.allow_renew_exit.set()
+        await asyncio.wait_for(iterator.next_finished.wait(), timeout=0.2)
         await asyncio.wait_for(store.renew_finished.wait(), timeout=0.2)
 
     asyncio.run(run())
