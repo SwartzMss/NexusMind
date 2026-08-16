@@ -1,20 +1,16 @@
-"""NexusMind minimal model runtime."""
+"""NexusMind public package exports."""
 
 from .knowledge import (
     Document,
-    KnowledgeDocument,
     KnowledgeSource,
     KnowledgeSourceType,
-    SourceType,
     compute_content_hash,
 )
 
 __all__ = [
     "Document",
-    "KnowledgeDocument",
     "KnowledgeSource",
     "KnowledgeSourceType",
-    "SourceType",
     "compute_content_hash",
     "__version__",
 ]
