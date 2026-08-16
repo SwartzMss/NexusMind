@@ -211,6 +211,23 @@ nexusmind runs recover --state-db ./.nexusmind/state.db
 
 未提供 `--state-db` 时不会创建数据库。默认只记录执行元数据；`--record-content` 才会保存有界的输入预览。数据库可能包含任务、模型和工具执行元数据，应按敏感数据保护。它只记录历史，不支持恢复、重放或自动重新执行工具。确认旧进程已停止后，可显式使用 `runs recover` 将遗留的 `running` Run 标记为 `abandoned`。
 
+### Run 执行租约
+
+需要为同一 `run_id` 保证单一执行 owner 时，使用独立的租约数据库：
+
+```powershell
+nexusmind chat `
+  --lease-db ./.nexusmind/leases.db `
+  --lease-run-id run-123 `
+  "分析这个项目"
+```
+
+`--lease-db` 会在模型或工具执行前原子获取 SQLite 租约，并在运行期间 heartbeat；活动租约冲突、续租失败或 owner 不匹配都会 fail closed。正常完成、失败和取消会尝试按 owner 释放租约；崩溃后的租约只有到期后才能被新 owner 接管。`--lease-run-id` 可省略，此时复用 Run History/checkpoint 的 `run_id`，若两者都未启用则生成新 ID。租约数据独立于 Harness checkpoint，建议使用单独的数据库文件。
+
+模型 Provider、工具执行器和异步事件迭代器必须遵守 cooperative cancellation contract：收到 `asyncio.CancelledError` 后应在有限时间内结束，不得无限吞掉取消。运行时会对当前迭代任务停止 heartbeat、保留租约到 TTL 并阻止同一 `ChatRuntime` 复用，避免未知的后台执行与新 owner 重叠；但 Python 的 `asyncio.run()` 无法强制终止任意不合作的 coroutine，因此 Host 若需要进程级硬 shutdown，应将 Provider 隔离到可终止的 worker process。
+
+SQLite 租约的 `clock` 是测试注入点。生产环境应让所有访问同一个 lease database 的 `SQLiteRunLeaseStore` 使用默认 UTC 时钟；如果注入自定义时钟，所有 contender 必须共享同一个 authoritative clock source。SQLite 文件不会协调不同 store 实例之间的时钟偏差，因此不同时间源可能让本地 ownership proof 滞后于数据库 takeover。对暴露 `clock` 的 store，`RunLeaseCoordinator` 会将 guard 绑定到 store 时钟；传入 coordinator 的 `clock` 只适用于未暴露 authoritative clock 的自定义 store。
+
 工具定义的默认风险级别是 `UNSPECIFIED`，默认策略会要求审批；确认只读工具时应显式设置 `ToolRiskLevel.READ_ONLY`。
 
 ## 开发验证

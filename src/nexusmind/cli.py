@@ -16,7 +16,8 @@ from nexusmind.runtime.chat import AgentLoopLimits
 from nexusmind.runtime.policy import ApprovalDecision, ApprovalRequest, DefaultToolApprovalSummarizer
 from nexusmind.runtime.chat import ChatRuntime, ToolExecutionCancelled
 from nexusmind.runtime.events import RuntimeEventType
-from nexusmind.runtime.harness import CheckpointBarrierCancelled, SQLiteCheckpointStore
+from nexusmind.runtime.leases import RunLeaseError, RunLeaseReleaseError, RunLeaseStoreError, SQLiteRunLeaseStore
+from nexusmind.runtime.harness import CheckpointBarrierCancelled, HarnessStatus, SQLiteCheckpointStore
 from nexusmind.runtime.harness.sqlite_checkpoint_store import CheckpointStoreError
 from nexusmind.skills import SkillError, discover_skills, load_skill, resolve_skill_tool_references
 from nexusmind.skills.resolver import (
@@ -102,6 +103,8 @@ def main(argv: list[str] | None = None) -> int:
     chat_parser.add_argument("--record-content", action="store_true")
     chat_parser.add_argument("--checkpoint-db")
     chat_parser.add_argument("--checkpoint-run-id")
+    chat_parser.add_argument("--lease-db")
+    chat_parser.add_argument("--lease-run-id")
     chat_parser.add_argument("--no-terminal-checkpoint", action="store_true")
     chat_parser.add_argument("message", nargs="?")
     tools_parser = subparsers.add_parser("tools")
@@ -145,6 +148,8 @@ def main(argv: list[str] | None = None) -> int:
     skill_run_parser.add_argument("--record-content", action="store_true")
     skill_run_parser.add_argument("--checkpoint-db")
     skill_run_parser.add_argument("--checkpoint-run-id")
+    skill_run_parser.add_argument("--lease-db")
+    skill_run_parser.add_argument("--lease-run-id")
     skill_run_parser.add_argument("--no-terminal-checkpoint", action="store_true")
     skill_run_parser.add_argument("message", nargs="*")
 
@@ -172,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
                 command_config_path=args.command_config,
                 state_db=args.state_db, record_content=args.record_content,
                 checkpoint_db=args.checkpoint_db, checkpoint_run_id=args.checkpoint_run_id,
+                lease_db=args.lease_db, lease_run_id=args.lease_run_id,
                 save_terminal_checkpoint=not args.no_terminal_checkpoint,
             )
         )
@@ -197,6 +203,7 @@ async def _chat(
     command_config_path: str | None = None,
     state_db: str | None = None, record_content: bool = False,
     checkpoint_db: str | None = None, checkpoint_run_id: str | None = None,
+    lease_db: str | None = None, lease_run_id: str | None = None,
     save_terminal_checkpoint: bool = True,
 ) -> int:
     if not message:
@@ -260,6 +267,8 @@ async def _chat(
             record_content=record_content,
             checkpoint_db=checkpoint_db,
             checkpoint_run_id=checkpoint_run_id,
+            lease_db=lease_db,
+            lease_run_id=lease_run_id,
             save_terminal_checkpoint=save_terminal_checkpoint,
         )
 
@@ -280,6 +289,8 @@ async def _chat(
         record_content=record_content,
         checkpoint_db=checkpoint_db,
         checkpoint_run_id=checkpoint_run_id,
+        lease_db=lease_db,
+        lease_run_id=lease_run_id,
         save_terminal_checkpoint=save_terminal_checkpoint,
     )
 
@@ -292,6 +303,7 @@ async def _run_chat_with_mcp(
     model_config: ModelConfig,
     state_db: str | None = None, record_content: bool = False,
     checkpoint_db: str | None = None, checkpoint_run_id: str | None = None,
+    lease_db: str | None = None, lease_run_id: str | None = None,
     save_terminal_checkpoint: bool = True,
 ) -> int:
     store = None; run_id = None; text_sink: list[str] = []; failure_sink = {}; return_code = 1; runtime_started = False
@@ -344,6 +356,7 @@ async def _run_chat_with_mcp(
                 workspace=_registry_workspace(registry),
                 state_db=state_db, record_content=record_content,
                 checkpoint_db=checkpoint_db, checkpoint_run_id=checkpoint_run_id,
+                lease_db=lease_db, lease_run_id=lease_run_id,
                 save_terminal_checkpoint=save_terminal_checkpoint,
                 external_store=store, external_run_id=run_id, final_text_sink=text_sink, failure_sink=failure_sink,
             )
@@ -384,7 +397,7 @@ async def _run_chat_with_mcp(
         _best_effort_close(store)
         return 1
     if store and run_id and runtime_started and not failure_sink.get("already_finalized"):
-        try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED, error_code=failure_sink.get("error_code"), error_message=failure_sink.get("message"), trace_complete=failure_sink.get("trace_complete"), final_text=''.join(text_sink) if record_content else None)
+        try: await store.finish_run(run_id, RunStatus.COMPLETED if failure_sink.get("execution_completed") else (RunStatus.FAILED if return_code else RunStatus.COMPLETED), error_code=None if failure_sink.get("execution_completed") else failure_sink.get("error_code"), error_message=None if failure_sink.get("execution_completed") else failure_sink.get("message"), trace_complete=failure_sink.get("trace_complete"), final_text=''.join(text_sink) if record_content else None)
         except StateStoreError:
             print("State error: Run final status could not be persisted", file=sys.stderr); return_code = 1
         _best_effort_close(store)
@@ -405,6 +418,7 @@ async def _run_chat(
     workspace: Workspace | None = None,
     state_db: str | None = None, record_content: bool = False, run_kind: RunKind = RunKind.CHAT,
     checkpoint_db: str | None = None, checkpoint_run_id: str | None = None,
+    lease_db: str | None = None, lease_run_id: str | None = None,
     save_terminal_checkpoint: bool = True,
     skill_name: str | None = None,
     external_store=None, external_run_id: str | None = None, final_text_sink=None, failure_sink=None,
@@ -413,6 +427,8 @@ async def _run_chat(
     store = external_store; run_id = external_run_id; owns_store = store is None
     checkpoint_store = None
     owns_checkpoint_store = False
+    lease_store = None
+    owns_lease_store = False
     if state_db and store is None:
         try:
             store = SQLiteRunStore(state_db)
@@ -445,6 +461,38 @@ async def _run_chat(
                 _best_effort_close(store)
             print("Checkpoint error: Checkpoint store could not be initialized", file=sys.stderr)
             return 2
+    if lease_run_id and not lease_db:
+        if owns_checkpoint_store:
+            await _best_effort_close_checkpoint_store(checkpoint_store)
+        if owns_store and store:
+            await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="lease_config_invalid", error_message="Lease run ID requires --lease-db")
+            _best_effort_close(store)
+        print("Lease error: --lease-run-id requires --lease-db", file=sys.stderr)
+        return 2
+    if lease_db:
+        expected_run_id = run_id or checkpoint_run_id
+        if expected_run_id and lease_run_id and lease_run_id != expected_run_id:
+            if owns_checkpoint_store:
+                await _best_effort_close_checkpoint_store(checkpoint_store)
+            if owns_store and store:
+                await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="lease_config_invalid", error_message="Lease run ID must match the execution run ID")
+                _best_effort_close(store)
+            print("Lease error: --lease-run-id must match the execution run ID", file=sys.stderr)
+            return 2
+        try:
+            lease_store = SQLiteRunLeaseStore(lease_db)
+            await lease_store.initialize()
+            lease_run_id = lease_run_id or expected_run_id or uuid4().hex
+            owns_lease_store = True
+        except (RunLeaseStoreError, ValueError):
+            await _best_effort_close_checkpoint_store(lease_store)
+            if owns_checkpoint_store:
+                await _best_effort_close_checkpoint_store(checkpoint_store)
+            if owns_store and store:
+                await _best_effort_finish(store, run_id, RunStatus.FAILED, error_code="lease_store_init_failed", error_message="Lease store could not be initialized")
+                _best_effort_close(store)
+            print("Lease error: Lease store could not be initialized", file=sys.stderr)
+            return 2
     runtime = ChatRuntime(
         OpenAICompatibleChatModel(model_config),
         tool_executor=ToolExecutor(registry, timeout=executor_timeout),
@@ -454,14 +502,70 @@ async def _run_chat(
         checkpoint_store=checkpoint_store,
         checkpoint_run_id=checkpoint_run_id,
         save_terminal_checkpoint=save_terminal_checkpoint,
+        lease_store=lease_store,
+        lease_run_id=lease_run_id,
     )
     tools = registry.list_definitions() if tools is None else tools
-    failed = False; failure_message = None; trace_complete = True; final_text = []; current_text = bytearray(); current_text_bytes = 0
+    failed = False; cleanup_failed = False; failure_message = None; trace_complete = True; final_text = []; current_text = bytearray(); current_text_bytes = 0
     stream_kwargs = {"tools": tools}
     if system_prompt is not None:
         stream_kwargs["system_prompt"] = system_prompt
     try:
         async for event in runtime.stream_user_message(message, **stream_kwargs):
+            if event.type in {RuntimeEventType.RUN_COMPLETED, RuntimeEventType.RUN_FAILED} and (
+                event.metadata.get("lease_ownership_lost_after_terminal")
+                or event.metadata.get("lease_release_failed")
+                or event.metadata.get("lease_iterator_cleanup_failed")
+            ):
+                cleanup_failed = True
+                execution_completed = event.type is RuntimeEventType.RUN_COMPLETED
+                failure_sink.update(
+                    execution_completed=execution_completed,
+                    lease_ownership_lost_after_terminal=bool(event.metadata.get("lease_ownership_lost_after_terminal")),
+                    lease_release_failed=bool(event.metadata.get("lease_release_failed")),
+                    lease_iterator_cleanup_failed=bool(event.metadata.get("lease_iterator_cleanup_failed")),
+                    cleanup_error_code=(
+                        "lease_release_failed"
+                        if event.metadata.get("lease_release_failed")
+                        else (
+                            "lease_iterator_cleanup_failed"
+                            if event.metadata.get("lease_iterator_cleanup_failed")
+                            else "lease_ownership_lost_after_terminal"
+                        )
+                    ),
+                )
+                if store and run_id:
+                    try:
+                        if event.metadata.get("lease_ownership_lost_after_terminal"):
+                            await store.append_event(
+                                run_id,
+                                RunTraceEvent(
+                                    "lease_ownership_lost_after_terminal",
+                                    datetime.now(timezone.utc),
+                                    {"error_code": "lease_ownership_lost_after_terminal"},
+                                ),
+                            )
+                        if event.metadata.get("lease_release_failed"):
+                            await store.append_event(
+                                run_id,
+                                RunTraceEvent(
+                                    "lease_release_failed",
+                                    datetime.now(timezone.utc),
+                                    {"error_code": "lease_release_failed"},
+                                ),
+                            )
+                        if event.metadata.get("lease_iterator_cleanup_failed"):
+                            await store.append_event(
+                                run_id,
+                                RunTraceEvent(
+                                    "lease_iterator_cleanup_failed",
+                                    datetime.now(timezone.utc),
+                                    {"error_code": "lease_iterator_cleanup_failed"},
+                                ),
+                            )
+                    except StateStoreError:
+                        trace_complete = False
+                        failure_sink["trace_complete"] = False
             if event.type == RuntimeEventType.MODEL_STARTED:
                 current_text.clear(); current_text_bytes = 0
             if store and run_id and event.type not in {RuntimeEventType.RUN_STARTED, RuntimeEventType.RUN_COMPLETED, RuntimeEventType.RUN_FAILED, RuntimeEventType.TEXT_DELTA, RuntimeEventType.TOOL_CALL_DELTA}:
@@ -529,7 +633,9 @@ async def _run_chat(
             try: await store.finish_run(run_id, RunStatus.FAILED if failed else RunStatus.COMPLETED, error_code=failure_sink.get("error_code") if failed else None, error_message=failure_message, trace_complete=trace_complete, final_text=''.join(final_text) if record_content else None)
             except StateStoreError:
                 print("State error: Run final status could not be persisted", file=sys.stderr); return 1
-        return 1 if failed else 0
+        if cleanup_failed:
+            print("Lease error: Terminal lease cleanup failed", file=sys.stderr)
+        return 1 if failed or cleanup_failed else 0
     except asyncio.CancelledError as cancellation:
         if isinstance(cancellation, ToolExecutionCancelled):
             failure_sink.update(trace_complete=False, error_code="tool_execution_cancelled", message="Tool execution was cancelled; the tool may still be running")
@@ -553,6 +659,103 @@ async def _run_chat(
             )
         await _best_effort_cancel(store, run_id, trace_complete=failure_sink.get("trace_complete"), error_code=failure_sink.get("error_code", "cancelled"), error_message=failure_sink.get("message"), final_text=''.join(final_text) if record_content else None)
         raise
+    except RunLeaseReleaseError:
+        execution_completed = runtime._harness.state is not None and runtime._harness.state.status is HarnessStatus.COMPLETED
+        failure_sink.update(
+            lease_release_failed=True,
+            cleanup_error_code="lease_release_failed",
+            execution_completed=execution_completed,
+            trace_complete=trace_complete,
+        )
+        if store and run_id:
+            try:
+                await store.append_event(
+                    run_id,
+                    RunTraceEvent(
+                        "lease_release_failed",
+                        datetime.now(timezone.utc),
+                        {"error_code": "lease_release_failed"},
+                    ),
+                )
+            except StateStoreError:
+                trace_complete = False
+                failure_sink["trace_complete"] = False
+        if owns_store and store and run_id:
+            status = RunStatus.COMPLETED if execution_completed else RunStatus.FAILED
+            await _best_effort_finish(
+                store,
+                run_id,
+                status,
+                error_code=None if execution_completed else failure_sink.get("error_code"),
+                error_message=None if execution_completed else failure_message,
+                trace_complete=trace_complete,
+                final_text=''.join(final_text) if record_content else None,
+            )
+        print("Lease error: Run lease release failed", file=sys.stderr)
+        return 1
+    except RunLeaseError:
+        harness_state = runtime._harness.state
+        coordinator = runtime._lease_coordinator
+        lease_progress_lost = bool(
+            coordinator is not None
+            and coordinator.ownership_lost_after_progress
+        )
+        if lease_progress_lost or (
+            harness_state is not None
+            and harness_state.started_tool_call_ids - harness_state.executed_tool_call_ids
+        ):
+            trace_complete = False
+        error_code = "lease_lost_after_execution_progress" if lease_progress_lost else "lease_ownership_failed"
+        release_failed = bool(coordinator is not None and coordinator.release_error is not None)
+        failure_sink.update(
+            error_code=error_code,
+            message="Run execution ownership could not be proven",
+            trace_complete=trace_complete,
+            lease_lost_after_execution_progress=lease_progress_lost,
+            lease_release_failed=release_failed,
+        )
+        if store and run_id:
+            try:
+                await store.append_event(
+                    run_id,
+                    RunTraceEvent(
+                        "lease_ownership_lost",
+                        datetime.now(timezone.utc),
+                        {
+                            "error_code": error_code,
+                            "after_execution_progress": lease_progress_lost,
+                            "release_failed": release_failed,
+                        },
+                    ),
+                )
+                if release_failed:
+                    await store.append_event(
+                        run_id,
+                        RunTraceEvent(
+                            "lease_release_failed",
+                            datetime.now(timezone.utc),
+                            {"error_code": "lease_release_failed"},
+                        ),
+                    )
+            except StateStoreError:
+                trace_complete = False
+                failure_sink["trace_complete"] = False
+        lease_failure_status = (
+            RunStatus.CANCELLED
+            if harness_state is not None and harness_state.status is HarnessStatus.CANCELLED
+            else RunStatus.FAILED
+        )
+        finalized = await _best_effort_finish(
+            store,
+            run_id,
+            lease_failure_status,
+            error_code=error_code,
+            error_message="Run execution ownership could not be proven",
+            trace_complete=trace_complete,
+        )
+        failure_sink["already_finalized"] = finalized
+        print("Lease error: Run execution ownership could not be proven", file=sys.stderr)
+        return 1
     except Exception:
         await _best_effort_finish(
             store,
@@ -564,6 +767,8 @@ async def _run_chat(
         )
         raise
     finally:
+        if owns_lease_store:
+            await _best_effort_close_checkpoint_store(lease_store)
         if owns_checkpoint_store:
             await _best_effort_close_checkpoint_store(checkpoint_store)
         if owns_store: _best_effort_close(store)
@@ -902,6 +1107,7 @@ async def _skill_run(args: argparse.Namespace) -> int:
             workspace=workspace,
             state_db=args.state_db, record_content=args.record_content, run_kind=RunKind.SKILL, skill_name=skill.name,
             checkpoint_db=args.checkpoint_db, checkpoint_run_id=args.checkpoint_run_id,
+            lease_db=args.lease_db, lease_run_id=args.lease_run_id,
             save_terminal_checkpoint=not args.no_terminal_checkpoint,
         )
     try:
@@ -927,6 +1133,8 @@ async def _skill_run(args: argparse.Namespace) -> int:
         record_content=args.record_content,
         checkpoint_db=args.checkpoint_db,
         checkpoint_run_id=args.checkpoint_run_id,
+        lease_db=args.lease_db,
+        lease_run_id=args.lease_run_id,
         save_terminal_checkpoint=not args.no_terminal_checkpoint,
     )
 
@@ -941,6 +1149,7 @@ async def _run_skill_with_mcp(
     limits: AgentLoopLimits,
     state_db: str | None = None, record_content: bool = False,
     checkpoint_db: str | None = None, checkpoint_run_id: str | None = None,
+    lease_db: str | None = None, lease_run_id: str | None = None,
     save_terminal_checkpoint: bool = True,
 ) -> int:
     store = None; run_id = None; text_sink: list[str] = []; failure_sink = {}; return_code = 1
@@ -996,6 +1205,7 @@ async def _run_skill_with_mcp(
                 workspace=_registry_workspace(registry),
                 state_db=state_db, record_content=record_content, run_kind=RunKind.SKILL, skill_name=skill.name,
                 checkpoint_db=checkpoint_db, checkpoint_run_id=checkpoint_run_id,
+                lease_db=lease_db, lease_run_id=lease_run_id,
                 save_terminal_checkpoint=save_terminal_checkpoint,
                 external_store=store, external_run_id=run_id, final_text_sink=text_sink, failure_sink=failure_sink,
             )
@@ -1036,7 +1246,7 @@ async def _run_skill_with_mcp(
         _best_effort_close(store)
         return 1
     if store and run_id and "tools" in locals() and not failure_sink.get("already_finalized"):
-        try: await store.finish_run(run_id, RunStatus.FAILED if return_code else RunStatus.COMPLETED, error_code=failure_sink.get("error_code"), error_message=failure_sink.get("message"), trace_complete=failure_sink.get("trace_complete"), final_text=''.join(text_sink) if record_content else None)
+        try: await store.finish_run(run_id, RunStatus.COMPLETED if failure_sink.get("execution_completed") else (RunStatus.FAILED if return_code else RunStatus.COMPLETED), error_code=None if failure_sink.get("execution_completed") else failure_sink.get("error_code"), error_message=None if failure_sink.get("execution_completed") else failure_sink.get("message"), trace_complete=failure_sink.get("trace_complete"), final_text=''.join(text_sink) if record_content else None)
         except StateStoreError:
             print("State error: Run final status could not be persisted", file=sys.stderr); return_code = 1
         _best_effort_close(store)
