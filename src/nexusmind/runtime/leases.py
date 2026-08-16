@@ -217,6 +217,14 @@ class RunLeaseOwnershipGuard:
         if self._active_execution_token is token:
             self._active_execution_token = None
 
+    def bind_clock(self, clock: Callable[[], datetime]) -> None:
+        """Use the durable store's clock for fail-closed expiry checks."""
+        if not callable(clock):
+            raise TypeError("Run lease clock must be callable")
+        if self._active_execution_token is not None:
+            raise RunLeaseUnavailable("Cannot rebind an active lease execution guard")
+        self._clock = clock
+
     @property
     def execution_uncertain(self) -> bool:
         return self._execution_uncertain
@@ -298,6 +306,12 @@ class RunLeaseCoordinator:
         self.ttl = ttl
         self.heartbeat_interval = interval
         self.lease_release_timeout = lease_release_timeout
+        store_clock = getattr(store, "clock", None)
+        if callable(store_clock):
+            if guard is None:
+                guard = RunLeaseOwnershipGuard(clock=store_clock)
+            else:
+                guard.bind_clock(store_clock)
         self._guard = guard or RunLeaseOwnershipGuard(clock=clock)
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._heartbeat_active = False
@@ -896,6 +910,11 @@ class SQLiteRunLeaseStore:
         # Kept as a compatibility view for callers that inspected the old
         # release-only registry while the implementation was owner-scoped.
         self._release_cancellations = self._lease_cancellations
+
+    @property
+    def clock(self) -> Callable[[], datetime]:
+        """Clock used for durable lease timestamps and expiry decisions."""
+        return self._clock
 
     async def initialize(self) -> None:
         await asyncio.to_thread(self._initialize)

@@ -1318,6 +1318,7 @@ def test_terminal_does_not_hang_when_renew_suppresses_cancellation() -> None:
             def __init__(self) -> None:
                 self.renew_started = asyncio.Event()
                 self.never_finish = asyncio.Event()
+                self.renew_finished = asyncio.Event()
                 self.release_called = asyncio.Event()
 
             async def acquire(self, run_id, owner_id, ttl):
@@ -1337,6 +1338,8 @@ def test_terminal_does_not_hang_when_renew_suppresses_cancellation() -> None:
                     await self.never_finish.wait()
                 except asyncio.CancelledError:
                     await self.never_finish.wait()
+                finally:
+                    self.renew_finished.set()
 
             async def release(self, run_id, owner_id, generation=None):
                 self.release_called.set()
@@ -1361,6 +1364,8 @@ def test_terminal_does_not_hang_when_renew_suppresses_cancellation() -> None:
         assert output[-1].type is RuntimeEventType.RUN_COMPLETED
         assert store.release_called.is_set()
         assert coordinator._heartbeat_active is False
+        store.never_finish.set()
+        await asyncio.wait_for(store.renew_finished.wait(), timeout=0.2)
 
     asyncio.run(run())
 
@@ -1792,6 +1797,43 @@ def test_initial_ownership_proof_failure_releases_acquired_lease() -> None:
         with pytest.raises(RunLeaseOwnershipLost):
             [event async for event in coordinator.stream(events())]
         assert store.release_calls == 1
+
+    asyncio.run(run())
+
+
+def test_lagging_guard_clock_cannot_execute_after_store_takeover(tmp_path) -> None:
+    async def run() -> None:
+        store_clock = MutableClock()
+        guard_clock = MutableClock()
+        path = tmp_path / "clock-binding.db"
+        store = SQLiteRunLeaseStore(path, clock=store_clock)
+        await store.initialize()
+        guard = RunLeaseOwnershipGuard(clock=guard_clock)
+        RunLeaseCoordinator(
+            store,
+            run_id="run-clock-binding",
+            owner_id="owner-a",
+            ttl=timedelta(seconds=5),
+            guard=guard,
+        )
+
+        lease_a = await store.acquire("run-clock-binding", "owner-a", timedelta(seconds=5))
+        token = guard.begin_execution()
+        guard.prove(lease_a, initial=True)
+
+        store_clock.advance(6)
+        takeover_store = SQLiteRunLeaseStore(path, clock=store_clock)
+        await takeover_store.initialize()
+        lease_b = await takeover_store.acquire(
+            "run-clock-binding", "owner-b", timedelta(seconds=5)
+        )
+        assert lease_b.owner_id == "owner-b"
+
+        with pytest.raises(RunLeaseOwnershipLost):
+            guard.assert_owned()
+
+        guard.end_execution(token)
+        await takeover_store.release("run-clock-binding", "owner-b", lease_b.generation)
 
     asyncio.run(run())
 
