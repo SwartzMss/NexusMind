@@ -1,13 +1,43 @@
 # NexusMind
 
-NexusMind 从一个轻量、与模型服务商解耦的模型运行时开始。当前基线支持：
+NexusMind 是一个与模型服务商解耦、带明确边界和执行上限的 Agent Runtime / Harness。它把流式模型、工具调用、Workspace、MCP、Skills 以及可选的持久化能力组合成可审计、可停止的单 Agent 执行。
 
-- NexusMind 自有的消息与运行时事件契约。
-- 支持异步流式输出的 `ChatModel` 抽象。
-- OpenAI-compatible HTTP 适配器。
-- 与服务商无关的工具注册表和工具执行器。
-- 用于流式聊天输出的 CLI 入口。
-- 用于离线测试的 fake model。
+当前版本支持 Windows，以及 Python 3.11、3.12 和 3.13。Linux 和 macOS 不属于支持的平台。
+
+## 当前能力与架构
+
+NexusMind 的主要能力层如下：
+
+- Provider-neutral 消息和运行时事件契约，以及异步流式 `ChatModel` 抽象。
+- OpenAI-compatible 流式模型适配器和 Tool Call 组装。
+- 有界的单 Agent Harness / Tool Loop，包含模型轮次、工具调用、参数和结果大小限制，以及明确的 stop semantics。
+- Provider-neutral Tool Registry / Executor：JSON Schema 校验、超时、结构化错误、风险级别、策略判断和 CLI 审批检查点。
+- Workspace 读工具（`list_files`、`read_file`、`search_text`）和受 SHA-256 乐观并发保护的写工具（`write_file`、`replace_text`）。
+- Windows-only 的 Host-approved `run_command` Profile，使用固定 argv/cwd/timeout 和 Windows Job Object 回收进程树。
+- MCP stdio 工具发现、调用及其在 Agent Loop 中的集成。
+- 声明式 Skills、工具白名单、收紧后的执行限制和多 MCP Server 解析。
+- 可选的 SQLite Run History、Harness Checkpoints、受支持状态的 Resume，以及 Run Lease ownership controls。
+
+执行关系可以概括为：
+
+```text
+Model Provider
+    -> ChatRuntime                 # CLI-facing chat adapter
+    -> HarnessRunner               # provider-neutral bounded boundary
+    -> Tool Policy / Approval
+    -> ToolExecutor
+       -> Workspace tools
+       -> run_command
+       -> MCP tools
+
+Optional execution services
+    -> Run History
+    -> Harness Checkpoints
+    -> Harness Resume
+    -> Run Lease
+```
+
+`ChatRuntime` 负责 CLI chat 的事件、生命周期和可选服务编排；`HarnessRunner` 是可被库调用的 provider-neutral、有界执行边界。两者都不是多 Agent 调度器，也不提供任意 Shell、交互式终端、后台任务或 Git 操作。
 
 ## 安装
 
@@ -48,6 +78,8 @@ nexusmind chat "介绍一下你自己"
 ```powershell
 nexusmind chat
 ```
+
+`chat` 的能力通过显式 flags 开启：`--workspace-write` 和 `--workspace-exec` 都要求同时提供 `--workspace`；`--workspace-exec` 还要求 `--command-config`。`--mcp-server` 只用于直接的 `chat` MCP 集成，并要求 `--mcp-config`；Skill 会根据自身的 `allowed_tools` 从 `--mcp-config` 解析需要的 Server。`--checkpoint-run-id` 要求 `--checkpoint-db`，`--lease-run-id` 要求 `--lease-db`，不匹配当前 execution `run_id` 时会 fail fast。
 
 ## 工具
 
@@ -210,6 +242,32 @@ nexusmind runs recover --state-db ./.nexusmind/state.db
 ```
 
 未提供 `--state-db` 时不会创建数据库。默认只记录执行元数据；`--record-content` 才会保存有界的输入预览。数据库可能包含任务、模型和工具执行元数据，应按敏感数据保护。它只记录历史，不支持恢复、重放或自动重新执行工具。确认旧进程已停止后，可显式使用 `runs recover` 将遗留的 `running` Run 标记为 `abandoned`。
+
+### Harness Checkpoint 与 Resume
+
+Harness Checkpoint 是执行状态快照，不是 Run History 的别名。它在安全边界保存消息 transcript、模型/工具计数、Tool Call 身份和 Harness phase；活跃 Tool 尚未完成时不会创建可恢复 checkpoint。`CheckpointBoundary` 支持 `before_model`、`after_model`、`before_tool`、`after_tool` 和 `run_terminal`。启用 checkpoint persistence 后，`CheckpointCoordinator` 会在 `AFTER_MODEL`、`AFTER_TOOL` 和 `RUN_TERMINAL` 边界自动持久化；终态 checkpoint 可以用 `--no-terminal-checkpoint` 关闭。
+
+启用 SQLite checkpoint：
+
+```powershell
+nexusmind chat `
+  --checkpoint-db ./.nexusmind/checkpoints.db `
+  --checkpoint-run-id run-123 `
+  "执行一个可恢复的任务"
+```
+
+`--checkpoint-run-id` 必须同时提供 `--checkpoint-db`，并且如果本次运行同时启用了 Run History，必须与该 execution 的 `run_id` 一致。未提供 `--checkpoint-run-id` 时，CLI 会复用已有 Run History 的 `run_id`，否则生成新的 ID。checkpoint store 使用版本化 SQLite schema、单调递增的 per-run sequence 和事务写入；创建、保存或提交失败会以 checkpoint failure 终止或标记对应边界，避免把未持久化的状态当成已安全保存。checkpoint 数据包含消息和 Tool 结果，应按本地敏感状态保护。
+
+Resume 目前是库/runtime 能力，不是独立的 `nexusmind resume <run-id>` CLI 命令。Host 可以从 `SQLiteCheckpointStore` 读取 checkpoint，并通过 `HarnessRunner.resume_execution(HarnessResumeRequest(...))` 恢复受支持的 `BEFORE_MODEL`、`AFTER_MODEL`、`BEFORE_TOOL` 或 `AFTER_TOOL` 状态；恢复前会校验 checkpoint、transcript、Tool 定义、已消耗的 limits 和未完成 Tool Call，已完成的 Model/Tool 工作不会被重放。终态 checkpoint 用于审计，不表示存在一个可继续执行的终态。
+
+这几个概念解决的是不同问题：
+
+| 能力 | 作用 | 当前入口 |
+| --- | --- | --- |
+| Run History | 记录一次运行发生了什么，供 list/show/prune/recover 审计；不会自动 replay 或 resume | CLI `--state-db`、`nexusmind runs ...` |
+| Harness Checkpoint | 保存可验证的 Harness 状态边界 | CLI `--checkpoint-db`；`CheckpointStore` / `SQLiteCheckpointStore` |
+| Harness Resume | 从受支持的 checkpoint 状态继续执行，避免重复已完成工作 | Library `HarnessRunner.resume_execution(...)` |
+| Run Lease | 为 live `run_id` 提供单一 owner，阻止并发执行推进同一运行 | CLI `--lease-db` / `--lease-run-id`；`RunLeaseCoordinator` |
 
 ### Run 执行租约
 
