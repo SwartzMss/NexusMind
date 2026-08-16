@@ -9,7 +9,6 @@ import os
 from pathlib import Path
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -31,11 +30,8 @@ MAX_OUTPUT_BYTES = 128 * 1024
 MAX_REPORTED_STREAM_BYTES = 2**63 - 1
 DEFAULT_TOOL_RESULT_BYTES = 1024 * 1024
 COMMAND_CLEANUP_GRACE_SECONDS = 2.0
-COMMAND_POSIX_SUPERVISOR_CLEANUP_SECONDS = COMMAND_CLEANUP_GRACE_SECONDS * 3
 COMMAND_STARTUP_GRACE_SECONDS = 10.0
 COMMAND_DISPATCH_GRACE_SECONDS = 2.0
-PR_SET_CHILD_SUBREAPER = 36
-PR_SET_DUMPABLE = 4
 PROFILE_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 ALLOWED_ENV_KEYS = frozenset(
     {
@@ -215,9 +211,7 @@ class RunCommandTool:
 
 
 def _command_cleanup_timeout_budget() -> float:
-    if os.name == "nt":
-        return COMMAND_CLEANUP_GRACE_SECONDS * 4
-    return COMMAND_POSIX_SUPERVISOR_CLEANUP_SECONDS + (COMMAND_CLEANUP_GRACE_SECONDS * 3)
+    return COMMAND_CLEANUP_GRACE_SECONDS * 4
 
 
 def load_command_config(path: str | Path, workspace: Workspace) -> CommandConfig:
@@ -285,6 +279,8 @@ async def _run_profile(
     *,
     max_result_bytes: int = DEFAULT_TOOL_RESULT_BYTES,
 ) -> dict[str, Any]:
+    if os.name != "nt":
+        raise CommandConfigError("Command profiles are supported on Windows only")
     start = time.monotonic()
     process: asyncio.subprocess.Process | None = None
     stdout_task: asyncio.Task[CapturedStream] | None = None
@@ -332,31 +328,21 @@ async def _run_profile(
         status_read_fd, status_write_fd = os.pipe()
         os.set_inheritable(status_read_fd, False)
         os.set_inheritable(status_write_fd, True)
-        if os.name == "nt":
-            import msvcrt
+        import msvcrt
 
-            gate_dir = Path(tempfile.mkdtemp(prefix="nexusmind-command-"))
-            gate_path = gate_dir / "gate"
-            status_write_handle = msvcrt.get_osfhandle(status_write_fd)
-            os.set_handle_inheritable(status_write_handle, True)
-            executable = sys.executable
-            argv_tail = (
-                "-c",
-                _WINDOWS_COMMAND_BOOTSTRAP,
-                json.dumps([profile.executable, *profile.argv[1:]], ensure_ascii=True),
-                str(gate_path),
-                str(status_write_handle),
-                status_nonce,
-            )
-        else:
-            executable = sys.executable
-            argv_tail = (
-                "-c",
-                _POSIX_COMMAND_SUPERVISOR,
-                json.dumps([profile.executable, *profile.argv[1:]], ensure_ascii=True),
-                str(status_write_fd),
-                status_nonce,
-            )
+        gate_dir = Path(tempfile.mkdtemp(prefix="nexusmind-command-"))
+        gate_path = gate_dir / "gate"
+        status_write_handle = msvcrt.get_osfhandle(status_write_fd)
+        os.set_handle_inheritable(status_write_handle, True)
+        executable = sys.executable
+        argv_tail = (
+            "-c",
+            _WINDOWS_COMMAND_BOOTSTRAP,
+            json.dumps([profile.executable, *profile.argv[1:]], ensure_ascii=True),
+            str(gate_path),
+            str(status_write_handle),
+            status_nonce,
+        )
         env = _minimal_environment()
         process_kwargs: dict[str, Any] = {
             "cwd": str(cwd),
@@ -365,15 +351,11 @@ async def _run_profile(
             "stderr": asyncio.subprocess.PIPE,
             "env": env,
         }
-        if os.name == "nt":
-            process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.lpAttributeList = {"handle_list": [status_write_handle]}
-            process_kwargs["startupinfo"] = startupinfo
-            process_kwargs["close_fds"] = True
-        else:
-            process_kwargs["start_new_session"] = True
-            process_kwargs["pass_fds"] = (status_write_fd,)
+        process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.lpAttributeList = {"handle_list": [status_write_handle]}
+        process_kwargs["startupinfo"] = startupinfo
+        process_kwargs["close_fds"] = True
         process = await asyncio.create_subprocess_exec(
             executable,
             *argv_tail,
@@ -446,7 +428,7 @@ async def _run_profile(
         raise original_exception
     if not cleanup_result.root_reaped or not cleanup_result.tree_terminated:
         raise CommandCleanupError("Command process cleanup failed")
-    status_optional = cancelled or (os.name == "nt" and (timed_out or original_exception is not None))
+    status_optional = cancelled or timed_out or original_exception is not None
     if supervisor_status_error is not None and not status_optional:
         raise supervisor_status_error
     if supervisor_status is None and not status_optional:
@@ -584,8 +566,6 @@ def _resolve_command_executable(value: str, cwd: Path) -> str:
 def _validate_executable_file(path: Path) -> None:
     if not path.is_file():
         raise CommandConfigError("Command executable must be a file")
-    if os.name != "nt" and not os.access(path, os.X_OK):
-        raise CommandConfigError("Command executable is not executable")
 
 
 def _abbreviate_middle(value: str, *, max_length: int) -> str:
@@ -600,33 +580,9 @@ def _abbreviate_middle(value: str, *, max_length: int) -> str:
 
 
 def validate_command_execution_platform() -> None:
-    if os.name == "nt":
-        _validate_windows_job_support()
-        return
-    if sys.platform != "linux":
-        raise CommandConfigError("Command profiles require Linux or Windows process containment")
-    if not Path("/proc/self/stat").is_file():
-        raise CommandConfigError("Command profiles require procfs")
-    code = (
-        "import ctypes,sys; "
-        f"libc=ctypes.CDLL(None,use_errno=True); "
-        f"dumpable=libc.prctl({PR_SET_DUMPABLE},0,0,0,0); "
-        f"subreaper=libc.prctl({PR_SET_CHILD_SUBREAPER},1,0,0,0); "
-        "sys.exit(0 if dumpable==0 and subreaper==0 else 1)"
-    )
-    try:
-        result = subprocess.run(
-            [sys.executable, "-c", code],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=2,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise CommandConfigError("Command profiles require Linux subreaper support") from exc
-    if result.returncode != 0:
-        raise CommandConfigError("Command profiles require Linux subreaper support")
+    if os.name != "nt":
+        raise CommandConfigError("Command profiles are supported on Windows only")
+    _validate_windows_job_support()
 
 
 def _validate_windows_job_support() -> None:
@@ -669,20 +625,16 @@ def _minimal_environment() -> dict[str, str]:
 
 _WINDOWS_COMMAND_BOOTSTRAP = r"""
 import json
+import msvcrt
 import os
 import pathlib
 import subprocess
 import sys
 import time
-if sys.platform == "win32":
-    import msvcrt
 
 argv = json.loads(sys.argv[1])
 gate = pathlib.Path(sys.argv[2])
-if sys.platform == "win32":
-    status_fd = msvcrt.open_osfhandle(int(sys.argv[3]), os.O_WRONLY)
-else:
-    status_fd = int(sys.argv[3])
+status_fd = msvcrt.open_osfhandle(int(sys.argv[3]), os.O_WRONLY)
 nonce = sys.argv[4]
 
 def write_status(target_started, start_succeeded, root_exit_code, cleanup_succeeded):
@@ -721,219 +673,6 @@ ok = write_status(True, True, completed.returncode, True)
 if not ok:
     sys.exit(126)
 sys.exit(completed.returncode)
-"""
-
-
-_POSIX_COMMAND_SUPERVISOR = r"""
-import ctypes
-import json
-import os
-import pathlib
-import signal
-import subprocess
-import sys
-import time
-
-PR_SET_CHILD_SUBREAPER = 36
-PR_SET_DUMPABLE = 4
-blocked_signals = {signal.SIGTERM, signal.SIGINT}
-signal.pthread_sigmask(signal.SIG_BLOCK, blocked_signals)
-child = None
-cleaning = False
-status_fd = None
-nonce = ""
-
-def enable_subreaper():
-    if sys.platform != "linux":
-        raise RuntimeError("POSIX command supervisor requires Linux")
-    if not pathlib.Path("/proc/self/stat").is_file():
-        raise RuntimeError("POSIX command supervisor requires procfs")
-    libc = ctypes.CDLL(None, use_errno=True)
-    if libc.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
-        raise OSError(ctypes.get_errno(), "prctl(PR_SET_DUMPABLE) failed")
-    if libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
-        raise OSError(ctypes.get_errno(), "prctl(PR_SET_CHILD_SUBREAPER) failed")
-
-def parse_stat(text):
-    close = text.rfind(")")
-    if close < 0:
-        raise ValueError("invalid stat")
-    pid = int(text[: text.find("(")].strip())
-    rest = text[close + 2 :].split()
-    if len(rest) < 2:
-        raise ValueError("invalid stat")
-    return pid, int(rest[1])
-
-def descendants(root):
-    proc = pathlib.Path("/proc")
-    if not proc.is_dir():
-        return None
-    parents = {}
-    try:
-        entries = tuple(proc.iterdir())
-    except OSError:
-        return None
-    for entry in entries:
-        if not entry.name.isdecimal():
-            continue
-        try:
-            pid, ppid = parse_stat((entry / "stat").read_text(encoding="ascii"))
-        except FileNotFoundError:
-            continue
-        except OSError:
-            return None
-        except ValueError:
-            return None
-        parents[pid] = ppid
-    found = []
-    pending = [root]
-    seen = {root}
-    while pending:
-        parent = pending.pop()
-        for pid, ppid in parents.items():
-            if ppid == parent and pid not in seen and pid != os.getpid():
-                seen.add(pid)
-                found.append(pid)
-                pending.append(pid)
-    return found
-
-def signal_pid(pid, sig):
-    try:
-        os.kill(pid, sig)
-    except ProcessLookupError:
-        return True
-    except (OSError, TypeError, ValueError):
-        return False
-    return True
-
-def wait_child(timeout):
-    if child is None:
-        return True
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if child.poll() is not None:
-            return True
-        time.sleep(0.02)
-    return child.poll() is not None
-
-def reap_available():
-    while True:
-        try:
-            pid, _ = os.waitpid(-1, os.WNOHANG)
-        except ChildProcessError:
-            return
-        if pid == 0:
-            return
-
-def cleanup_descendants():
-    ok = True
-    deadline = time.monotonic() + 1.0
-    while time.monotonic() < deadline:
-        found = descendants(os.getpid())
-        if found is None:
-            return False
-        if not found:
-            reap_available()
-            return ok
-        for pid in found:
-            if not signal_pid(pid, signal.SIGTERM):
-                ok = False
-        time.sleep(0.05)
-        reap_available()
-    deadline = time.monotonic() + 1.0
-    while time.monotonic() < deadline:
-        found = descendants(os.getpid())
-        if found is None:
-            return False
-        if not found:
-            reap_available()
-            return ok
-        for pid in found:
-            if not signal_pid(pid, signal.SIGKILL):
-                ok = False
-        time.sleep(0.05)
-        reap_available()
-    found = descendants(os.getpid())
-    return found == [] and ok
-
-def cleanup(signum=None):
-    global cleaning
-    if cleaning:
-        return True
-    cleaning = True
-    ok = True
-    if child is not None and child.poll() is None:
-        try:
-            os.killpg(child.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        except OSError:
-            ok = False
-        wait_child(1.0)
-        if child.poll() is None:
-            try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            except OSError:
-                ok = False
-            ok = wait_child(1.0) and ok
-    return cleanup_descendants() and ok
-
-def write_status(target_started, start_succeeded, root_exit_code, cleanup_succeeded):
-    if status_fd is None:
-        return False
-    try:
-        status = {
-            "nonce": nonce,
-            "target_started": target_started,
-            "start_succeeded": start_succeeded,
-            "root_exit_code": root_exit_code,
-            "cleanup_succeeded": cleanup_succeeded,
-        }
-        payload = json.dumps(status, separators=(",", ":")).encode("utf-8")
-        os.write(status_fd, payload)
-        os.close(status_fd)
-    except OSError:
-        return False
-    return True
-
-def cleanup_and_exit(signum=None, frame=None):
-    if cleaning:
-        return
-    ok = cleanup(signum)
-    ok = write_status(child is not None, child is not None, None, ok) and ok
-    sys.exit(128 + (signum or 0) if ok else 125)
-
-signal.signal(signal.SIGTERM, cleanup_and_exit)
-signal.signal(signal.SIGINT, cleanup_and_exit)
-argv = json.loads(sys.argv[1])
-status_fd = int(sys.argv[2])
-nonce = sys.argv[3]
-try:
-    enable_subreaper()
-except Exception:
-    ok = write_status(False, False, None, True)
-    sys.exit(124 if ok else 125)
-def unblock_command_signals():
-    signal.pthread_sigmask(signal.SIG_UNBLOCK, blocked_signals)
-try:
-    child = subprocess.Popen(
-        argv,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-        preexec_fn=unblock_command_signals,
-    )
-except OSError:
-    ok = write_status(False, False, None, True)
-    sys.exit(124 if ok else 125)
-signal.pthread_sigmask(signal.SIG_UNBLOCK, blocked_signals)
-while child.poll() is None:
-    time.sleep(0.05)
-exit_code = child.returncode
-ok = cleanup(0)
-ok = write_status(True, True, exit_code, ok) and ok
-sys.exit(0 if ok else 125)
 """
 
 
@@ -1130,10 +869,7 @@ async def _cleanup_process(
     tree_terminated = True
     if force:
         tree_terminated = _terminate_process_tree(process, guard, soft=True) and tree_terminated
-        soft_wait = COMMAND_CLEANUP_GRACE_SECONDS
-        if os.name != "nt":
-            soft_wait = COMMAND_POSIX_SUPERVISOR_CLEANUP_SECONDS
-        await _wait_for_process(process, timeout=soft_wait)
+        await _wait_for_process(process, timeout=COMMAND_CLEANUP_GRACE_SECONDS)
         if process.returncode is None:
             tree_terminated = _terminate_process_tree(process, guard, soft=False) and tree_terminated
             root_reaped = await _wait_for_process(process)
@@ -1173,14 +909,9 @@ async def _wait_for_process(
 def _terminate_process_tree(process: asyncio.subprocess.Process, guard: _ProcessTreeGuard | None, *, soft: bool) -> bool:
     try:
         if guard is not None:
-            if soft:
-                return guard.terminate()
-            else:
-                return guard.kill()
-        elif os.name == "nt":
-            _kill_windows_process_tree(process.pid)
+            return guard.terminate() if soft else guard.kill()
         else:
-            os.killpg(process.pid, signal.SIGTERM if soft else signal.SIGKILL)
+            _kill_windows_process_tree(process.pid)
     except ProcessLookupError:
         return True
     except OSError:
@@ -1205,44 +936,26 @@ def _kill_windows_process_tree(pid: int) -> None:
     )
 
 
-def _signal_pid(pid: int, sig: signal.Signals) -> bool:
-    try:
-        os.kill(pid, sig)
-        return True
-    except ProcessLookupError:
-        return True
-    except OSError:
-        return False
-
-
 class _ProcessTreeGuard:
     def __init__(self, process: asyncio.subprocess.Process) -> None:
         self._process = process
-        self._job: _WindowsJob | None = None
+        self._job = _WindowsJob(process)
         self._closed = False
-        if os.name == "nt":
-            self._job = _WindowsJob(process)
 
     def terminate(self) -> bool:
         if self._closed:
             return True
-        if self._job is not None:
-            return self.close()
-        return _signal_pid(self._process.pid, signal.SIGTERM)
+        return self.close()
 
     def kill(self) -> bool:
         if self._closed:
             return True
-        if self._job is not None:
-            return self.close()
-        return _signal_pid(self._process.pid, signal.SIGKILL)
+        return self.close()
 
     def close(self) -> bool:
         if self._closed:
             return True
         self._closed = True
-        if self._job is None:
-            return True
         return self._job.close()
 
 class _WindowsJob:

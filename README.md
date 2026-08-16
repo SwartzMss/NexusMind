@@ -125,7 +125,7 @@ nexusmind chat `
 
 每次 `run_command` 默认仍需要用户批准。审批摘要会显示 Profile、Workspace 相对 cwd、固定 argv 摘要和超时。命令输出会作为 ToolResult 发送给模型 Provider，程序主动打印的本地路径或敏感内容不会被 NexusMind 自动清除。
 
-第一版仅支持 Windows 和 Linux。NexusMind 会尽力在 timeout、取消和正常结束时回收进程组或 Job Object，但在 Linux 上如果被执行代码杀死 supervisor 或主动脱离执行单元，后台后代清理是 best-effort，不是内核级 containment 保证。第一版不支持任意 Shell、交互式终端、stdin、后台任务、模型自定义环境变量或密钥注入。
+当前版本仅支持 Windows。`run_command` 使用 Windows Job Object 在 timeout、取消和正常结束时回收进程树；Linux 和 macOS 不属于支持的平台，命令 Profile 会显式失败。第一版不支持任意 Shell、交互式终端、stdin、后台任务、模型自定义环境变量或密钥注入。
 
 ## MCP Stdio 工具
 
@@ -239,6 +239,6 @@ python -m compileall -q src
 python -m pytest -q
 ```
 
-项目支持 Python 3.11、3.12 和 3.13。CI 在 Ubuntu 和 Windows 上运行完整离线测试套件。
+项目支持 Python 3.11、3.12 和 3.13，运行平台为 Windows。CI 在 `windows-latest` 上运行完整离线测试套件；Linux 和 macOS 不属于当前支持范围。
 
 测试不得依赖真实 API Key、真实模型服务、真实外部 MCP Server 或开发者本机目录。新增功能应包含对应测试；MCP 测试应继续使用仓库内离线 fixture。
