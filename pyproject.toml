@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "nexusmind"
 version = "0.1.0"
-description = "Minimal model runtime baseline for NexusMind."
+description = "Provider-neutral bounded Agent runtime with Tool, Workspace, MCP, checkpoint, and lease controls."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
