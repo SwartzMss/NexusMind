@@ -1090,7 +1090,11 @@ def test_cancelling_one_acquire_does_not_cancel_parallel_same_owner_acquire(tmp_
             await first
         assert not second.done()
 
-        store.allow[1].set()
+        # Executor worker start order is not an operation identity. Release
+        # both gates; the cancellation flag still makes only the cancelled
+        # acquire return CANCELLED.
+        for allow in store.allow:
+            allow.set()
         lease = await second
         assert lease.generation == "generation-1"
         await store.close()
