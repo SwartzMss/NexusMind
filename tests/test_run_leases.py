@@ -1370,6 +1370,81 @@ def test_terminal_does_not_hang_when_renew_suppresses_cancellation() -> None:
     asyncio.run(run())
 
 
+def test_cancelled_stream_with_stubborn_iterator_does_not_renew_forever() -> None:
+    async def run() -> None:
+        class Store:
+            def __init__(self) -> None:
+                self.renew_started = asyncio.Event()
+                self.allow_renew_exit = asyncio.Event()
+                self.renew_finished = asyncio.Event()
+                self.release_called = False
+
+            async def acquire(self, run_id, owner_id, ttl):
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def renew(self, run_id, owner_id, ttl, generation=None):
+                self.renew_started.set()
+                try:
+                    await self.allow_renew_exit.wait()
+                except asyncio.CancelledError:
+                    await self.allow_renew_exit.wait()
+                finally:
+                    self.renew_finished.set()
+                now = datetime.now(timezone.utc)
+                return RunLease(run_id, owner_id, now, now, now + ttl)
+
+            async def release(self, run_id, owner_id, generation=None):
+                self.release_called = True
+
+        class StubbornIterator:
+            def __init__(self) -> None:
+                self.delivered = False
+                self.next_started = asyncio.Event()
+                self.allow_next_exit = asyncio.Event()
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if not self.delivered:
+                    self.delivered = True
+                    return RuntimeEvent(RuntimeEventType.TEXT_DELTA, text="partial")
+                self.next_started.set()
+                try:
+                    await self.allow_next_exit.wait()
+                except asyncio.CancelledError:
+                    await self.allow_next_exit.wait()
+                raise StopAsyncIteration
+
+        store = Store()
+        iterator = StubbornIterator()
+        coordinator = RunLeaseCoordinator(
+            store,
+            run_id="run-stubborn-next",
+            owner_id="owner-stubborn-next",
+            heartbeat_interval=timedelta(milliseconds=1),
+            lease_release_timeout=timedelta(milliseconds=20),
+        )
+        task = asyncio.create_task(_collect_events(coordinator.stream(iterator)))
+        await asyncio.wait_for(iterator.next_started.wait(), timeout=0.2)
+        await asyncio.wait_for(store.renew_started.wait(), timeout=0.2)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=0.2)
+
+        assert coordinator._heartbeat_active is False
+        assert coordinator.execution_unresolved is True
+        assert store.release_called is False
+
+        iterator.allow_next_exit.set()
+        store.allow_renew_exit.set()
+        await asyncio.wait_for(store.renew_finished.wait(), timeout=0.2)
+
+    asyncio.run(run())
+
+
 def test_cancelled_custom_acquire_that_finishes_late_is_compensated() -> None:
     async def run() -> None:
         class Store:

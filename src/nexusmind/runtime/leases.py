@@ -418,7 +418,8 @@ class RunLeaseCoordinator:
         heartbeat_task = self._heartbeat_task
         if heartbeat_task is None:
             next_task.cancel()
-            await self._drain(next_task)
+            if not await self._cancel_task_with_deadline(next_task):
+                self._mark_execution_uncertain(next_task)
             raise RunLeaseOwnershipLost("Run lease heartbeat is not running")
         self._guard.consume_renewal_signal()
         expiry_task = asyncio.create_task(self._wait_for_expiry())
@@ -435,7 +436,7 @@ class RunLeaseCoordinator:
                     if next_task in done:
                         break
                     expiry_task.cancel()
-                    await self._drain(expiry_task)
+                    await self._cancel_task_with_deadline(expiry_task)
                     self._guard.consume_renewal_signal()
                     expiry_task = asyncio.create_task(self._wait_for_expiry())
                     renewal_task = asyncio.create_task(self._guard.wait_for_renewal())
@@ -443,8 +444,6 @@ class RunLeaseCoordinator:
                 break
         except asyncio.CancelledError:
             next_finished = await self._cancel_task_with_deadline(next_task)
-            await self._cancel_task_with_deadline(expiry_task)
-            await self._cancel_task_with_deadline(renewal_task)
             if not next_finished:
                 self._mark_execution_uncertain(next_task)
             raise
@@ -453,8 +452,8 @@ class RunLeaseCoordinator:
                 expiry_task.cancel()
             if not renewal_task.done():
                 renewal_task.cancel()
-            await self._drain(expiry_task)
-            await self._drain(renewal_task)
+            await self._cancel_task_with_deadline(expiry_task)
+            await self._cancel_task_with_deadline(renewal_task)
 
         if next_task in done:
             try:
