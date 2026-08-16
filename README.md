@@ -245,7 +245,7 @@ nexusmind runs recover --state-db ./.nexusmind/state.db
 
 ### Harness Checkpoint 与 Resume
 
-Harness Checkpoint 是执行状态快照，不是 Run History 的别名。它在安全边界保存消息 transcript、模型/工具计数、Tool Call 身份和 Harness phase；活跃 Tool 尚未完成时不会创建可恢复 checkpoint。Checkpoint schema 支持 `before_model`、`after_model`、`before_tool` 和 `after_tool` 边界；运行时默认在模型轮次完成、Tool result 和终态处自动持久化，终态会保存 `run_terminal` checkpoint；可以用 `--no-terminal-checkpoint` 关闭终态 checkpoint。
+Harness Checkpoint 是执行状态快照，不是 Run History 的别名。它在安全边界保存消息 transcript、模型/工具计数、Tool Call 身份和 Harness phase；活跃 Tool 尚未完成时不会创建可恢复 checkpoint。`CheckpointBoundary` 支持 `before_model`、`after_model`、`before_tool`、`after_tool` 和 `run_terminal`。启用 checkpoint persistence 后，`CheckpointCoordinator` 会在 `AFTER_MODEL`、`AFTER_TOOL` 和 `RUN_TERMINAL` 边界自动持久化；终态 checkpoint 可以用 `--no-terminal-checkpoint` 关闭。
 
 启用 SQLite checkpoint：
 
