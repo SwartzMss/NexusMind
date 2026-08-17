@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import nexusmind.knowledge_ingestion as knowledge_ingestion
 from nexusmind import (
     DirectoryDepthLimitError,
     DocumentCountLimitError,
@@ -196,6 +197,29 @@ def test_root_symlink_is_rejected_and_nested_symlinks_are_skipped(tmp_path: Path
     assert not any(path.startswith("..") for path in logical_paths)
 
     outside_file.unlink()
+
+
+def test_read_rejects_path_identity_change_after_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "notes.txt"
+    other = tmp_path / "other.txt"
+    path.write_text("notes", encoding="utf-8")
+    other.write_text("other", encoding="utf-8")
+    real_stat = knowledge_ingestion.os.stat
+
+    def mismatching_stat(candidate, *args, **kwargs):
+        if Path(candidate) == path and kwargs.get("follow_symlinks") is False:
+            return real_stat(other, *args, **kwargs)
+        return real_stat(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(knowledge_ingestion.os, "stat", mismatching_stat)
+    with pytest.raises(SymlinkSourceError):
+        knowledge_ingestion._read_verified_bytes(
+            path,
+            root=tmp_path,
+            logical_path="notes.txt",
+            limits=LocalIngestionLimits(),
+            total_bytes_before=0,
+        )
 
 
 def test_adapter_errors_are_controlled_and_do_not_expose_host_paths(tmp_path: Path) -> None:

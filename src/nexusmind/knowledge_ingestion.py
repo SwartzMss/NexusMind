@@ -9,6 +9,7 @@ contracts.
 from __future__ import annotations
 
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Protocol, runtime_checkable
@@ -22,6 +23,7 @@ DEFAULT_MAX_DOCUMENTS = 1_000
 DEFAULT_MAX_TOTAL_BYTES = 10 * 1024 * 1024
 DEFAULT_MAX_ENTRIES_SCANNED = 10_000
 DEFAULT_MAX_DIRECTORY_DEPTH = 32
+_REPARSE_POINT_ATTRIBUTE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
 class KnowledgeIngestionError(Exception):
@@ -141,18 +143,32 @@ def _path_from_input(path: str | os.PathLike[str]) -> Path:
     return Path(raw_path)
 
 
+def _is_symlink_or_reparse_point(path: Path) -> bool:
+    """Return whether a path is a symlink or Windows reparse point."""
+
+    try:
+        file_stat = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise KnowledgeIngestionError("source path could not be inspected") from exc
+    return _file_stat_is_symlink_or_reparse(file_stat)
+
+
+def _file_stat_is_symlink_or_reparse(file_stat: os.stat_result) -> bool:
+    return stat.S_ISLNK(file_stat.st_mode) or bool(
+        getattr(file_stat, "st_file_attributes", 0) & _REPARSE_POINT_ATTRIBUTE
+    )
+
+
 def _reject_symlink_components(path: Path) -> None:
-    """Reject symlink path components without exposing the absolute path."""
+    """Reject symlink/reparse path components without exposing absolute paths."""
 
     absolute = Path(os.path.abspath(os.fspath(path)))
     current = absolute
     while True:
-        try:
-            is_symlink = current.is_symlink()
-        except OSError as exc:
-            raise KnowledgeIngestionError("source path could not be inspected") from exc
-        if is_symlink:
-            raise SymlinkSourceError("symbolic links are not supported")
+        if _is_symlink_or_reparse_point(current):
+            raise SymlinkSourceError("symbolic links and Windows reparse points are not supported")
         parent = current.parent
         if parent == current:
             return
@@ -188,31 +204,108 @@ def _content_type(path: Path) -> str:
     return "text/plain"
 
 
+def _same_file_identity(first: os.stat_result, second: os.stat_result) -> bool:
+    return first.st_dev == second.st_dev and first.st_ino == second.st_ino
+
+
+def _read_verified_bytes(
+    path: Path,
+    *,
+    root: Path,
+    logical_path: str,
+    limits: LocalIngestionLimits,
+    total_bytes_before: int,
+) -> bytes:
+    """Read from an opened handle after rechecking path and file identity.
+
+    Opening first makes subsequent path changes unable to redirect the bytes
+    read from the handle.  The no-follow lstat and identity comparison reject
+    a path that was swapped for a symlink, junction, or another file between
+    discovery and read.
+    """
+
+    file_descriptor: int | None = None
+    try:
+        try:
+            file_descriptor = os.open(
+                os.fspath(path),
+                os.O_RDONLY | getattr(os, "O_BINARY", 0),
+            )
+            opened_stat = os.fstat(file_descriptor)
+        except OSError as exc:
+            raise KnowledgeIngestionError("document could not be opened") from exc
+
+        if opened_stat.st_size > limits.max_file_bytes:
+            raise FileTooLargeError(f"document exceeds the file-size limit: {logical_path}")
+        remaining_bytes = limits.max_total_bytes - total_bytes_before
+        if opened_stat.st_size > remaining_bytes:
+            raise TotalBytesLimitError("documents exceed the total-byte limit")
+
+        _reject_symlink_components(path)
+        try:
+            current_stat = os.stat(path, follow_symlinks=False)
+        except OSError as exc:
+            raise KnowledgeIngestionError("document could not be inspected") from exc
+        if _file_stat_is_symlink_or_reparse(current_stat) or not _same_file_identity(
+            opened_stat, current_stat
+        ):
+            raise SymlinkSourceError("document changed to a symlink or reparse point during ingestion")
+
+        try:
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(root)
+        except FileNotFoundError as exc:
+            raise KnowledgeIngestionError("document disappeared during ingestion") from exc
+        except ValueError as exc:
+            raise PathEscapeError("document escaped the source root during ingestion") from exc
+        except OSError as exc:
+            raise KnowledgeIngestionError("document could not be inspected") from exc
+
+        try:
+            current_stat_after_resolve = os.stat(path, follow_symlinks=False)
+        except OSError as exc:
+            raise KnowledgeIngestionError("document could not be inspected") from exc
+        if _file_stat_is_symlink_or_reparse(current_stat_after_resolve) or not _same_file_identity(
+            opened_stat, current_stat_after_resolve
+        ):
+            raise SymlinkSourceError("document changed during ingestion")
+
+        read_limit = min(limits.max_file_bytes, remaining_bytes)
+        try:
+            with os.fdopen(file_descriptor, "rb") as handle:
+                file_descriptor = None
+                content_bytes = handle.read(read_limit + 1)
+        except OSError as exc:
+            raise KnowledgeIngestionError("document could not be read") from exc
+        if len(content_bytes) > limits.max_file_bytes:
+            raise FileTooLargeError(f"document exceeds the file-size limit: {logical_path}")
+        if total_bytes_before + len(content_bytes) > limits.max_total_bytes:
+            raise TotalBytesLimitError("documents exceed the total-byte limit")
+        return content_bytes
+    finally:
+        if file_descriptor is not None:
+            try:
+                os.close(file_descriptor)
+            except OSError:
+                pass
+
+
 def _read_document(
     path: Path,
     *,
+    root: Path,
     source_id: str,
     logical_path: str,
     limits: LocalIngestionLimits,
     total_bytes_before: int,
 ) -> tuple[Document, int]:
-    try:
-        file_size = path.stat().st_size
-    except OSError as exc:
-        raise KnowledgeIngestionError("document could not be inspected") from exc
-    if file_size > limits.max_file_bytes:
-        raise FileTooLargeError(f"document exceeds the file-size limit: {logical_path}")
-    if total_bytes_before + file_size > limits.max_total_bytes:
-        raise TotalBytesLimitError("documents exceed the total-byte limit")
-
-    try:
-        content_bytes = path.read_bytes()
-    except OSError as exc:
-        raise KnowledgeIngestionError("document could not be read") from exc
-    if len(content_bytes) > limits.max_file_bytes:
-        raise FileTooLargeError(f"document exceeds the file-size limit: {logical_path}")
-    if total_bytes_before + len(content_bytes) > limits.max_total_bytes:
-        raise TotalBytesLimitError("documents exceed the total-byte limit")
+    content_bytes = _read_verified_bytes(
+        path,
+        root=root,
+        logical_path=logical_path,
+        limits=limits,
+        total_bytes_before=total_bytes_before,
+    )
     try:
         content = content_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -260,6 +353,7 @@ class LocalFileAdapter:
             raise UnsupportedFileTypeError(f"unsupported document extension: {root.suffix.lower() or '<none>'}")
         document, _ = _read_document(
             root,
+            root=root,
             source_id=self._source_id,
             logical_path=_display_name(root, "document"),
             limits=self._limits,
@@ -302,6 +396,7 @@ class LocalDirectoryAdapter:
                 raise DocumentCountLimitError("documents exceed the document-count limit")
             document, loaded_bytes = _read_document(
                 path,
+                root=root,
                 source_id=self._source_id,
                 logical_path=logical_path,
                 limits=self._limits,
@@ -332,7 +427,7 @@ class LocalDirectoryAdapter:
                         # configured root and skips symlinks discovered below it.
                         entry_path = Path(entry.path)
                         try:
-                            if entry.is_symlink():
+                            if _is_symlink_or_reparse_point(entry_path):
                                 continue
                             resolved = entry_path.resolve(strict=True)
                         except FileNotFoundError as exc:

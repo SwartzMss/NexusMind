@@ -29,7 +29,7 @@ Local File / Directory
     -> Document[]
 ```
 
-第一版只支持 UTF-8 的 `.txt`、`.md` 和 `.markdown` 文件，并限制单文件大小、文档数量、总读取字节数、扫描条目数和目录深度。目录 adapter 收集后按完整的来源相对路径排序，跳过符号链接和不支持的扩展名。PDF、Office、Web、GitHub、MCP、索引和检索属于后续独立能力。
+第一版只支持 UTF-8 的 `.txt`、`.md` 和 `.markdown` 文件，并限制单文件大小、文档数量、总读取字节数、扫描条目数和目录深度。目录 adapter 收集后按完整的来源相对路径排序，跳过符号链接、junction 和其他 Windows reparse point，以及不支持的扩展名；单文件来源或根路径遇到这些类型会拒绝。读取文档时还会从已打开的文件句柄读取，并复核路径 containment 与文件 identity，避免 scan 后路径被替换而跟随到其他目标。PDF、Office、Web、GitHub、MCP、索引和检索属于后续独立能力。
 
 ```text
 External Knowledge -> KnowledgeSource -> Document
