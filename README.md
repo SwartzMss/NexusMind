@@ -20,6 +20,17 @@ NexusMind 的主要能力层如下：
 
 NexusMind 开始引入独立的 Knowledge Runtime / Knowledge Layer，与现有 Agent Runtime 解耦。`KnowledgeSource` 表示知识来源，`source_id` 由 Host 或 Source adapter 提供；`Document` 表示来源下由逻辑标识定位的一份文本内容。Document 的 `document_id` 由 `source_id + logical_path` 派生，并使用 UTF-8 SHA-256 `content_hash` 检测同一逻辑文档的内容变化。该层不包含文件扫描、分块、Embedding、索引、检索或 RAG 编排；本地文件/目录只是可以映射到它的一个来源示例，后续可由 Agent、Skill 或其他消费者使用。
 
+本地知识 ingestion 位于独立的 Knowledge Ingestion 层。`LocalFileAdapter` 和 `LocalDirectoryAdapter` 负责受限的文件发现、严格 UTF-8 读取以及来源相对路径映射；文件扩展名、扫描上限和文件系统安全策略都属于 adapter 实现，不会进入 provider-neutral Knowledge Core：
+
+```text
+Local File / Directory
+    -> KnowledgeSourceAdapter
+    -> KnowledgeSource
+    -> Document[]
+```
+
+第一版只支持 UTF-8 的 `.txt`、`.md` 和 `.markdown` 文件，并限制单文件大小、文档数量、总读取字节数、扫描条目数和目录深度。目录 adapter 收集后按完整的来源相对路径排序，跳过符号链接、junction 和其他 Windows reparse point，以及不支持的扩展名；单文件来源或根路径遇到这些类型会拒绝。Discovery 会记录每个文件的 identity；读取时从已打开的文件句柄读取，并依次复核 discovered identity、opened identity、当前路径 identity 与 containment，避免 scan 后路径被替换而读取其他目标。PDF、Office、Web、GitHub、MCP、索引和检索属于后续独立能力。
+
 ```text
 External Knowledge -> KnowledgeSource -> Document
                                       +-> future Chunk / Index / Retrieval
