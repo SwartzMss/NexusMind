@@ -364,6 +364,7 @@ class LocalDirectoryAdapter:
 
             # Keep traversal deterministic while using an explicit stack:
             # the first directory alphabetically is processed first.
+            child_directories.sort(key=lambda item: (item[0].name.casefold(), item[0].name))
             stack.extend(reversed(child_directories))
 
         return sorted(candidates, key=lambda item: (item[1].casefold(), item[1]))
