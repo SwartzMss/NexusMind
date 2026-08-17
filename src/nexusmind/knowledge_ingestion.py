@@ -20,6 +20,8 @@ DEFAULT_SUPPORTED_EXTENSIONS = frozenset({".md", ".markdown", ".txt"})
 DEFAULT_MAX_FILE_BYTES = 1 * 1024 * 1024
 DEFAULT_MAX_DOCUMENTS = 1_000
 DEFAULT_MAX_TOTAL_BYTES = 10 * 1024 * 1024
+DEFAULT_MAX_ENTRIES_SCANNED = 10_000
+DEFAULT_MAX_DIRECTORY_DEPTH = 32
 
 
 class KnowledgeIngestionError(Exception):
@@ -58,6 +60,14 @@ class TotalBytesLimitError(KnowledgeIngestionError):
     """Accepted documents exceed the configured total byte limit."""
 
 
+class EntryScanLimitError(KnowledgeIngestionError):
+    """A directory scan encountered more filesystem entries than allowed."""
+
+
+class DirectoryDepthLimitError(KnowledgeIngestionError):
+    """A directory scan exceeded the configured nesting depth."""
+
+
 class PathEscapeError(KnowledgeIngestionError):
     """A discovered path cannot be proven to remain under the source root."""
 
@@ -75,11 +85,18 @@ class KnowledgeSourceAdapter(Protocol):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class LocalIngestionLimits:
-    """Resource limits applied by the local adapters."""
+    """Resource limits applied by the local adapters.
+
+    ``max_entries_scanned`` counts every child filesystem entry inspected,
+    including unsupported files, directories, and symlinks.  Directory depth
+    is measured from the configured root, where the root itself is depth 0.
+    """
 
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES
     max_documents: int = DEFAULT_MAX_DOCUMENTS
     max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES
+    max_entries_scanned: int = DEFAULT_MAX_ENTRIES_SCANNED
+    max_directory_depth: int = DEFAULT_MAX_DIRECTORY_DEPTH
 
     def __post_init__(self) -> None:
         if type(self.max_file_bytes) is not int or self.max_file_bytes <= 0:
@@ -88,6 +105,10 @@ class LocalIngestionLimits:
             raise ValueError("max_documents must be a positive integer")
         if type(self.max_total_bytes) is not int or self.max_total_bytes <= 0:
             raise ValueError("max_total_bytes must be a positive integer")
+        if type(self.max_entries_scanned) is not int or self.max_entries_scanned <= 0:
+            raise ValueError("max_entries_scanned must be a positive integer")
+        if type(self.max_directory_depth) is not int or self.max_directory_depth < 0:
+            raise ValueError("max_directory_depth must be a non-negative integer")
 
 
 def _normalize_extensions(extensions: Iterable[str] | None) -> frozenset[str]:
@@ -276,7 +297,7 @@ class LocalDirectoryAdapter:
         root = _validate_root(self._path, "directory")
         documents: list[Document] = []
         total_bytes = 0
-        for path, logical_path in self._iter_supported_files(root, root):
+        for path, logical_path in self._discover_supported_files(root):
             if len(documents) >= self._limits.max_documents:
                 raise DocumentCountLimitError("documents exceed the document-count limit")
             document, loaded_bytes = _read_document(
@@ -290,41 +311,74 @@ class LocalDirectoryAdapter:
             total_bytes += loaded_bytes
         return tuple(documents)
 
-    def _iter_supported_files(self, directory: Path, root: Path):
-        try:
-            entries = sorted(directory.iterdir(), key=lambda item: (item.name.casefold(), item.name))
-        except OSError as exc:
-            raise KnowledgeIngestionError("source directory could not be scanned") from exc
+    def _discover_supported_files(self, root: Path) -> list[tuple[Path, str]]:
+        """Discover supported files with explicit, bounded traversal state."""
 
-        for entry in entries:
-            # The first version is deliberately fail-closed for the configured
-            # root and skips symlinks discovered below a valid directory root.
+        stack: list[tuple[Path, int]] = [(root, 0)]
+        candidates: list[tuple[Path, str]] = []
+        entries_scanned = 0
+
+        while stack:
+            directory, depth = stack.pop()
+            child_directories: list[tuple[Path, int]] = []
             try:
-                if entry.is_symlink():
-                    continue
-                resolved = entry.resolve(strict=True)
-            except FileNotFoundError as exc:
-                raise KnowledgeIngestionError("source entry disappeared during scan") from exc
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        entries_scanned += 1
+                        if entries_scanned > self._limits.max_entries_scanned:
+                            raise EntryScanLimitError("source scan exceeds the entry-count limit")
+
+                        # The first version is deliberately fail-closed for the
+                        # configured root and skips symlinks discovered below it.
+                        entry_path = Path(entry.path)
+                        try:
+                            if entry.is_symlink():
+                                continue
+                            resolved = entry_path.resolve(strict=True)
+                        except FileNotFoundError as exc:
+                            raise KnowledgeIngestionError("source entry disappeared during scan") from exc
+                        except OSError as exc:
+                            raise KnowledgeIngestionError("source entry could not be inspected") from exc
+
+                        try:
+                            relative_path = resolved.relative_to(root).as_posix()
+                            is_directory = resolved.is_dir()
+                            is_file = resolved.is_file()
+                        except ValueError as exc:
+                            raise PathEscapeError("discovered path escaped the source root") from exc
+                        except OSError as exc:
+                            raise KnowledgeIngestionError("source entry could not be inspected") from exc
+
+                        if is_directory:
+                            if depth >= self._limits.max_directory_depth:
+                                raise DirectoryDepthLimitError("source exceeds the directory-depth limit")
+                            child_directories.append((resolved, depth + 1))
+                        elif is_file and resolved.suffix.lower() in self._supported_extensions:
+                            candidates.append((resolved, relative_path))
+                            if len(candidates) > self._limits.max_documents:
+                                raise DocumentCountLimitError("documents exceed the document-count limit")
+            except EntryScanLimitError:
+                raise
             except OSError as exc:
-                raise KnowledgeIngestionError("source entry could not be inspected") from exc
+                raise KnowledgeIngestionError("source directory could not be scanned") from exc
 
-            try:
-                relative_path = resolved.relative_to(root).as_posix()
-            except ValueError as exc:
-                raise PathEscapeError("discovered path escaped the source root") from exc
+            # Keep traversal deterministic while using an explicit stack:
+            # the first directory alphabetically is processed first.
+            stack.extend(reversed(child_directories))
 
-            if resolved.is_dir():
-                yield from self._iter_supported_files(resolved, root)
-            elif resolved.is_file() and resolved.suffix.lower() in self._supported_extensions:
-                yield resolved, relative_path
+        return sorted(candidates, key=lambda item: (item[1].casefold(), item[1]))
 
 
 __all__ = [
+    "DEFAULT_MAX_DIRECTORY_DEPTH",
     "DEFAULT_MAX_DOCUMENTS",
+    "DEFAULT_MAX_ENTRIES_SCANNED",
     "DEFAULT_MAX_FILE_BYTES",
     "DEFAULT_MAX_TOTAL_BYTES",
     "DEFAULT_SUPPORTED_EXTENSIONS",
+    "DirectoryDepthLimitError",
     "DocumentCountLimitError",
+    "EntryScanLimitError",
     "FileTooLargeError",
     "InvalidTextEncodingError",
     "KnowledgeIngestionError",
