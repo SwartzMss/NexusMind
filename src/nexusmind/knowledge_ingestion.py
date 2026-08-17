@@ -39,7 +39,11 @@ class SourceTypeError(KnowledgeIngestionError):
 
 
 class SymlinkSourceError(KnowledgeIngestionError):
-    """A configured source or path component is a symbolic link."""
+    """A configured source or path component is a symlink or reparse point."""
+
+
+class FileIdentityChangedError(KnowledgeIngestionError):
+    """A discovered file was replaced before or during ingestion."""
 
 
 class UnsupportedFileTypeError(KnowledgeIngestionError):
@@ -111,6 +115,19 @@ class LocalIngestionLimits:
             raise ValueError("max_entries_scanned must be a positive integer")
         if type(self.max_directory_depth) is not int or self.max_directory_depth < 0:
             raise ValueError("max_directory_depth must be a non-negative integer")
+
+
+@dataclass(frozen=True, slots=True)
+class _FileIdentity:
+    device: int
+    inode: int
+
+
+@dataclass(frozen=True, slots=True)
+class _DiscoveredFile:
+    path: Path
+    logical_path: str
+    identity: _FileIdentity
 
 
 def _normalize_extensions(extensions: Iterable[str] | None) -> frozenset[str]:
@@ -204,14 +221,27 @@ def _content_type(path: Path) -> str:
     return "text/plain"
 
 
-def _same_file_identity(first: os.stat_result, second: os.stat_result) -> bool:
-    return first.st_dev == second.st_dev and first.st_ino == second.st_ino
+def _file_identity(file_stat: os.stat_result) -> _FileIdentity:
+    return _FileIdentity(device=file_stat.st_dev, inode=file_stat.st_ino)
+
+
+def _capture_file_identity(path: Path) -> _FileIdentity:
+    try:
+        file_stat = os.stat(path, follow_symlinks=False)
+    except OSError as exc:
+        raise KnowledgeIngestionError("document could not be inspected") from exc
+    if _file_stat_is_symlink_or_reparse(file_stat):
+        raise SymlinkSourceError("symbolic links and Windows reparse points are not supported")
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise FileIdentityChangedError("document changed type during discovery")
+    return _file_identity(file_stat)
 
 
 def _read_verified_bytes(
     path: Path,
     *,
     root: Path,
+    expected_identity: _FileIdentity,
     logical_path: str,
     limits: LocalIngestionLimits,
     total_bytes_before: int,
@@ -219,9 +249,9 @@ def _read_verified_bytes(
     """Read from an opened handle after rechecking path and file identity.
 
     Opening first makes subsequent path changes unable to redirect the bytes
-    read from the handle.  The no-follow lstat and identity comparison reject
-    a path that was swapped for a symlink, junction, or another file between
-    discovery and read.
+    read from the handle.  The opened identity must match the identity captured
+    during discovery, then no-follow path checks ensure the current path still
+    names that same regular file before bytes are read.
     """
 
     file_descriptor: int | None = None
@@ -235,6 +265,9 @@ def _read_verified_bytes(
         except OSError as exc:
             raise KnowledgeIngestionError("document could not be opened") from exc
 
+        opened_identity = _file_identity(opened_stat)
+        if opened_identity != expected_identity:
+            raise FileIdentityChangedError("document identity changed after discovery")
         if opened_stat.st_size > limits.max_file_bytes:
             raise FileTooLargeError(f"document exceeds the file-size limit: {logical_path}")
         remaining_bytes = limits.max_total_bytes - total_bytes_before
@@ -246,10 +279,10 @@ def _read_verified_bytes(
             current_stat = os.stat(path, follow_symlinks=False)
         except OSError as exc:
             raise KnowledgeIngestionError("document could not be inspected") from exc
-        if _file_stat_is_symlink_or_reparse(current_stat) or not _same_file_identity(
-            opened_stat, current_stat
-        ):
+        if _file_stat_is_symlink_or_reparse(current_stat):
             raise SymlinkSourceError("document changed to a symlink or reparse point during ingestion")
+        if _file_identity(current_stat) != opened_identity:
+            raise FileIdentityChangedError("document identity changed during ingestion")
 
         try:
             resolved = path.resolve(strict=True)
@@ -265,10 +298,10 @@ def _read_verified_bytes(
             current_stat_after_resolve = os.stat(path, follow_symlinks=False)
         except OSError as exc:
             raise KnowledgeIngestionError("document could not be inspected") from exc
-        if _file_stat_is_symlink_or_reparse(current_stat_after_resolve) or not _same_file_identity(
-            opened_stat, current_stat_after_resolve
-        ):
-            raise SymlinkSourceError("document changed during ingestion")
+        if _file_stat_is_symlink_or_reparse(current_stat_after_resolve):
+            raise SymlinkSourceError("document changed to a symlink or reparse point during ingestion")
+        if _file_identity(current_stat_after_resolve) != opened_identity:
+            raise FileIdentityChangedError("document identity changed during ingestion")
 
         read_limit = min(limits.max_file_bytes, remaining_bytes)
         try:
@@ -294,6 +327,7 @@ def _read_document(
     path: Path,
     *,
     root: Path,
+    expected_identity: _FileIdentity,
     source_id: str,
     logical_path: str,
     limits: LocalIngestionLimits,
@@ -302,6 +336,7 @@ def _read_document(
     content_bytes = _read_verified_bytes(
         path,
         root=root,
+        expected_identity=expected_identity,
         logical_path=logical_path,
         limits=limits,
         total_bytes_before=total_bytes_before,
@@ -351,9 +386,11 @@ class LocalFileAdapter:
         root = _validate_root(self._path, "file")
         if root.suffix.lower() not in self._supported_extensions:
             raise UnsupportedFileTypeError(f"unsupported document extension: {root.suffix.lower() or '<none>'}")
+        expected_identity = _capture_file_identity(root)
         document, _ = _read_document(
             root,
             root=root,
+            expected_identity=expected_identity,
             source_id=self._source_id,
             logical_path=_display_name(root, "document"),
             limits=self._limits,
@@ -391,14 +428,15 @@ class LocalDirectoryAdapter:
         root = _validate_root(self._path, "directory")
         documents: list[Document] = []
         total_bytes = 0
-        for path, logical_path in self._discover_supported_files(root):
+        for candidate in self._discover_supported_files(root):
             if len(documents) >= self._limits.max_documents:
                 raise DocumentCountLimitError("documents exceed the document-count limit")
             document, loaded_bytes = _read_document(
-                path,
+                candidate.path,
                 root=root,
+                expected_identity=candidate.identity,
                 source_id=self._source_id,
-                logical_path=logical_path,
+                logical_path=candidate.logical_path,
                 limits=self._limits,
                 total_bytes_before=total_bytes,
             )
@@ -406,11 +444,11 @@ class LocalDirectoryAdapter:
             total_bytes += loaded_bytes
         return tuple(documents)
 
-    def _discover_supported_files(self, root: Path) -> list[tuple[Path, str]]:
+    def _discover_supported_files(self, root: Path) -> list[_DiscoveredFile]:
         """Discover supported files with explicit, bounded traversal state."""
 
         stack: list[tuple[Path, int]] = [(root, 0)]
-        candidates: list[tuple[Path, str]] = []
+        candidates: list[_DiscoveredFile] = []
         entries_scanned = 0
 
         while stack:
@@ -449,7 +487,13 @@ class LocalDirectoryAdapter:
                                 raise DirectoryDepthLimitError("source exceeds the directory-depth limit")
                             child_directories.append((resolved, depth + 1))
                         elif is_file and resolved.suffix.lower() in self._supported_extensions:
-                            candidates.append((resolved, relative_path))
+                            candidates.append(
+                                _DiscoveredFile(
+                                    path=resolved,
+                                    logical_path=relative_path,
+                                    identity=_capture_file_identity(resolved),
+                                )
+                            )
                             if len(candidates) > self._limits.max_documents:
                                 raise DocumentCountLimitError("documents exceed the document-count limit")
             except EntryScanLimitError:
@@ -462,7 +506,10 @@ class LocalDirectoryAdapter:
             child_directories.sort(key=lambda item: (item[0].name.casefold(), item[0].name))
             stack.extend(reversed(child_directories))
 
-        return sorted(candidates, key=lambda item: (item[1].casefold(), item[1]))
+        return sorted(
+            candidates,
+            key=lambda candidate: (candidate.logical_path.casefold(), candidate.logical_path),
+        )
 
 
 __all__ = [
@@ -475,6 +522,7 @@ __all__ = [
     "DirectoryDepthLimitError",
     "DocumentCountLimitError",
     "EntryScanLimitError",
+    "FileIdentityChangedError",
     "FileTooLargeError",
     "InvalidTextEncodingError",
     "KnowledgeIngestionError",

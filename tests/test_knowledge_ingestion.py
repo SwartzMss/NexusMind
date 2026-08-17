@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from nexusmind import (
     DirectoryDepthLimitError,
     DocumentCountLimitError,
     EntryScanLimitError,
+    FileIdentityChangedError,
     FileTooLargeError,
     InvalidTextEncodingError,
     KnowledgeIngestionError,
@@ -204,6 +206,7 @@ def test_read_rejects_path_identity_change_after_open(tmp_path: Path, monkeypatc
     other = tmp_path / "other.txt"
     path.write_text("notes", encoding="utf-8")
     other.write_text("other", encoding="utf-8")
+    expected_identity = knowledge_ingestion._capture_file_identity(path)
     real_stat = knowledge_ingestion.os.stat
 
     def mismatching_stat(candidate, *args, **kwargs):
@@ -212,14 +215,69 @@ def test_read_rejects_path_identity_change_after_open(tmp_path: Path, monkeypatc
         return real_stat(candidate, *args, **kwargs)
 
     monkeypatch.setattr(knowledge_ingestion.os, "stat", mismatching_stat)
-    with pytest.raises(SymlinkSourceError):
+    with pytest.raises(FileIdentityChangedError):
         knowledge_ingestion._read_verified_bytes(
             path,
             root=tmp_path,
+            expected_identity=expected_identity,
             logical_path="notes.txt",
             limits=LocalIngestionLimits(),
             total_bytes_before=0,
         )
+
+
+@pytest.mark.parametrize("adapter_kind", ["file", "directory"])
+def test_adapter_rejects_file_replaced_between_discovery_and_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    adapter_kind: str,
+) -> None:
+    path = tmp_path / "notes.txt"
+    replacement = tmp_path / "replacement.bin"
+    path.write_text("original", encoding="utf-8")
+    replacement.write_text("replacement", encoding="utf-8")
+    real_read_document = knowledge_ingestion._read_document
+
+    def replace_before_open(candidate: Path, **kwargs):
+        if candidate == path and replacement.exists():
+            replacement.replace(path)
+        return real_read_document(candidate, **kwargs)
+
+    monkeypatch.setattr(knowledge_ingestion, "_read_document", replace_before_open)
+    adapter = (
+        LocalFileAdapter(path, source_id="docs")
+        if adapter_kind == "file"
+        else LocalDirectoryAdapter(tmp_path, source_id="docs")
+    )
+
+    with pytest.raises(FileIdentityChangedError):
+        adapter.load_documents()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction policy")
+def test_windows_junction_root_is_rejected_and_nested_junction_is_skipped(tmp_path: Path) -> None:
+    source_root = tmp_path / "docs"
+    target = tmp_path / "junction-target"
+    source_root.mkdir()
+    target.mkdir()
+    (target / "outside.txt").write_text("outside", encoding="utf-8")
+    junction = source_root / "junction"
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", os.fspath(junction), os.fspath(target)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        pytest.skip("junction creation is unavailable in this Windows environment")
+
+    try:
+        assert knowledge_ingestion._is_symlink_or_reparse_point(junction)
+        assert LocalDirectoryAdapter(source_root, source_id="docs").load_documents() == ()
+        with pytest.raises(SymlinkSourceError):
+            LocalDirectoryAdapter(junction, source_id="junction").load_documents()
+    finally:
+        junction.rmdir()
 
 
 def test_adapter_errors_are_controlled_and_do_not_expose_host_paths(tmp_path: Path) -> None:
