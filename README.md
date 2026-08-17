@@ -18,6 +18,13 @@ NexusMind 的主要能力层如下：
 - 声明式 Skills、工具白名单、收紧后的执行限制和多 MCP Server 解析。
 - 可选的 SQLite Run History、Harness Checkpoints、受支持状态的 Resume，以及 Run Lease ownership controls。
 
+NexusMind 开始引入独立的 Knowledge Runtime / Knowledge Layer，与现有 Agent Runtime 解耦。`KnowledgeSource` 表示知识来源，`source_id` 由 Host 或 Source adapter 提供；`Document` 表示来源下由逻辑标识定位的一份文本内容。Document 的 `document_id` 由 `source_id + logical_path` 派生，并使用 UTF-8 SHA-256 `content_hash` 检测同一逻辑文档的内容变化。该层不包含文件扫描、分块、Embedding、索引、检索或 RAG 编排；本地文件/目录只是可以映射到它的一个来源示例，后续可由 Agent、Skill 或其他消费者使用。
+
+```text
+External Knowledge -> KnowledgeSource -> Document
+                                      +-> future Chunk / Index / Retrieval
+```
+
 执行关系可以概括为：
 
 ```text
