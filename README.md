@@ -41,10 +41,12 @@ Knowledge Retrieval 在 chunking 之后提供 source-neutral 的 `ChunkIndex` / 
 Knowledge Ingestion -> KnowledgeSource -> Document
 Knowledge Chunking                           -> Chunk
 Knowledge Index / Retrieval                  -> Lexical Index -> SearchHit[]
-future                                           -> Index -> Retrieval
+future                                       -> Persistence
+                                             -> Semantic Retrieval
+                                             -> RAG
 ```
 
-当前不包含 token-based 或语义分块、Embedding、Index、Retrieval、RAG 编排及知识持久化 schema。
+当前不包含 token-based / semantic chunking、Embedding、Semantic Retrieval、持久化 Index、RAG 编排等能力。
 
 执行关系可以概括为：
 

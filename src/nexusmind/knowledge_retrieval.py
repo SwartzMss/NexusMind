@@ -119,7 +119,7 @@ class InMemoryChunkIndex:
         old_ids = self._document_chunks.get(document_id, set())
         for chunk in replacement.values():
             existing = self._chunks.get(chunk.chunk_id)
-            if existing is not None and chunk.chunk_id not in old_ids and existing != chunk:
+            if existing is not None and existing != chunk:
                 raise ChunkIdentityConflictError(f"chunk_id conflicts with indexed chunk: {chunk.chunk_id}")
             if existing is not None and chunk.chunk_id not in old_ids:
                 raise ChunkIdentityConflictError(f"chunk_id already belongs to another document: {chunk.chunk_id}")

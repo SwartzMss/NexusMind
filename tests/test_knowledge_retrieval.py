@@ -130,6 +130,19 @@ def test_failed_replacement_is_atomic() -> None:
     assert index.search("long") == ()
 
 
+def test_replacement_rejects_reused_chunk_id_with_different_data() -> None:
+    old = _chunk("same-id", "old", "doc-1")
+    changed = _chunk("same-id", "new", "doc-1")
+    index = InMemoryChunkIndex()
+    index.add((old,))
+
+    with pytest.raises(ChunkIdentityConflictError):
+        index.replace_document("doc-1", (changed,))
+
+    assert index.search("old")[0].chunk == old
+    assert index.search("new") == ()
+
+
 def test_replacement_rejects_mixed_documents_and_duplicate_ids() -> None:
     index = InMemoryChunkIndex()
     with pytest.raises(DocumentReplacementError, match="belong"):
