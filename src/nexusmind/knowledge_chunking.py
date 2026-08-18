@@ -52,13 +52,38 @@ class TextChunker:
     overlap: int = 100
     max_chunks: int = 10000
 
+    def __post_init__(self) -> None:
+        if type(self.chunk_size) is not int:
+            raise TypeError("chunk_size must be an integer")
+        if self.chunk_size <= 0:
+            raise ValueError("chunk_size must be greater than zero")
+        if type(self.overlap) is not int:
+            raise TypeError("overlap must be an integer")
+        if self.overlap < 0:
+            raise ValueError("overlap must be non-negative")
+        if self.overlap >= self.chunk_size:
+            raise ValueError("overlap must be less than chunk_size")
+        if type(self.max_chunks) is not int:
+            raise TypeError("max_chunks must be an integer")
+        if self.max_chunks <= 0:
+            raise ValueError("max_chunks must be greater than zero")
+
     def chunk(self, document: Document) -> tuple[Chunk, ...]:
+        if not isinstance(document, Document):
+            raise TypeError("document must be a Document")
         if not document.content:
             return ()
 
+        step = self.chunk_size - self.overlap
+        remaining_after_first = max(0, len(document.content) - self.chunk_size)
+        required_chunks = 1 + (remaining_after_first + step - 1) // step
+        if required_chunks > self.max_chunks:
+            raise ChunkLimitError(
+                f"document requires {required_chunks} chunks; limit is {self.max_chunks}"
+            )
+
         chunks: list[Chunk] = []
         start_offset = 0
-        step = self.chunk_size - self.overlap
         while start_offset < len(document.content):
             end_offset = min(start_offset + self.chunk_size, len(document.content))
             chunks.append(

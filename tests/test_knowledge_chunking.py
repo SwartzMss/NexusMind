@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import pytest
+
 from nexusmind import Document
-from nexusmind.knowledge_chunking import TextChunker
+from nexusmind.knowledge_chunking import ChunkLimitError, TextChunker
 
 
 def _document(content: str) -> Document:
@@ -86,3 +88,55 @@ def test_changed_configuration_changes_chunk_identity() -> None:
     with_overlap = TextChunker(chunk_size=4, overlap=1).chunk(document)[0]
 
     assert without_overlap.chunk_id != with_overlap.chunk_id
+
+
+@pytest.mark.parametrize("chunk_size", [True, 1.5, "4"])
+def test_chunk_size_rejects_non_integer_values(chunk_size: object) -> None:
+    with pytest.raises(TypeError, match="chunk_size must be an integer"):
+        TextChunker(chunk_size=chunk_size)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("chunk_size", [0, -1])
+def test_chunk_size_must_be_positive(chunk_size: int) -> None:
+    with pytest.raises(ValueError, match="chunk_size must be greater than zero"):
+        TextChunker(chunk_size=chunk_size)
+
+
+@pytest.mark.parametrize("overlap", [True, 1.5, "1"])
+def test_overlap_rejects_non_integer_values(overlap: object) -> None:
+    with pytest.raises(TypeError, match="overlap must be an integer"):
+        TextChunker(chunk_size=4, overlap=overlap)  # type: ignore[arg-type]
+
+
+def test_overlap_rejects_negative_values() -> None:
+    with pytest.raises(ValueError, match="overlap must be non-negative"):
+        TextChunker(chunk_size=4, overlap=-1)
+
+
+def test_overlap_must_be_less_than_chunk_size() -> None:
+    with pytest.raises(ValueError, match="overlap must be less than chunk_size"):
+        TextChunker(chunk_size=4, overlap=4)
+
+
+@pytest.mark.parametrize("max_chunks", [True, 1.5, "2"])
+def test_max_chunks_rejects_non_integer_values(max_chunks: object) -> None:
+    with pytest.raises(TypeError, match="max_chunks must be an integer"):
+        TextChunker(max_chunks=max_chunks)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("max_chunks", [0, -1])
+def test_max_chunks_must_be_positive(max_chunks: int) -> None:
+    with pytest.raises(ValueError, match="max_chunks must be greater than zero"):
+        TextChunker(max_chunks=max_chunks)
+
+
+def test_chunk_count_limit_fails_without_returning_partial_output() -> None:
+    chunker = TextChunker(chunk_size=4, overlap=1, max_chunks=2)
+
+    with pytest.raises(ChunkLimitError, match="document requires 3 chunks; limit is 2"):
+        chunker.chunk(_document("abcdefghij"))
+
+
+def test_chunker_rejects_non_document_input() -> None:
+    with pytest.raises(TypeError, match="document must be a Document"):
+        TextChunker().chunk("not a document")  # type: ignore[arg-type]
