@@ -222,7 +222,8 @@ class KnowledgeCollection:
         sources, documents = self._validate_restore_snapshot(snapshot)
         prepared: dict[str, tuple[Chunk, ...]] = {}
         for document_id in sorted(documents):
-            chunks = self._chunker.chunk(documents[document_id])
+            chunk_document = deepcopy(documents[document_id])
+            chunks = self._chunker.chunk(chunk_document)
             if type(chunks) is not tuple:
                 raise KnowledgeRestoreError("chunker must return a tuple")
             prepared[document_id] = chunks

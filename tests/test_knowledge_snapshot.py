@@ -69,6 +69,15 @@ class ConflictingChunker:
         )
 
 
+class MutatingMetadataChunker:
+    def __init__(self) -> None:
+        self.delegate = TextChunker(chunk_size=100, overlap=0)
+
+    def chunk(self, document: Document) -> tuple[Chunk, ...]:
+        document.metadata["tag"] = "changed"
+        return self.delegate.chunk(document)
+
+
 def test_empty_collection_snapshot_is_stable_and_restorable() -> None:
     collection = KnowledgeCollection()
 
@@ -171,6 +180,22 @@ def test_restore_rechunks_canonical_documents_in_deterministic_order() -> None:
     assert chunker.document_ids == sorted(document.document_id for document in documents)
     assert not hasattr(collection.snapshot(), "chunks")
     assert not hasattr(collection.snapshot(), "index")
+
+
+def test_restore_chunker_cannot_mutate_snapshot_or_canonical_state() -> None:
+    document = Document(
+        source_id="docs",
+        logical_path="a.txt",
+        content="hello",
+        metadata={"tag": "original"},
+    )
+    snapshot = KnowledgeSnapshot((_source("docs"),), (document,))
+    collection = KnowledgeCollection(chunker=MutatingMetadataChunker())
+
+    collection.restore(snapshot)
+
+    assert snapshot.documents[0].metadata == {"tag": "original"}
+    assert collection.snapshot().documents[0].metadata == {"tag": "original"}
 
 
 def test_restore_then_sync_detects_unchanged_changed_added_and_removed() -> None:
