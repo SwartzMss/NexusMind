@@ -11,7 +11,7 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Protocol
 
-from .knowledge import Document, KnowledgeSource, compute_content_hash, stable_document_id
+from .knowledge import Document, KnowledgeSource
 from .knowledge_collection import KnowledgeSnapshot
 
 
@@ -78,6 +78,7 @@ class SQLiteKnowledgeSnapshotStore:
     def load(self) -> KnowledgeSnapshot:
         try:
             with closing(self._connect()) as db:
+                db.execute("BEGIN")
                 self._validate_schema(db)
                 source_rows = db.execute(
                     "SELECT source_id, source_type, display_name, logical_location, metadata_json "
@@ -87,6 +88,7 @@ class SQLiteKnowledgeSnapshotStore:
                     "SELECT document_id, source_id, logical_path, content, content_type, "
                     "metadata_json, content_hash FROM documents ORDER BY source_id, document_id"
                 ).fetchall()
+                db.commit()
         except KnowledgeSnapshotStoreError:
             raise
         except sqlite3.Error as exc:
@@ -240,19 +242,33 @@ class SQLiteKnowledgeSnapshotStore:
         for source in snapshot.sources:
             if not isinstance(source, KnowledgeSource):
                 raise KnowledgeSnapshotStoreError("snapshot contains an invalid KnowledgeSource")
-            if source.source_id in source_ids:
+            try:
+                validated_source = KnowledgeSource(
+                    source_id=source.source_id,
+                    source_type=source.source_type,
+                    display_name=source.display_name,
+                    logical_location=source.logical_location,
+                    metadata=source.metadata,
+                )
+            except (TypeError, ValueError) as exc:
+                raise KnowledgeSnapshotStoreError(
+                    "snapshot contains an invalid KnowledgeSource"
+                ) from exc
+            if validated_source.source_id in source_ids:
                 raise KnowledgeSnapshotStoreError("snapshot contains duplicate source IDs")
-            source_ids.add(source.source_id)
-            source_type = source.source_type.value if isinstance(source.source_type, Enum) else source.source_type
-            if type(source_type) is not str or not source_type.strip():
-                raise KnowledgeSnapshotStoreError("snapshot source type is invalid")
+            source_ids.add(validated_source.source_id)
+            source_type = (
+                validated_source.source_type.value
+                if isinstance(validated_source.source_type, Enum)
+                else validated_source.source_type
+            )
             sources.append(
                 (
-                    source.source_id,
+                    validated_source.source_id,
                     source_type,
-                    source.display_name,
-                    source.logical_location,
-                    cls._encode_metadata(source.metadata),
+                    validated_source.display_name,
+                    validated_source.logical_location,
+                    cls._encode_metadata(validated_source.metadata),
                 )
             )
         documents: list[tuple[Any, ...]] = []
@@ -260,24 +276,34 @@ class SQLiteKnowledgeSnapshotStore:
         for document in snapshot.documents:
             if not isinstance(document, Document):
                 raise KnowledgeSnapshotStoreError("snapshot contains an invalid Document")
-            if document.source_id not in source_ids:
+            try:
+                validated_document = Document(
+                    source_id=document.source_id,
+                    logical_path=document.logical_path,
+                    content=document.content,
+                    content_type=document.content_type,
+                    metadata=document.metadata,
+                )
+            except (TypeError, ValueError) as exc:
+                raise KnowledgeSnapshotStoreError("snapshot contains an invalid Document") from exc
+            if validated_document.source_id not in source_ids:
                 raise KnowledgeSnapshotStoreError("snapshot Document references a missing source")
-            if document.document_id in document_ids:
+            if validated_document.document_id in document_ids:
                 raise KnowledgeSnapshotStoreError("snapshot contains duplicate document IDs")
-            if document.document_id != stable_document_id(document.source_id, document.logical_path):
+            if document.document_id != validated_document.document_id:
                 raise KnowledgeSnapshotStoreError("snapshot Document identity is incoherent")
-            if document.content_hash != compute_content_hash(document.content):
+            if document.content_hash != validated_document.content_hash:
                 raise KnowledgeSnapshotStoreError("snapshot Document content hash is incoherent")
-            document_ids.add(document.document_id)
+            document_ids.add(validated_document.document_id)
             documents.append(
                 (
-                    document.document_id,
-                    document.source_id,
-                    document.logical_path,
-                    document.content,
-                    document.content_type,
-                    cls._encode_metadata(document.metadata),
-                    document.content_hash,
+                    validated_document.document_id,
+                    validated_document.source_id,
+                    validated_document.logical_path,
+                    validated_document.content,
+                    validated_document.content_type,
+                    cls._encode_metadata(validated_document.metadata),
+                    validated_document.content_hash,
                 )
             )
         sources.sort(key=lambda row: row[0])

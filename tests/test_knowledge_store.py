@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 
 import pytest
 
@@ -62,6 +63,84 @@ def test_save_and_load_empty_snapshot(tmp_path) -> None:
     assert store.load() == KnowledgeSnapshot((), ())
 
 
+def test_load_reads_one_committed_point_in_time_during_concurrent_save(tmp_path) -> None:
+    path = tmp_path / "knowledge.db"
+    before = KnowledgeSnapshot(
+        (_source("docs", metadata={"version": "before"}),),
+        (_document("docs", "notes.md", "before content"),),
+    )
+    after = KnowledgeSnapshot(
+        (_source("docs", metadata={"version": "after"}),),
+        (_document("docs", "notes.md", "after content"),),
+    )
+    writer = SQLiteKnowledgeSnapshotStore(path)
+    writer.save(before)
+    with sqlite3.connect(path) as db:
+        db.execute("PRAGMA journal_mode=WAL")
+
+    sources_read = threading.Event()
+    continue_read = threading.Event()
+
+    class CursorProxy:
+        def __init__(self, cursor, pause: bool) -> None:
+            self._cursor = cursor
+            self._pause = pause
+
+        def fetchall(self):
+            rows = self._cursor.fetchall()
+            if self._pause:
+                sources_read.set()
+                if not continue_read.wait(timeout=5):
+                    raise AssertionError("concurrent writer did not complete")
+            return rows
+
+        def __getattr__(self, name):
+            return getattr(self._cursor, name)
+
+        def __iter__(self):
+            return iter(self._cursor)
+
+    class ConnectionProxy:
+        def __init__(self, connection) -> None:
+            self._connection = connection
+
+        def execute(self, sql, parameters=()):
+            cursor = self._connection.execute(sql, parameters)
+            pause = "FROM sources ORDER BY source_id" in sql
+            return CursorProxy(cursor, pause)
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+    class PausingStore(SQLiteKnowledgeSnapshotStore):
+        def _connect(self):
+            return ConnectionProxy(super()._connect())
+
+    loader = PausingStore(path)
+    loaded: list[KnowledgeSnapshot] = []
+    errors: list[BaseException] = []
+
+    def load_snapshot() -> None:
+        try:
+            loaded.append(loader.load())
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=load_snapshot)
+    thread.start()
+    assert sources_read.wait(timeout=5)
+    try:
+        writer.save(after)
+    finally:
+        continue_read.set()
+        thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert errors == []
+    assert loaded == [before]
+    assert writer.load() == after
+
+
 def test_round_trip_multiple_sources_documents_and_nested_metadata(tmp_path) -> None:
     store = SQLiteKnowledgeSnapshotStore(tmp_path / "knowledge.db")
     snapshot = KnowledgeSnapshot(
@@ -90,6 +169,15 @@ def test_round_trip_multiple_sources_documents_and_nested_metadata(tmp_path) -> 
     expected = store.load()
     loaded.sources[1].metadata["nested"]["items"].append("changed")
     assert store.load() == expected
+
+
+def test_successful_save_is_always_loadable_as_equal_canonical_snapshot(tmp_path) -> None:
+    store = SQLiteKnowledgeSnapshotStore(tmp_path / "knowledge.db")
+    snapshot = _snapshot("docs", "canonical")
+
+    store.save(snapshot)
+
+    assert store.load() == snapshot
 
 
 def test_snapshot_store_restart_restore_and_search_round_trip(tmp_path) -> None:
@@ -262,6 +350,35 @@ def test_save_rejects_incoherent_snapshot_without_replacing_old_state(tmp_path) 
 
     with pytest.raises(KnowledgeSnapshotStoreError, match="content hash"):
         store.save(KnowledgeSnapshot((_source("docs"),), (forged,)))
+
+    assert store.load() == previous
+
+
+@pytest.mark.parametrize(
+    "model, field, value",
+    [
+        ("source", "source_id", ""),
+        ("source", "display_name", ""),
+        ("source", "logical_location", ""),
+        ("source", "metadata", []),
+        ("document", "content_type", ""),
+        ("document", "metadata", []),
+    ],
+)
+def test_save_revalidates_forged_canonical_model_fields(
+    model: str, field: str, value: object, tmp_path
+) -> None:
+    store = SQLiteKnowledgeSnapshotStore(tmp_path / "knowledge.db")
+    previous = _snapshot("old")
+    store.save(previous)
+    source = _source("docs")
+    document = _document("docs", "a.md", "content")
+    target = source if model == "source" else document
+    object.__setattr__(target, field, value)
+    snapshot = KnowledgeSnapshot((source,), () if model == "source" else (document,))
+
+    with pytest.raises(KnowledgeSnapshotStoreError, match="invalid"):
+        store.save(snapshot)
 
     assert store.load() == previous
 
