@@ -69,6 +69,15 @@ class ReusingIdentityChunker:
         )
 
 
+class MutatingMetadataChunker:
+    def __init__(self) -> None:
+        self._delegate = TextChunker(chunk_size=100, overlap=0)
+
+    def chunk(self, document: Document) -> tuple[Chunk, ...]:
+        document.metadata["tag"] = "modified-by-chunker"
+        return self._delegate.chunk(document)
+
+
 def test_first_sync_indexes_one_document_and_returns_summary() -> None:
     document = _document("docs", "a.txt", "checkpoint resume")
     collection = KnowledgeCollection()
@@ -77,6 +86,93 @@ def test_first_sync_indexes_one_document_and_returns_summary() -> None:
 
     assert result == KnowledgeSyncResult("docs", 1, 0, 0, 0, 1)
     assert collection.search("checkpoint")[0].chunk.document_id == document.document_id
+
+
+def test_sync_detaches_committed_state_from_adapter_objects() -> None:
+    source = KnowledgeSource(
+        source_id="docs",
+        source_type="fake",
+        display_name="Docs",
+        metadata={"owner": "original"},
+    )
+    document = Document(
+        source_id="docs",
+        logical_path="a.txt",
+        content="content",
+        metadata={"tag": "original"},
+    )
+
+    class OwnedObjectAdapter(FakeAdapter):
+        def source(self) -> KnowledgeSource:
+            return source
+
+    collection = KnowledgeCollection()
+    collection.sync(OwnedObjectAdapter("docs", (document,)))
+    source.metadata["owner"] = "external"
+    document.metadata["tag"] = "external"
+
+    snapshot = collection.snapshot()
+    assert snapshot.sources[0].metadata == {"owner": "original"}
+    assert snapshot.documents[0].metadata == {"tag": "original"}
+
+
+def test_sync_chunker_cannot_mutate_adapter_or_canonical_document() -> None:
+    document = Document(
+        source_id="docs",
+        logical_path="a.txt",
+        content="content",
+        metadata={"tag": "original"},
+    )
+    collection = KnowledgeCollection(chunker=MutatingMetadataChunker())
+
+    collection.sync(FakeAdapter("docs", (document,)))
+
+    assert document.metadata == {"tag": "original"}
+    assert collection.snapshot().documents[0].metadata == {"tag": "original"}
+
+
+def test_sync_rejects_forged_document_id_without_mutation() -> None:
+    collection = KnowledgeCollection()
+    old = _document("docs", "a.txt", "preserved")
+    collection.sync(FakeAdapter("docs", (old,)))
+    forged = _document("docs", "b.txt", "forged content")
+    object.__setattr__(forged, "document_id", "forged-id")
+
+    with pytest.raises(KnowledgeSnapshotError, match="incoherent document_id"):
+        collection.sync(FakeAdapter("docs", (forged,)))
+
+    assert collection.search("preserved")
+    assert collection.search("forged") == ()
+
+
+def test_sync_rejects_forged_content_hash_without_mutation() -> None:
+    collection = KnowledgeCollection()
+    old = _document("docs", "a.txt", "old searchable")
+    collection.sync(FakeAdapter("docs", (old,)))
+    forged = _document("docs", "a.txt", "new hidden")
+    object.__setattr__(forged, "content_hash", old.content_hash)
+
+    with pytest.raises(KnowledgeSnapshotError, match="incoherent content_hash"):
+        collection.sync(FakeAdapter("docs", (forged,)))
+
+    assert collection.search("old")
+    assert collection.search("new") == ()
+
+
+def test_successful_sync_snapshot_is_self_restorable() -> None:
+    collection = KnowledgeCollection()
+    collection.sync(
+        FakeAdapter(
+            "docs",
+            (_document("docs", "a.txt", "alpha"), _document("docs", "b.txt", "beta")),
+        )
+    )
+    snapshot = collection.snapshot()
+    restored = KnowledgeCollection()
+
+    restored.restore(snapshot)
+
+    assert restored.snapshot() == snapshot
 
 
 def test_base_chunk_index_contract_does_not_require_collection_staging() -> None:
