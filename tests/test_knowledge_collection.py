@@ -131,6 +131,50 @@ def test_sync_chunker_cannot_mutate_adapter_or_canonical_document() -> None:
     assert collection.snapshot().documents[0].metadata == {"tag": "original"}
 
 
+def test_sync_rejects_forged_document_id_without_mutation() -> None:
+    collection = KnowledgeCollection()
+    old = _document("docs", "a.txt", "preserved")
+    collection.sync(FakeAdapter("docs", (old,)))
+    forged = _document("docs", "b.txt", "forged content")
+    object.__setattr__(forged, "document_id", "forged-id")
+
+    with pytest.raises(KnowledgeSnapshotError, match="incoherent document_id"):
+        collection.sync(FakeAdapter("docs", (forged,)))
+
+    assert collection.search("preserved")
+    assert collection.search("forged") == ()
+
+
+def test_sync_rejects_forged_content_hash_without_mutation() -> None:
+    collection = KnowledgeCollection()
+    old = _document("docs", "a.txt", "old searchable")
+    collection.sync(FakeAdapter("docs", (old,)))
+    forged = _document("docs", "a.txt", "new hidden")
+    object.__setattr__(forged, "content_hash", old.content_hash)
+
+    with pytest.raises(KnowledgeSnapshotError, match="incoherent content_hash"):
+        collection.sync(FakeAdapter("docs", (forged,)))
+
+    assert collection.search("old")
+    assert collection.search("new") == ()
+
+
+def test_successful_sync_snapshot_is_self_restorable() -> None:
+    collection = KnowledgeCollection()
+    collection.sync(
+        FakeAdapter(
+            "docs",
+            (_document("docs", "a.txt", "alpha"), _document("docs", "b.txt", "beta")),
+        )
+    )
+    snapshot = collection.snapshot()
+    restored = KnowledgeCollection()
+
+    restored.restore(snapshot)
+
+    assert restored.snapshot() == snapshot
+
+
 def test_base_chunk_index_contract_does_not_require_collection_staging() -> None:
     assert "clone" not in ChunkIndex.__dict__
 

@@ -142,6 +142,7 @@ class KnowledgeCollection:
                 raise KnowledgeSnapshotError("adapter snapshot must contain only Documents")
             if document.source_id != source.source_id:
                 raise KnowledgeSnapshotError("all documents must belong to the adapter source_id")
+            self._validate_document_identity(document)
             if document.document_id in incoming:
                 raise KnowledgeSnapshotError("adapter snapshot contains duplicate document_id values")
             owned_document = deepcopy(document)
@@ -286,10 +287,7 @@ class KnowledgeCollection:
                 raise KnowledgeSnapshotError("snapshot Document references a missing source_id")
             if document.document_id in documents:
                 raise KnowledgeSnapshotError("snapshot contains duplicate document_id values")
-            if document.document_id != stable_document_id(document.source_id, document.logical_path):
-                raise KnowledgeSnapshotError("snapshot Document has an incoherent document_id")
-            if document.content_hash != compute_content_hash(document.content):
-                raise KnowledgeSnapshotError("snapshot Document has an incoherent content_hash")
+            self._validate_document_identity(document)
             documents[document.document_id] = document
 
         if len(sources) > self._limits.max_sources:
@@ -297,6 +295,13 @@ class KnowledgeCollection:
         if len(documents) > self._limits.max_documents:
             raise KnowledgeCollectionLimitError("collection exceeds max_documents")
         return sources, documents
+
+    @staticmethod
+    def _validate_document_identity(document: Document) -> None:
+        if document.document_id != stable_document_id(document.source_id, document.logical_path):
+            raise KnowledgeSnapshotError("Document has an incoherent document_id")
+        if document.content_hash != compute_content_hash(document.content):
+            raise KnowledgeSnapshotError("Document has an incoherent content_hash")
 
     def _preflight_snapshot(self, source_id: str, incoming_count: int) -> None:
         source_count = len(self._sources) + (0 if source_id in self._sources else 1)
