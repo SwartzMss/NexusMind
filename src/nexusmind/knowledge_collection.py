@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Callable, Protocol
 
 from .knowledge import Document, KnowledgeSource
 from .knowledge_chunking import Chunk, TextChunker
@@ -68,9 +68,8 @@ class KnowledgeSyncResult:
 class KnowledgeCollection:
     """Explicitly synchronize source snapshots into a staged chunk index.
 
-    ``index`` is an owned-state seed, not a shared live index. The collection
-    clones a caller-provided seed during construction. Synchronization clones
-    its private index, applies all deterministic
+    ``index_factory`` must return a new empty index owned by the collection.
+    Synchronization clones its private index, applies all deterministic
     mutations to that candidate, and only swaps committed state after every
     operation succeeds. Removing an unknown source is a no-op.
     """
@@ -79,16 +78,17 @@ class KnowledgeCollection:
         self,
         *,
         chunker: DocumentChunker | None = None,
-        index: CloneableChunkIndex | None = None,
+        index_factory: Callable[[], CloneableChunkIndex] | None = None,
         limits: KnowledgeCollectionLimits | None = None,
     ) -> None:
         self._chunker = TextChunker() if chunker is None else chunker
         self._limits = KnowledgeCollectionLimits() if limits is None else limits
         if not callable(getattr(self._chunker, "chunk", None)):
             raise TypeError("chunker must implement chunk(document)")
-        index_seed = InMemoryChunkIndex() if index is None else index
-        self._require_cloneable_index(index_seed)
-        self._index = index_seed if index is None else index_seed.clone()
+        factory = InMemoryChunkIndex if index_factory is None else index_factory
+        if not callable(factory):
+            raise TypeError("index_factory must be callable")
+        self._index = factory()
         self._require_cloneable_index(self._index)
         if not isinstance(self._limits, KnowledgeCollectionLimits):
             raise TypeError("limits must be KnowledgeCollectionLimits")

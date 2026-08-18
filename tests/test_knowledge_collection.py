@@ -83,14 +83,21 @@ def test_base_chunk_index_contract_does_not_require_collection_staging() -> None
     assert "clone" not in ChunkIndex.__dict__
 
 
-def test_injected_index_is_an_owned_seed_not_a_shared_live_instance() -> None:
-    seed = InMemoryChunkIndex()
-    collection = KnowledgeCollection(index=seed)
+def test_index_factory_creates_collection_owned_empty_state() -> None:
+    calls = 0
+
+    def factory() -> InMemoryChunkIndex:
+        nonlocal calls
+        calls += 1
+        return InMemoryChunkIndex()
+
+    collection = KnowledgeCollection(index_factory=factory)
+    assert collection.search("anything") == ()
 
     collection.sync(FakeAdapter("docs", (_document("docs", "a.txt", "searchable"),)))
 
+    assert calls == 1
     assert collection.search("searchable")
-    assert seed.search("searchable") == ()
 
 
 def test_first_multi_document_sync_and_search_ranking() -> None:
@@ -186,8 +193,11 @@ def test_chunking_failure_preserves_previous_snapshot_and_index() -> None:
 
 
 def test_index_limit_failure_preserves_previous_snapshot_and_index() -> None:
-    index = InMemoryChunkIndex(limits=ChunkIndexLimits(max_total_chars=4))
-    collection = KnowledgeCollection(index=index)
+    collection = KnowledgeCollection(
+        index_factory=lambda: InMemoryChunkIndex(
+            limits=ChunkIndexLimits(max_total_chars=4)
+        )
+    )
     old = _document("docs", "a.txt", "old")
     collection.sync(FakeAdapter("docs", (old,)))
 
@@ -212,7 +222,9 @@ def test_chunk_identity_conflict_preserves_previous_snapshot_and_index() -> None
 
 def test_failed_first_sync_does_not_create_source_bookkeeping() -> None:
     limits = ChunkIndexLimits(max_total_chars=1)
-    collection = KnowledgeCollection(index=InMemoryChunkIndex(limits=limits))
+    collection = KnowledgeCollection(
+        index_factory=lambda: InMemoryChunkIndex(limits=limits)
+    )
     with pytest.raises(ChunkIndexLimitError):
         collection.sync(FakeAdapter("docs", (_document("docs", "a.txt", "too long"),)))
 
@@ -244,7 +256,9 @@ def test_collection_limits_are_preflighted_without_affecting_other_sources() -> 
 
 def test_search_delegates_index_query_and_result_limits() -> None:
     collection = KnowledgeCollection(
-        index=InMemoryChunkIndex(limits=ChunkIndexLimits(max_results=1, max_query_chars=3))
+        index_factory=lambda: InMemoryChunkIndex(
+            limits=ChunkIndexLimits(max_results=1, max_query_chars=3)
+        )
     )
     with pytest.raises(ChunkIndexLimitError, match="max_query_chars"):
         collection.search("long")
