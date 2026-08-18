@@ -7,6 +7,7 @@ import pytest
 from nexusmind import (
     Chunk,
     ChunkIdentityConflictError,
+    ChunkIndex,
     ChunkIndexLimitError,
     ChunkIndexLimits,
     Document,
@@ -76,6 +77,20 @@ def test_first_sync_indexes_one_document_and_returns_summary() -> None:
 
     assert result == KnowledgeSyncResult("docs", 1, 0, 0, 0, 1)
     assert collection.search("checkpoint")[0].chunk.document_id == document.document_id
+
+
+def test_base_chunk_index_contract_does_not_require_collection_staging() -> None:
+    assert "clone" not in ChunkIndex.__dict__
+
+
+def test_injected_index_is_an_owned_seed_not_a_shared_live_instance() -> None:
+    seed = InMemoryChunkIndex()
+    collection = KnowledgeCollection(index=seed)
+
+    collection.sync(FakeAdapter("docs", (_document("docs", "a.txt", "searchable"),)))
+
+    assert collection.search("searchable")
+    assert seed.search("searchable") == ()
 
 
 def test_first_multi_document_sync_and_search_ranking() -> None:

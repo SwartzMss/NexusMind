@@ -77,10 +77,6 @@ class ChunkIndex(Protocol):
 
     def search(self, query: str, *, limit: int = 10) -> tuple[SearchHit, ...]: ...
 
-    def clone(self) -> "ChunkIndex":
-        """Return an independent copy suitable for staging atomic updates."""
-        ...
-
 
 class InMemoryChunkIndex:
     """Dependency-free, process-local lexical chunk retrieval."""

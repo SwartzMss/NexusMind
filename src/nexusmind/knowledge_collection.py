@@ -29,6 +29,14 @@ class DocumentChunker(Protocol):
     def chunk(self, document: Document) -> tuple[Chunk, ...]: ...
 
 
+class CloneableChunkIndex(ChunkIndex, Protocol):
+    """Collection-specific capability for copy-on-write index staging."""
+
+    def clone(self) -> "CloneableChunkIndex":
+        """Return an independent copy suitable for staging atomic updates."""
+        ...
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class KnowledgeCollectionLimits:
     """Bounds for process-local source and document bookkeeping."""
@@ -60,7 +68,9 @@ class KnowledgeSyncResult:
 class KnowledgeCollection:
     """Explicitly synchronize source snapshots into a staged chunk index.
 
-    Synchronization clones the configured index, applies all deterministic
+    ``index`` is an owned-state seed, not a shared live index. The collection
+    clones a caller-provided seed during construction. Synchronization clones
+    its private index, applies all deterministic
     mutations to that candidate, and only swaps committed state after every
     operation succeeds. Removing an unknown source is a no-op.
     """
@@ -69,17 +79,17 @@ class KnowledgeCollection:
         self,
         *,
         chunker: DocumentChunker | None = None,
-        index: ChunkIndex | None = None,
+        index: CloneableChunkIndex | None = None,
         limits: KnowledgeCollectionLimits | None = None,
     ) -> None:
         self._chunker = TextChunker() if chunker is None else chunker
-        self._index = InMemoryChunkIndex() if index is None else index
         self._limits = KnowledgeCollectionLimits() if limits is None else limits
         if not callable(getattr(self._chunker, "chunk", None)):
             raise TypeError("chunker must implement chunk(document)")
-        for method in ("add", "replace_document", "remove_document", "search", "clone"):
-            if not callable(getattr(self._index, method, None)):
-                raise TypeError(f"index must implement {method}()")
+        index_seed = InMemoryChunkIndex() if index is None else index
+        self._require_cloneable_index(index_seed)
+        self._index = index_seed if index is None else index_seed.clone()
+        self._require_cloneable_index(self._index)
         if not isinstance(self._limits, KnowledgeCollectionLimits):
             raise TypeError("limits must be KnowledgeCollectionLimits")
         self._sources: dict[str, KnowledgeSource] = {}
@@ -129,6 +139,7 @@ class KnowledgeCollection:
             prepared[document_id] = chunks
 
         staged = self._index.clone()
+        self._require_cloneable_index(staged)
         for document_id in sorted(removed):
             staged.remove_document(document_id)
         for document_id in sorted(prepared):
@@ -153,6 +164,7 @@ class KnowledgeCollection:
         if documents is None:
             return
         staged = self._index.clone()
+        self._require_cloneable_index(staged)
         for document_id in sorted(documents):
             staged.remove_document(document_id)
         self._index = staged
@@ -171,8 +183,15 @@ class KnowledgeCollection:
         if resulting_count > self._limits.max_documents:
             raise KnowledgeCollectionLimitError("collection exceeds max_documents")
 
+    @staticmethod
+    def _require_cloneable_index(index: object) -> None:
+        for method in ("add", "replace_document", "remove_document", "search", "clone"):
+            if not callable(getattr(index, method, None)):
+                raise TypeError(f"index must implement {method}()")
+
 
 __all__ = [
+    "CloneableChunkIndex",
     "DocumentChunker",
     "KnowledgeCollection",
     "KnowledgeCollectionError",

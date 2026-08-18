@@ -8,6 +8,7 @@ from .knowledge import (
 )
 from .knowledge_chunking import Chunk, ChunkLimitError, TextChunker
 from .knowledge_collection import (
+    CloneableChunkIndex,
     DocumentChunker,
     KnowledgeCollection,
     KnowledgeCollectionError,
@@ -55,6 +56,7 @@ from .knowledge_ingestion import (
 __all__ = [
     "Chunk",
     "ChunkLimitError",
+    "CloneableChunkIndex",
     "ChunkIdentityConflictError",
     "ChunkIndex",
     "ChunkIndexError",
