@@ -84,6 +84,19 @@ def test_exact_duplicate_add_is_idempotent() -> None:
     assert len(index.search("term")) == 1
 
 
+def test_clone_has_independent_mutable_state() -> None:
+    original = InMemoryChunkIndex()
+    original.add((_chunk("chunk-1", "original"),))
+
+    clone = original.clone()
+    clone.replace_document("doc-1", (_chunk("chunk-2", "changed"),))
+
+    assert original.search("original")
+    assert original.search("changed") == ()
+    assert clone.search("original") == ()
+    assert clone.search("changed")
+
+
 def test_conflicting_chunk_id_is_rejected_without_mutation() -> None:
     original = _chunk("chunk-1", "original")
     index = InMemoryChunkIndex()

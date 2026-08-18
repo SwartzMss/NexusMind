@@ -7,6 +7,15 @@ from .knowledge import (
     compute_content_hash,
 )
 from .knowledge_chunking import Chunk, ChunkLimitError, TextChunker
+from .knowledge_collection import (
+    DocumentChunker,
+    KnowledgeCollection,
+    KnowledgeCollectionError,
+    KnowledgeCollectionLimitError,
+    KnowledgeCollectionLimits,
+    KnowledgeSnapshotError,
+    KnowledgeSyncResult,
+)
 from .knowledge_retrieval import (
     ChunkIdentityConflictError,
     ChunkIndex,
@@ -52,10 +61,17 @@ __all__ = [
     "ChunkIndexLimitError",
     "ChunkIndexLimits",
     "Document",
+    "DocumentChunker",
     "DocumentReplacementError",
     "InMemoryChunkIndex",
     "KnowledgeSource",
     "KnowledgeSourceType",
+    "KnowledgeCollection",
+    "KnowledgeCollectionError",
+    "KnowledgeCollectionLimitError",
+    "KnowledgeCollectionLimits",
+    "KnowledgeSnapshotError",
+    "KnowledgeSyncResult",
     "compute_content_hash",
     "DEFAULT_MAX_DIRECTORY_DEPTH",
     "DEFAULT_MAX_DOCUMENTS",

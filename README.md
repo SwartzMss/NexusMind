@@ -35,7 +35,20 @@ Knowledge Chunking 位于 ingestion 之后的独立层。`TextChunker` 使用确
 
 Knowledge Retrieval 在 chunking 之后提供 source-neutral 的 `ChunkIndex` / `SearchHit` 契约。首个 `InMemoryChunkIndex` 仅进行进程内词法检索：查询以 Unicode 空白切分并用 `str.casefold()` 归一化，每个不同查询词命中计一分，结果按分数降序、`chunk_id` 升序稳定排序。索引规模、每次文档更新、内容字符数、查询长度/词数和结果数均有显式上限；`replace_document` 会原子替换同一逻辑文档的旧 chunks。
 
-该实现不是语义搜索，进程重启后不会保留索引，也尚未连接 embedding、向量数据库、持久化或 RAG/LLM 答案生成。`ChunkIndex` 契约用于允许未来后端替换当前实现。
+`KnowledgeCollection` 组合现有 adapter、chunker 和 index，提供显式的 `sync()` / `search()` 工作流。每次同步加载完整 source snapshot，以 `document_id` 和 `content_hash` 确定新增、更新、未变化及删除的 Documents；只有新增/变化的文档会重新分块，删除文档的旧 chunks 会从检索中移除。所有变更先在克隆的候选 index 上按稳定顺序完成，成功后才交换 collection snapshot 和 index，因此失败不会留下部分状态。同步由调用方显式触发，不包含后台监听或定时刷新。
+
+collection、source snapshot 和 index 均只存在于当前进程，重启后不会保留。该实现不是语义搜索，也尚未连接 embedding、向量数据库、持久化或 RAG/LLM 答案生成。`ChunkIndex` 契约用于允许未来后端替换当前实现。
+
+```text
+External Source
+    -> KnowledgeSourceAdapter
+    -> KnowledgeCollection.sync()
+       -> Document snapshot
+       -> Chunking
+       -> Chunk Index
+    -> KnowledgeCollection.search()
+    -> SearchHit[]
+```
 
 ```text
 Knowledge Ingestion -> KnowledgeSource -> Document

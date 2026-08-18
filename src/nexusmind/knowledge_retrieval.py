@@ -77,6 +77,10 @@ class ChunkIndex(Protocol):
 
     def search(self, query: str, *, limit: int = 10) -> tuple[SearchHit, ...]: ...
 
+    def clone(self) -> "ChunkIndex":
+        """Return an independent copy suitable for staging atomic updates."""
+        ...
+
 
 class InMemoryChunkIndex:
     """Dependency-free, process-local lexical chunk retrieval."""
@@ -103,6 +107,18 @@ class InMemoryChunkIndex:
             self._chunks[chunk.chunk_id] = chunk
             self._document_chunks.setdefault(chunk.document_id, set()).add(chunk.chunk_id)
             self._total_chars += len(chunk.content)
+
+    def clone(self) -> "InMemoryChunkIndex":
+        """Return an independent index with the same limits and state."""
+
+        clone = InMemoryChunkIndex(limits=self._limits)
+        clone._chunks = self._chunks.copy()
+        clone._document_chunks = {
+            document_id: chunk_ids.copy()
+            for document_id, chunk_ids in self._document_chunks.items()
+        }
+        clone._total_chars = self._total_chars
+        return clone
 
     def replace_document(self, document_id: str, chunks: tuple[Chunk, ...]) -> None:
         self._require_document_id(document_id)
