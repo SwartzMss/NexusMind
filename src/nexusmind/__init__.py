@@ -30,6 +30,11 @@ from .knowledge_retrieval import (
     InMemoryChunkIndex,
     SearchHit,
 )
+from .knowledge_store import (
+    KnowledgeSnapshotStore,
+    KnowledgeSnapshotStoreError,
+    SQLiteKnowledgeSnapshotStore,
+)
 from .knowledge_ingestion import (
     DEFAULT_MAX_DIRECTORY_DEPTH,
     DEFAULT_MAX_DOCUMENTS,
@@ -79,6 +84,8 @@ __all__ = [
     "KnowledgeRestoreResult",
     "KnowledgeSnapshot",
     "KnowledgeSnapshotError",
+    "KnowledgeSnapshotStore",
+    "KnowledgeSnapshotStoreError",
     "KnowledgeSyncResult",
     "compute_content_hash",
     "DEFAULT_MAX_DIRECTORY_DEPTH",
@@ -102,6 +109,7 @@ __all__ = [
     "SourceNotFoundError",
     "SourceTypeError",
     "SearchHit",
+    "SQLiteKnowledgeSnapshotStore",
     "SymlinkSourceError",
     "TotalBytesLimitError",
     "TextChunker",

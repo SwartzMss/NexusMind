@@ -37,7 +37,7 @@ Knowledge Retrieval 在 chunking 之后提供 source-neutral 的 `ChunkIndex` / 
 
 `KnowledgeCollection` 组合现有 adapter、chunker 和 index，提供显式的 `sync()` / `search()` 工作流。每次同步加载完整 source snapshot，以 `document_id` 和 `content_hash` 确定新增、更新、未变化及删除的 Documents；只有新增/变化的文档会重新分块，删除文档的旧 chunks 会从检索中移除。第一版 collection 依赖独立的 `CloneableChunkIndex` staging capability：所有变更先在克隆的候选 index 上按稳定顺序完成，成功后才交换 collection snapshot 和 index，因此失败不会留下部分状态。可选的 `index_factory=` 必须在每次调用时创建一个全新、空且由 collection 独占的 index，避免 searchable state 脱离 authoritative source/document snapshot；调用方应通过 collection 搜索已提交状态。基础 `ChunkIndex` 仍只定义 add/replace/remove/search，未来事务型持久化 backend 不必支持 clone。同步由调用方显式触发，不包含后台监听或定时刷新。
 
-collection、source snapshot 和 index 均只存在于当前进程，重启后不会保留。该实现不是语义搜索，也尚未连接 embedding、向量数据库、持久化或 RAG/LLM 答案生成。`ChunkIndex` 契约用于允许未来后端替换当前实现。
+collection 和 index 仍只存在于当前进程；canonical source/document snapshot 可由显式 store 保存并在重启后加载，但 derived Chunk/Index 会重新构建。该实现不是语义搜索，也尚未连接 embedding、向量数据库、持久化 retrieval index 或 RAG/LLM 答案生成。`ChunkIndex` 契约用于允许未来后端替换当前实现。
 
 `KnowledgeCollection.snapshot()` 可按稳定 identity 顺序导出 frozen container 形式的 `KnowledgeSnapshot`，其中包含与 collection 内部状态脱离的 canonical `KnowledgeSource` / `Document` 副本；嵌套 metadata 仍是普通可变 mapping，因此它不是递归 deep-immutable 对象。`restore()` 把 snapshot 视为完整 authoritative replacement，先验证 source/document 图和 collection limits，再使用当前 chunker 与 `index_factory` 创建的全新空 index 重建所有 derived `Chunk` / retrieval state，全部成功后才原子交换 collection 状态。Snapshot 不包含 Chunk、Index 或 SearchHit；使用不同 chunker 或 retrieval backend 恢复同一 canonical snapshot 时，可以得到不同的 derived state。
 
@@ -52,7 +52,27 @@ KnowledgeSnapshot
     -> SearchHit[]
 ```
 
-`KnowledgeSnapshot` 目前只是进程内导出/恢复契约，并不是 JSON、文件或数据库存储格式；如果没有未来的 store 将其持久化，进程退出后 snapshot 同样会丢失。SQLite、文件序列化、schema migration、semantic retrieval、embedding 和 RAG 仍属于未来工作。
+`KnowledgeSnapshot` 本身是进程内导出/恢复契约，不是 JSON、文件或数据库 schema；只有通过 snapshot store 显式保存后才能跨进程保留。文件序列化、schema migration、semantic retrieval、embedding 和 RAG 仍属于未来工作。
+
+`KnowledgeSnapshotStore` 是 snapshot 与持久化 backend 之间的 source-neutral 边界。首个 `SQLiteKnowledgeSnapshotStore` 使用显式 `save()` / `load()` 保存一个完整 authoritative snapshot；save 在 SQLite transaction 中全量替换旧 Source/Document rows，失败会回滚到先前 snapshot。V1 schema 只保存 canonical `KnowledgeSource` / `Document` 字段、严格 JSON-compatible metadata 和最小 schema version，不保存 Chunk、Index、SearchHit、FTS postings 或 embedding。加载后仍必须调用 `KnowledgeCollection.restore()`，使用当前 chunker 和 fresh index 重建 derived retrieval state。
+
+```text
+External Source
+    -> KnowledgeCollection.sync()
+    -> KnowledgeCollection.snapshot()
+    -> KnowledgeSnapshotStore.save()
+    -> SQLite
+
+restart
+
+SQLite
+    -> KnowledgeSnapshotStore.load()
+    -> KnowledgeCollection.restore()
+    -> rebuild Chunk / Index
+    -> search
+```
+
+保存由调用方显式触发；当前没有 autosave、watcher、增量持久化或多进程 writer orchestration。SQLite 是第一个可替换 backend，不属于核心 Knowledge model；FTS、semantic retrieval、embedding、vector database 和 RAG 仍是未来工作。
 
 ```text
 External Source
@@ -69,7 +89,7 @@ External Source
 Knowledge Ingestion -> KnowledgeSource -> Document
 Knowledge Chunking                           -> Chunk
 Knowledge Index / Retrieval                  -> Lexical Index -> SearchHit[]
-future                                       -> Persistence
+future                                       -> Persistent Chunk / Index
                                              -> Semantic Retrieval
                                              -> RAG
 ```
