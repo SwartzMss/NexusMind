@@ -33,9 +33,14 @@ Local File / Directory
 
 Knowledge Chunking 位于 ingestion 之后的独立层。`TextChunker` 使用确定性的字符分块策略，默认 `chunk_size=1000`、`overlap=100`、`max_chunks=10000`；配置会被严格校验，空 Document 返回空 tuple，超过最大块数会在生成任何部分结果前失败。Chunk ID 由 Document ID、内容 hash、字符区间和影响边界的分块配置确定性派生，因此同一输入与配置保持稳定，文档内容变化时不会让同一个 ID 指向不同切片。
 
+Knowledge Retrieval 在 chunking 之后提供 source-neutral 的 `ChunkIndex` / `SearchHit` 契约。首个 `InMemoryChunkIndex` 仅进行进程内词法检索：查询以 Unicode 空白切分并用 `str.casefold()` 归一化，每个不同查询词命中计一分，结果按分数降序、`chunk_id` 升序稳定排序。索引规模、每次文档更新、内容字符数、查询长度/词数和结果数均有显式上限；`replace_document` 会原子替换同一逻辑文档的旧 chunks。
+
+该实现不是语义搜索，进程重启后不会保留索引，也尚未连接 embedding、向量数据库、持久化或 RAG/LLM 答案生成。`ChunkIndex` 契约用于允许未来后端替换当前实现。
+
 ```text
 Knowledge Ingestion -> KnowledgeSource -> Document
 Knowledge Chunking                           -> Chunk
+Knowledge Index / Retrieval                  -> Lexical Index -> SearchHit[]
 future                                           -> Index -> Retrieval
 ```
 
