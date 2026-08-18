@@ -29,7 +29,7 @@ Local File / Directory
     -> Document[]
 ```
 
-第一版只支持 UTF-8 的 `.txt`、`.md` 和 `.markdown` 文件，并限制单文件大小、文档数量、总读取字节数、扫描条目数和目录深度。目录 adapter 收集后按完整的来源相对路径排序，跳过符号链接、junction 和其他 Windows reparse point，以及不支持的扩展名；单文件来源或根路径遇到这些类型会拒绝。Discovery 会记录每个文件的 identity；读取时从已打开的文件句柄读取，并依次复核 discovered identity、opened identity、当前路径 identity 与 containment，避免 scan 后路径被替换而读取其他目标。PDF、Office、Web、GitHub、MCP、索引和检索属于后续独立能力。
+第一版只支持 UTF-8 的 `.txt`、`.md` 和 `.markdown` 文件，并限制单文件大小、文档数量、总读取字节数、扫描条目数和目录深度。目录 adapter 收集后按完整的来源相对路径排序，跳过符号链接、junction 和其他 Windows reparse point，以及不支持的扩展名；单文件来源或根路径遇到这些类型会拒绝。Discovery 会记录每个文件的 identity；读取时从已打开的文件句柄读取，并依次复核 discovered identity、opened identity、当前路径 identity 与 containment，避免 scan 后路径被替换而读取其他目标。PDF、Office、Web、GitHub 和 MCP 属于后续 ingestion 能力；索引和检索位于独立的 Knowledge Retrieval 层。
 
 Knowledge Chunking 位于 ingestion 之后的独立层。`TextChunker` 使用确定性的字符分块策略，默认 `chunk_size=1000`、`overlap=100`、`max_chunks=10000`；配置会被严格校验，空 Document 返回空 tuple，超过最大块数会在生成任何部分结果前失败。Chunk ID 由 Document ID、内容 hash、字符区间和影响边界的分块配置确定性派生，因此同一输入与配置保持稳定，文档内容变化时不会让同一个 ID 指向不同切片。
 
