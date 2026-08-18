@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import pytest
 
-from nexusmind import Document
-from nexusmind.knowledge_chunking import ChunkLimitError, TextChunker
+from nexusmind import Chunk, ChunkLimitError, Document, TextChunker
 
 
 def _document(content: str) -> Document:
     return Document(source_id="docs", logical_path="notes.txt", content=content)
+
+
+def test_chunking_contracts_are_available_from_package_root() -> None:
+    chunk = TextChunker(chunk_size=10, overlap=1).chunk(_document("short"))[0]
+
+    assert isinstance(chunk, Chunk)
 
 
 def test_short_document_produces_one_exact_chunk() -> None:

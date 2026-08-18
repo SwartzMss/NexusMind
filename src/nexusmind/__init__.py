@@ -6,6 +6,7 @@ from .knowledge import (
     KnowledgeSourceType,
     compute_content_hash,
 )
+from .knowledge_chunking import Chunk, ChunkLimitError, TextChunker
 from .knowledge_ingestion import (
     DEFAULT_MAX_DIRECTORY_DEPTH,
     DEFAULT_MAX_DOCUMENTS,
@@ -33,6 +34,8 @@ from .knowledge_ingestion import (
 )
 
 __all__ = [
+    "Chunk",
+    "ChunkLimitError",
     "Document",
     "KnowledgeSource",
     "KnowledgeSourceType",
@@ -59,9 +62,9 @@ __all__ = [
     "SourceTypeError",
     "SymlinkSourceError",
     "TotalBytesLimitError",
+    "TextChunker",
     "UnsupportedFileTypeError",
     "__version__",
 ]
 
 __version__ = "0.1.0"
-
