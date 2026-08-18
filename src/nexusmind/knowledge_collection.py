@@ -77,7 +77,7 @@ class KnowledgeSyncResult:
 
 @dataclass(frozen=True, slots=True)
 class KnowledgeSnapshot:
-    """Canonical process-local Knowledge state, excluding derived chunks."""
+    """Frozen container of detached canonical copies, excluding derived state."""
 
     sources: tuple[KnowledgeSource, ...]
     documents: tuple[Document, ...]
@@ -131,6 +131,7 @@ class KnowledgeCollection:
         source = adapter.source()
         if not isinstance(source, KnowledgeSource):
             raise KnowledgeSnapshotError("adapter source must be a KnowledgeSource")
+        owned_source = deepcopy(source)
         documents = adapter.load_documents()
         if type(documents) is not tuple:
             raise KnowledgeSnapshotError("adapter documents must be a tuple")
@@ -143,9 +144,10 @@ class KnowledgeCollection:
                 raise KnowledgeSnapshotError("all documents must belong to the adapter source_id")
             if document.document_id in incoming:
                 raise KnowledgeSnapshotError("adapter snapshot contains duplicate document_id values")
-            incoming[document.document_id] = document
+            owned_document = deepcopy(document)
+            incoming[owned_document.document_id] = owned_document
 
-        old = self._documents.get(source.source_id, {})
+        old = self._documents.get(owned_source.source_id, {})
         old_ids = set(old)
         incoming_ids = set(incoming)
         added = incoming_ids - old_ids
@@ -157,11 +159,12 @@ class KnowledgeCollection:
             if old[document_id].content_hash != incoming[document_id].content_hash
         }
         unchanged = shared - changed
-        self._preflight_snapshot(source.source_id, len(incoming))
+        self._preflight_snapshot(owned_source.source_id, len(incoming))
 
         prepared: dict[str, tuple[Chunk, ...]] = {}
         for document_id in sorted(added | changed):
-            chunks = self._chunker.chunk(incoming[document_id])
+            chunk_document = deepcopy(incoming[document_id])
+            chunks = self._chunker.chunk(chunk_document)
             if type(chunks) is not tuple:
                 raise KnowledgeSnapshotError("chunker must return a tuple")
             prepared[document_id] = chunks
@@ -174,10 +177,10 @@ class KnowledgeCollection:
             staged.replace_document(document_id, prepared[document_id])
 
         self._index = staged
-        self._sources[source.source_id] = source
-        self._documents[source.source_id] = incoming
+        self._sources[owned_source.source_id] = owned_source
+        self._documents[owned_source.source_id] = incoming
         return KnowledgeSyncResult(
-            source_id=source.source_id,
+            source_id=owned_source.source_id,
             documents_added=len(added),
             documents_updated=len(changed),
             documents_unchanged=len(unchanged),
