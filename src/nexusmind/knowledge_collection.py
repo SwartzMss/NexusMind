@@ -2,25 +2,35 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
-from .knowledge import Document, KnowledgeSource
+from .knowledge import (
+    Document,
+    KnowledgeSource,
+    compute_content_hash,
+    stable_document_id,
+)
 from .knowledge_chunking import Chunk, TextChunker
 from .knowledge_ingestion import KnowledgeSourceAdapter
 from .knowledge_retrieval import ChunkIndex, InMemoryChunkIndex, SearchHit
 
 
 class KnowledgeCollectionError(Exception):
-    """Base class for controlled collection synchronization failures."""
+    """Base class for controlled collection state failures."""
 
 
 class KnowledgeSnapshotError(KnowledgeCollectionError):
-    """An adapter returned an invalid or incoherent source snapshot."""
+    """A source or restore snapshot is invalid or incoherent."""
 
 
 class KnowledgeCollectionLimitError(KnowledgeCollectionError):
     """A synchronization would exceed collection bookkeeping limits."""
+
+
+class KnowledgeRestoreError(KnowledgeCollectionError):
+    """A snapshot cannot be restored into a coherent collection state."""
 
 
 class DocumentChunker(Protocol):
@@ -65,6 +75,23 @@ class KnowledgeSyncResult:
     chunks_indexed: int
 
 
+@dataclass(frozen=True, slots=True)
+class KnowledgeSnapshot:
+    """Canonical process-local Knowledge state, excluding derived chunks."""
+
+    sources: tuple[KnowledgeSource, ...]
+    documents: tuple[Document, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeRestoreResult:
+    """Bounded summary of one successfully committed snapshot restore."""
+
+    sources_restored: int
+    documents_restored: int
+    chunks_indexed: int
+
+
 class KnowledgeCollection:
     """Explicitly synchronize source snapshots into a staged chunk index.
 
@@ -88,7 +115,8 @@ class KnowledgeCollection:
         factory = InMemoryChunkIndex if index_factory is None else index_factory
         if not callable(factory):
             raise TypeError("index_factory must be callable")
-        self._index = factory()
+        self._index_factory = factory
+        self._index = self._index_factory()
         self._require_cloneable_index(self._index)
         if not isinstance(self._limits, KnowledgeCollectionLimits):
             raise TypeError("limits must be KnowledgeCollectionLimits")
@@ -174,6 +202,98 @@ class KnowledgeCollection:
     def search(self, query: str, *, limit: int = 10) -> tuple[SearchHit, ...]:
         return self._index.search(query, limit=limit)
 
+    def snapshot(self) -> KnowledgeSnapshot:
+        """Export only committed canonical state in stable identity order."""
+
+        sources = tuple(
+            deepcopy(self._sources[source_id])
+            for source_id in sorted(self._sources)
+        )
+        documents = tuple(
+            deepcopy(document)
+            for source_id in sorted(self._documents)
+            for _, document in sorted(self._documents[source_id].items())
+        )
+        return KnowledgeSnapshot(sources=sources, documents=documents)
+
+    def restore(self, snapshot: KnowledgeSnapshot) -> KnowledgeRestoreResult:
+        """Atomically replace collection state and rebuild all derived state."""
+
+        sources, documents = self._validate_restore_snapshot(snapshot)
+        prepared: dict[str, tuple[Chunk, ...]] = {}
+        for document_id in sorted(documents):
+            chunks = self._chunker.chunk(documents[document_id])
+            if type(chunks) is not tuple:
+                raise KnowledgeRestoreError("chunker must return a tuple")
+            prepared[document_id] = chunks
+
+        try:
+            staged = self._index_factory()
+        except Exception as exc:
+            raise KnowledgeRestoreError("index_factory failed to create a fresh index") from exc
+        try:
+            self._require_cloneable_index(staged)
+        except TypeError as exc:
+            raise KnowledgeRestoreError("index_factory returned an invalid index") from exc
+        for document_id in sorted(prepared):
+            staged.replace_document(document_id, prepared[document_id])
+
+        restored_sources = {
+            source_id: deepcopy(source) for source_id, source in sources.items()
+        }
+        restored_documents = {source_id: {} for source_id in sources}
+        for document_id in sorted(documents):
+            document = deepcopy(documents[document_id])
+            restored_documents[document.source_id][document_id] = document
+        self._index = staged
+        self._sources = restored_sources
+        self._documents = restored_documents
+        return KnowledgeRestoreResult(
+            sources_restored=len(sources),
+            documents_restored=len(documents),
+            chunks_indexed=sum(len(chunks) for chunks in prepared.values()),
+        )
+
+    def _validate_restore_snapshot(
+        self, snapshot: KnowledgeSnapshot
+    ) -> tuple[dict[str, KnowledgeSource], dict[str, Document]]:
+        if not isinstance(snapshot, KnowledgeSnapshot):
+            raise KnowledgeSnapshotError("snapshot must be a KnowledgeSnapshot")
+        if type(snapshot.sources) is not tuple:
+            raise KnowledgeSnapshotError("snapshot sources must be a tuple")
+        if type(snapshot.documents) is not tuple:
+            raise KnowledgeSnapshotError("snapshot documents must be a tuple")
+
+        sources: dict[str, KnowledgeSource] = {}
+        for source in snapshot.sources:
+            if not isinstance(source, KnowledgeSource):
+                raise KnowledgeSnapshotError("snapshot sources must contain only KnowledgeSource values")
+            if type(source.source_id) is not str or not source.source_id.strip():
+                raise KnowledgeSnapshotError("snapshot source_id must be a non-empty string")
+            if source.source_id in sources:
+                raise KnowledgeSnapshotError("snapshot contains duplicate source_id values")
+            sources[source.source_id] = source
+
+        documents: dict[str, Document] = {}
+        for document in snapshot.documents:
+            if not isinstance(document, Document):
+                raise KnowledgeSnapshotError("snapshot documents must contain only Document values")
+            if document.source_id not in sources:
+                raise KnowledgeSnapshotError("snapshot Document references a missing source_id")
+            if document.document_id in documents:
+                raise KnowledgeSnapshotError("snapshot contains duplicate document_id values")
+            if document.document_id != stable_document_id(document.source_id, document.logical_path):
+                raise KnowledgeSnapshotError("snapshot Document has an incoherent document_id")
+            if document.content_hash != compute_content_hash(document.content):
+                raise KnowledgeSnapshotError("snapshot Document has an incoherent content_hash")
+            documents[document.document_id] = document
+
+        if len(sources) > self._limits.max_sources:
+            raise KnowledgeCollectionLimitError("collection exceeds max_sources")
+        if len(documents) > self._limits.max_documents:
+            raise KnowledgeCollectionLimitError("collection exceeds max_documents")
+        return sources, documents
+
     def _preflight_snapshot(self, source_id: str, incoming_count: int) -> None:
         source_count = len(self._sources) + (0 if source_id in self._sources else 1)
         if source_count > self._limits.max_sources:
@@ -197,6 +317,9 @@ __all__ = [
     "KnowledgeCollectionError",
     "KnowledgeCollectionLimitError",
     "KnowledgeCollectionLimits",
+    "KnowledgeRestoreError",
+    "KnowledgeRestoreResult",
+    "KnowledgeSnapshot",
     "KnowledgeSnapshotError",
     "KnowledgeSyncResult",
 ]

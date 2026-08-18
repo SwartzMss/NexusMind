@@ -39,6 +39,21 @@ Knowledge Retrieval 在 chunking 之后提供 source-neutral 的 `ChunkIndex` / 
 
 collection、source snapshot 和 index 均只存在于当前进程，重启后不会保留。该实现不是语义搜索，也尚未连接 embedding、向量数据库、持久化或 RAG/LLM 答案生成。`ChunkIndex` 契约用于允许未来后端替换当前实现。
 
+`KnowledgeCollection.snapshot()` 可按稳定 identity 顺序导出不可变的 `KnowledgeSnapshot`，其中仅包含 canonical 的 `KnowledgeSource` 和 `Document`。`restore()` 把 snapshot 视为完整 authoritative replacement，先验证 source/document 图和 collection limits，再使用当前 chunker 与 `index_factory` 创建的全新空 index 重建所有 derived `Chunk` / retrieval state，全部成功后才原子交换 collection 状态。Snapshot 不包含 Chunk、Index 或 SearchHit；使用不同 chunker 或 retrieval backend 恢复同一 canonical snapshot 时，可以得到不同的 derived state。
+
+```text
+External Source -> sync -> KnowledgeCollection -> snapshot() -> KnowledgeSnapshot
+
+KnowledgeSnapshot
+    -> restore()
+    -> Document
+    -> Chunking
+    -> Index
+    -> SearchHit[]
+```
+
+`KnowledgeSnapshot` 目前只是进程内导出/恢复契约，并不是 JSON、文件或数据库存储格式；如果没有未来的 store 将其持久化，进程退出后 snapshot 同样会丢失。SQLite、文件序列化、schema migration、semantic retrieval、embedding 和 RAG 仍属于未来工作。
+
 ```text
 External Source
     -> KnowledgeSourceAdapter
