@@ -7,6 +7,16 @@ from .knowledge import (
     compute_content_hash,
 )
 from .knowledge_chunking import Chunk, ChunkLimitError, TextChunker
+from .knowledge_retrieval import (
+    ChunkIdentityConflictError,
+    ChunkIndex,
+    ChunkIndexError,
+    ChunkIndexLimitError,
+    ChunkIndexLimits,
+    DocumentReplacementError,
+    InMemoryChunkIndex,
+    SearchHit,
+)
 from .knowledge_ingestion import (
     DEFAULT_MAX_DIRECTORY_DEPTH,
     DEFAULT_MAX_DOCUMENTS,
@@ -36,7 +46,14 @@ from .knowledge_ingestion import (
 __all__ = [
     "Chunk",
     "ChunkLimitError",
+    "ChunkIdentityConflictError",
+    "ChunkIndex",
+    "ChunkIndexError",
+    "ChunkIndexLimitError",
+    "ChunkIndexLimits",
     "Document",
+    "DocumentReplacementError",
+    "InMemoryChunkIndex",
     "KnowledgeSource",
     "KnowledgeSourceType",
     "compute_content_hash",
@@ -60,6 +77,7 @@ __all__ = [
     "PathEscapeError",
     "SourceNotFoundError",
     "SourceTypeError",
+    "SearchHit",
     "SymlinkSourceError",
     "TotalBytesLimitError",
     "TextChunker",

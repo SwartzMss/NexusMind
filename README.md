@@ -29,17 +29,24 @@ Local File / Directory
     -> Document[]
 ```
 
-第一版只支持 UTF-8 的 `.txt`、`.md` 和 `.markdown` 文件，并限制单文件大小、文档数量、总读取字节数、扫描条目数和目录深度。目录 adapter 收集后按完整的来源相对路径排序，跳过符号链接、junction 和其他 Windows reparse point，以及不支持的扩展名；单文件来源或根路径遇到这些类型会拒绝。Discovery 会记录每个文件的 identity；读取时从已打开的文件句柄读取，并依次复核 discovered identity、opened identity、当前路径 identity 与 containment，避免 scan 后路径被替换而读取其他目标。PDF、Office、Web、GitHub、MCP、索引和检索属于后续独立能力。
+第一版只支持 UTF-8 的 `.txt`、`.md` 和 `.markdown` 文件，并限制单文件大小、文档数量、总读取字节数、扫描条目数和目录深度。目录 adapter 收集后按完整的来源相对路径排序，跳过符号链接、junction 和其他 Windows reparse point，以及不支持的扩展名；单文件来源或根路径遇到这些类型会拒绝。Discovery 会记录每个文件的 identity；读取时从已打开的文件句柄读取，并依次复核 discovered identity、opened identity、当前路径 identity 与 containment，避免 scan 后路径被替换而读取其他目标。PDF、Office、Web、GitHub 和 MCP 属于后续 ingestion 能力；索引和检索位于独立的 Knowledge Retrieval 层。
 
 Knowledge Chunking 位于 ingestion 之后的独立层。`TextChunker` 使用确定性的字符分块策略，默认 `chunk_size=1000`、`overlap=100`、`max_chunks=10000`；配置会被严格校验，空 Document 返回空 tuple，超过最大块数会在生成任何部分结果前失败。Chunk ID 由 Document ID、内容 hash、字符区间和影响边界的分块配置确定性派生，因此同一输入与配置保持稳定，文档内容变化时不会让同一个 ID 指向不同切片。
+
+Knowledge Retrieval 在 chunking 之后提供 source-neutral 的 `ChunkIndex` / `SearchHit` 契约。首个 `InMemoryChunkIndex` 仅进行进程内词法检索：查询以 Unicode 空白切分并用 `str.casefold()` 归一化，每个不同查询词命中计一分，结果按分数降序、`chunk_id` 升序稳定排序。索引规模、每次文档更新、内容字符数、查询长度/词数和结果数均有显式上限；`replace_document` 会原子替换同一逻辑文档的旧 chunks。
+
+该实现不是语义搜索，进程重启后不会保留索引，也尚未连接 embedding、向量数据库、持久化或 RAG/LLM 答案生成。`ChunkIndex` 契约用于允许未来后端替换当前实现。
 
 ```text
 Knowledge Ingestion -> KnowledgeSource -> Document
 Knowledge Chunking                           -> Chunk
-future                                           -> Index -> Retrieval
+Knowledge Index / Retrieval                  -> Lexical Index -> SearchHit[]
+future                                       -> Persistence
+                                             -> Semantic Retrieval
+                                             -> RAG
 ```
 
-当前不包含 token-based 或语义分块、Embedding、Index、Retrieval、RAG 编排及知识持久化 schema。
+当前不包含 token-based / semantic chunking、Embedding、Semantic Retrieval、持久化 Index、RAG 编排等能力。
 
 执行关系可以概括为：
 
