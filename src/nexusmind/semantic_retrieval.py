@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import fsum, sqrt
+from math import fsum, hypot
 
 from .embeddings import EmbeddingProvider, EmbeddingVector
 from .knowledge_chunking import Chunk
@@ -259,10 +259,11 @@ class InMemorySemanticChunkIndex:
         hits: list[SearchHit] = []
         for chunk_id, chunk in self._chunks.items():
             vector = self._vectors[chunk_id]
+            vector_norm = self._norm(vector)
             score = fsum(
-                left * right
+                (left / query_norm) * (right / vector_norm)
                 for left, right in zip(query_vector.values, vector.values, strict=True)
-            ) / (query_norm * self._norm(vector))
+            )
             score = max(-1.0, min(1.0, score))
             hits.append(SearchHit(chunk=chunk, score=float(score)))
         hits.sort(key=lambda hit: (-hit.score, hit.chunk.chunk_id))
@@ -352,7 +353,7 @@ class InMemorySemanticChunkIndex:
 
     @staticmethod
     def _norm(vector: EmbeddingVector) -> float:
-        return sqrt(fsum(value * value for value in vector.values))
+        return hypot(*vector.values)
 
     @staticmethod
     def _require_chunk_tuple(chunks: tuple[Chunk, ...]) -> None:

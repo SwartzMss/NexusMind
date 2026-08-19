@@ -116,6 +116,20 @@ def test_semantic_ties_use_chunk_id_and_result_limit() -> None:
     assert [hit.chunk.chunk_id for hit in hits] == ["a"]
 
 
+def test_semantic_cosine_remains_finite_for_extreme_finite_values() -> None:
+    provider = _RecordingProvider(
+        {"huge": (1e308, 1e308), "tiny": (5e-324, 0.0), "q": (1e308, 1e308)}
+    )
+    index = InMemorySemanticChunkIndex(embedding_provider=provider)
+    index.add((_chunk("huge", "huge"), _chunk("tiny", "tiny")))
+
+    hits = index.search("q")
+
+    assert all(math.isfinite(hit.score) for hit in hits)
+    assert hits[0].score == pytest.approx(1.0)
+    assert hits[1].score == pytest.approx(1 / math.sqrt(2))
+
+
 def test_semantic_search_validates_query_and_limit_before_provider_call() -> None:
     provider = _RecordingProvider({"one": (1.0,), "q": (1.0,)})
     index = InMemorySemanticChunkIndex(
