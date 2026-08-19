@@ -80,11 +80,11 @@ class ChunkIndexLimits:
 
 @dataclass(frozen=True, slots=True)
 class SearchHit:
-    """One deterministic lexical match and its explicit score details."""
+    """One deterministic backend match and its explicit score details."""
 
     chunk: Chunk
     score: float
-    matched_terms: tuple[str, ...]
+    matched_terms: tuple[str, ...] = ()
 
 
 class ChunkIndex(Protocol):

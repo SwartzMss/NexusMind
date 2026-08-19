@@ -62,6 +62,14 @@ from .retrieval_evaluation import (
     evaluate_retrieval,
     load_retrieval_evaluation_cases,
 )
+from .semantic_retrieval import (
+    InMemorySemanticChunkIndex,
+    SemanticChunkIndexError,
+    SemanticChunkIndexLimitError,
+    SemanticChunkIndexLimits,
+    SemanticDimensionError,
+    SemanticEmbeddingError,
+)
 from .knowledge_ingestion import (
     DEFAULT_MAX_DIRECTORY_DEPTH,
     DEFAULT_MAX_DOCUMENTS,
@@ -107,6 +115,7 @@ __all__ = [
     "EmbeddingVector",
     "OpenAICompatibleEmbeddingProvider",
     "InMemoryChunkIndex",
+    "InMemorySemanticChunkIndex",
     "KnowledgeSource",
     "KnowledgeSourceType",
     "KnowledgeCollection",
@@ -152,6 +161,11 @@ __all__ = [
     "SourceNotFoundError",
     "SourceTypeError",
     "SearchHit",
+    "SemanticChunkIndexError",
+    "SemanticChunkIndexLimitError",
+    "SemanticChunkIndexLimits",
+    "SemanticDimensionError",
+    "SemanticEmbeddingError",
     "SQLiteKnowledgeSnapshotStore",
     "SymlinkSourceError",
     "TotalBytesLimitError",
