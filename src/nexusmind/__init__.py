@@ -6,6 +6,7 @@ from .embeddings import (
     EmbeddingProviderError,
     EmbeddingValidationError,
     EmbeddingVector,
+    OpenAICompatibleEmbeddingProvider,
 )
 
 from .knowledge import (
@@ -104,6 +105,7 @@ __all__ = [
     "EmbeddingProviderError",
     "EmbeddingValidationError",
     "EmbeddingVector",
+    "OpenAICompatibleEmbeddingProvider",
     "InMemoryChunkIndex",
     "KnowledgeSource",
     "KnowledgeSourceType",
