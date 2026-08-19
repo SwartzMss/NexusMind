@@ -1,11 +1,14 @@
 # CJK lexical retrieval baseline
 
 This descriptive, non-gate baseline compares two lexical policies on a small,
-copyright-safe Chinese fixture. The corpus contains four UTF-8 Markdown files
-under source `cjk-docs`: Android/Binder IPC, Arm TrustZone isolation, QNX
-microkernel fault isolation, and AES-GCM/HKDF. The ten queries and their
+copyright-safe Chinese fixture. The corpus contains seven UTF-8 Markdown files
+under source `cjk-docs`: four canonical documents covering Android/Binder IPC,
+Arm TrustZone isolation, QNX microkernel fault isolation, and AES-GCM/HKDF,
+plus plausible near neighbors about iOS/XPC, virtualization, and the TLS 1.3
+key schedule. The ten queries and their
 canonical `(source_id, logical_path)` relevance labels were authored before
-either ranking was observed.
+the revised corpus was ranked. The near neighbors and three harder paraphrases
+were added without changing any existing relevance target.
 
 ## Fixed configuration
 
@@ -23,8 +26,8 @@ either ranking was observed.
 
 | Analyzer | Hit@3 | Recall@3 | MRR |
 | --- | ---: | ---: | ---: |
-| `UnicodeCJKLexicalAnalyzer` | 1.000000 | 1.000000 | 1.000000 |
-| `WhitespaceLexicalAnalyzer` | 0.500000 | 0.500000 | 0.500000 |
+| `UnicodeCJKLexicalAnalyzer` | 1.000000 | 1.000000 | 0.850000 |
+| `WhitespaceLexicalAnalyzer` | 0.600000 | 0.600000 | 0.500000 |
 
 Reproduce offline from the repository root with:
 
@@ -33,8 +36,9 @@ pytest -q tests/test_retrieval_evaluation_cjk.py
 ```
 
 These values document the checked-in fixture; they are not exact aggregate
-release gates. Tests require determinism, bounded metrics, and a qualitative
-Hit@k improvement instead of pinning these numbers.
+release gates. Tests require determinism, bounded metrics, a qualitative Hit@k
+improvement, and non-saturated Unicode MRR as a fixture-quality guard instead
+of pinning the exact metric triplet.
 
 Han bigram analysis improves matches when Chinese prose has no spaces, but it
 has limitations: it does not perform word segmentation, can over-match common

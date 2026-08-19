@@ -54,6 +54,8 @@ def test_cjk_fixture_uses_real_pipeline_and_exposes_whitespace_limitation() -> N
         for metric in (report.hit_at_k, report.recall_at_k, report.mrr)
     )
     assert unicode_report.hit_at_k > whitespace_report.hit_at_k
+    # Fixture-quality guard: near-neighbor documents should leave ranking headroom.
+    assert unicode_report.mrr < 1.0
     assert any(
         unicode_case.hit_at_k > whitespace_case.hit_at_k
         for unicode_case, whitespace_case in zip(
@@ -71,6 +73,9 @@ def test_cjk_fixture_uses_real_pipeline_and_exposes_whitespace_limitation() -> N
         ("cjk-docs", "trustzone.md"),
         ("cjk-docs", "qnx.md"),
         ("cjk-docs", "cryptography.md"),
+        ("cjk-docs", "ios-xpc.md"),
+        ("cjk-docs", "virtualization.md"),
+        ("cjk-docs", "tls-keys.md"),
     }
     for case in cases:
         results = collection.search(case.query, limit=K)

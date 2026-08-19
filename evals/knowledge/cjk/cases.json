@@ -2,7 +2,7 @@
   "cases": [
     {
       "case_id": "android-cross-process",
-      "query": "安卓应用怎样跨进程请求系统服务",
+      "query": "安卓客户端怎样借助代理跨越地址空间调用后台能力",
       "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "android.md"}]
     },
     {
@@ -12,7 +12,7 @@
     },
     {
       "case_id": "trustzone-world-separation",
-      "query": "普通环境为何不能直接读取可信环境的内存",
+      "query": "Arm 芯片怎样阻止普通执行环境窥探高权限区域",
       "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "trustzone.md"}]
     },
     {
@@ -42,7 +42,7 @@
     },
     {
       "case_id": "key-purpose-separation",
-      "query": "如何从主密钥生成用途互相分离的子密钥",
+      "query": "通用密码组件如何从根秘密得到用途隔离的会话材料",
       "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "cryptography.md"}]
     },
     {
