@@ -42,22 +42,33 @@ class DocumentReplacementError(ChunkIndexError):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ChunkIndexLimits:
-    """Explicit resource bounds for an in-memory chunk index."""
+    """Explicit resource bounds for an in-memory chunk index.
+
+    Custom analyzers allocate their returned tuple before the index can inspect
+    it. Valid returned tokens are bounded here before corpus statistics retain
+    them or query scoring uses them.
+    """
 
     max_chunks: int = 10_000
     max_total_chars: int = 10_000_000
+    max_total_analyzed_tokens: int = 10_000_000
+    max_total_analyzed_token_chars: int = 200_000_000
     max_chunks_per_document: int = 10_000
     max_query_chars: int = 1_024
     max_query_terms: int = 32
+    max_query_analyzed_chars: int = 20_480
     max_results: int = 100
 
     def __post_init__(self) -> None:
         for name in (
             "max_chunks",
             "max_total_chars",
+            "max_total_analyzed_tokens",
+            "max_total_analyzed_token_chars",
             "max_chunks_per_document",
             "max_query_chars",
             "max_query_terms",
+            "max_query_analyzed_chars",
             "max_results",
         ):
             value = getattr(self, name)
@@ -237,6 +248,8 @@ class InMemoryChunkIndex:
         raw_terms = self._analyze(query)
         if len(raw_terms) > self._limits.max_query_terms:
             raise ChunkIndexLimitError("query exceeds max_query_terms")
+        if sum(len(term) for term in raw_terms) > self._limits.max_query_analyzed_chars:
+            raise ChunkIndexLimitError("query exceeds max_query_analyzed_chars")
         if type(limit) is not int:
             raise TypeError("limit must be an integer")
         if limit <= 0:
@@ -289,13 +302,19 @@ class InMemoryChunkIndex:
         token_counts: dict[str, int] = {}
         document_frequencies: Counter[str] = Counter()
         total_tokens = 0
+        total_token_chars = 0
         for chunk_id, chunk in chunks.items():
             tokens = self._analyze(chunk.content)
+            total_tokens += len(tokens)
+            if total_tokens > self._limits.max_total_analyzed_tokens:
+                raise ChunkIndexLimitError("index exceeds max_total_analyzed_tokens")
+            total_token_chars += sum(len(token) for token in tokens)
+            if total_token_chars > self._limits.max_total_analyzed_token_chars:
+                raise ChunkIndexLimitError("index exceeds max_total_analyzed_token_chars")
             frequencies = Counter(tokens)
             term_frequencies[chunk_id] = frequencies
             token_counts[chunk_id] = len(tokens)
             document_frequencies.update(frequencies.keys())
-            total_tokens += len(tokens)
         return term_frequencies, token_counts, document_frequencies, total_tokens
 
     def _analyze(self, text: str) -> tuple[str, ...]:

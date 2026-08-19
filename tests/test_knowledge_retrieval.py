@@ -467,6 +467,58 @@ def test_query_term_limit_counts_default_han_bigram_amplification() -> None:
         index.search("安全检索")
 
 
+def test_query_analyzed_character_limit_rejects_one_huge_custom_token() -> None:
+    class ExpandingAnalyzer:
+        def analyze(self, text: str) -> tuple[str, ...]:
+            return ("x" * 5,)
+
+    index = InMemoryChunkIndex(
+        analyzer=ExpandingAnalyzer(),
+        limits=ChunkIndexLimits(max_query_analyzed_chars=4),
+    )
+
+    with pytest.raises(ChunkIndexLimitError, match="max_query_analyzed_chars"):
+        index.search("q")
+
+
+def test_corpus_analyzed_token_limit_rejects_add_without_mutating_scores() -> None:
+    class MappingAnalyzer:
+        def analyze(self, text: str) -> tuple[str, ...]:
+            return {"old": ("shared",), "attack": ("x", "x", "x")}[text]
+
+    old = _chunk("old", "old")
+    index = InMemoryChunkIndex(
+        analyzer=MappingAnalyzer(),
+        limits=ChunkIndexLimits(max_total_analyzed_tokens=2),
+    )
+    index.add((old,))
+    before = index.search("old")
+
+    with pytest.raises(ChunkIndexLimitError, match="max_total_analyzed_tokens"):
+        index.add((_chunk("attack", "attack", "doc-2"),))
+
+    assert index.search("old") == before
+
+
+def test_corpus_analyzed_character_limit_rejects_replace_without_mutation() -> None:
+    class MappingAnalyzer:
+        def analyze(self, text: str) -> tuple[str, ...]:
+            return {"old": ("old",), "attack": ("x" * 6,)}[text]
+
+    old = _chunk("old", "old")
+    index = InMemoryChunkIndex(
+        analyzer=MappingAnalyzer(),
+        limits=ChunkIndexLimits(max_total_analyzed_token_chars=5),
+    )
+    index.add((old,))
+    before = index.search("old")
+
+    with pytest.raises(ChunkIndexLimitError, match="max_total_analyzed_token_chars"):
+        index.replace_document("doc-1", (_chunk("attack", "attack"),))
+
+    assert index.search("old") == before
+
+
 def test_index_count_content_and_per_document_limits_are_atomic() -> None:
     index = InMemoryChunkIndex(
         limits=ChunkIndexLimits(max_chunks=2, max_total_chars=4, max_chunks_per_document=1)

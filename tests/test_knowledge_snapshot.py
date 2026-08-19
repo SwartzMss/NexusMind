@@ -339,6 +339,28 @@ def test_chunking_and_index_failures_during_restore_are_atomic() -> None:
     assert limited.search("old")
 
 
+def test_analyzed_character_limit_failure_during_restore_is_atomic() -> None:
+    class ExpandingAnalyzer:
+        def analyze(self, text: str) -> tuple[str, ...]:
+            return (text if text == "old" else "x" * 6,)
+
+    collection = KnowledgeCollection(
+        index_factory=lambda: InMemoryChunkIndex(
+            analyzer=ExpandingAnalyzer(),
+            limits=ChunkIndexLimits(max_total_analyzed_token_chars=5),
+        )
+    )
+    collection.sync(FakeAdapter("old", (_document("old", "old.txt", "old"),)))
+    before = collection.search("old")
+
+    with pytest.raises(ChunkIndexLimitError, match="max_total_analyzed_token_chars"):
+        collection.restore(
+            KnowledgeSnapshot((_source("docs"),), (_document("docs", "a.txt", "attack"),))
+        )
+
+    assert collection.search("old") == before
+
+
 def test_chunk_identity_conflict_during_restore_is_atomic() -> None:
     collection = KnowledgeCollection(chunker=ConflictingChunker())
     collection.sync(FakeAdapter("old", (_document("old", "old.txt", "preserved"),)))
