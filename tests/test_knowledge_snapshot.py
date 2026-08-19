@@ -158,6 +158,7 @@ def test_round_trip_multiple_sources_preserves_canonical_state_and_isolation() -
     original = KnowledgeCollection()
     original.sync(FakeAdapter("one", (_document("one", "a.txt", "first unique"),)))
     original.sync(FakeAdapter("two", (_document("two", "b.txt", "second unique"),)))
+    original_results = original.search("first")
     snapshot = original.snapshot()
     restored = KnowledgeCollection()
 
@@ -170,6 +171,13 @@ def test_round_trip_multiple_sources_preserves_canonical_state_and_isolation() -
     assert [result.hit.chunk.document_id for result in restored.search("first")] == [
         snapshot.documents[0].document_id
     ]
+    restored_results = restored.search("first")
+    assert [result.hit.chunk.chunk_id for result in restored_results] == [
+        result.hit.chunk.chunk_id for result in original_results
+    ]
+    assert [result.hit.score for result in restored_results] == pytest.approx(
+        [result.hit.score for result in original_results]
+    )
     assert len(restored.search("second")) == 1
 
 

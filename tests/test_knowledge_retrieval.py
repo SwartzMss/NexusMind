@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from nexusmind import (
@@ -28,9 +30,10 @@ def test_retrieval_contracts_are_available_from_package_root() -> None:
     index: ChunkIndex = InMemoryChunkIndex()
     index.add((_chunk("chunk-1", "checkpoint resume"),))
 
-    assert index.search("checkpoint") == (
-        SearchHit(chunk=_chunk("chunk-1", "checkpoint resume"), score=1, matched_terms=("checkpoint",)),
-    )
+    hit = index.search("checkpoint")[0]
+    assert hit.chunk == _chunk("chunk-1", "checkpoint resume")
+    assert hit.score == pytest.approx(math.log(4 / 3))
+    assert hit.matched_terms == ("checkpoint",)
 
 
 def test_empty_index_non_match_and_blank_query_return_no_hits() -> None:
@@ -39,6 +42,69 @@ def test_empty_index_non_match_and_blank_query_return_no_hits() -> None:
     index.add((_chunk("chunk-1", "checkpoint"),))
     assert index.search("missing") == ()
     assert index.search(" \t\n") == ()
+
+
+def test_bm25_single_term_formula_and_score_type() -> None:
+    index = InMemoryChunkIndex()
+    index.add((_chunk("only", "term"),))
+
+    hit = index.search("term")[0]
+
+    assert type(hit.score) is float
+    assert math.isfinite(hit.score)
+    assert hit.score == pytest.approx(math.log(4 / 3))
+
+
+def test_matching_is_whitespace_token_based() -> None:
+    index = InMemoryChunkIndex()
+    index.add((_chunk("substring", "concatenate"), _chunk("token", "cat")))
+
+    assert [hit.chunk.chunk_id for hit in index.search("cat")] == ["token"]
+
+
+def test_repeated_term_frequency_increases_score_at_equal_length() -> None:
+    index = InMemoryChunkIndex()
+    index.add(
+        (
+            _chunk("repeated", "term term filler"),
+            _chunk("single", "term filler filler"),
+        )
+    )
+
+    hits = {hit.chunk.chunk_id: hit for hit in index.search("term")}
+
+    assert hits["repeated"].score > hits["single"].score
+
+
+def test_rarer_term_has_higher_idf_contribution() -> None:
+    index = InMemoryChunkIndex()
+    index.add((_chunk("one", "rare common"), _chunk("two", "other common")))
+
+    rare_score = index.search("rare")[0].score
+    common_score = index.search("common")[0].score
+
+    assert rare_score > common_score
+
+
+def test_shorter_chunk_scores_higher_at_equal_term_frequency() -> None:
+    index = InMemoryChunkIndex()
+    index.add(
+        (
+            _chunk("short", "term filler"),
+            _chunk("long", "term filler filler filler"),
+        )
+    )
+
+    hits = {hit.chunk.chunk_id: hit for hit in index.search("term")}
+
+    assert hits["short"].score > hits["long"].score
+
+
+def test_duplicate_query_terms_do_not_multiply_bm25_weight() -> None:
+    index = InMemoryChunkIndex()
+    index.add((_chunk("one", "term term"),))
+
+    assert index.search("TERM term term") == index.search("term")
 
 
 def test_multi_term_scoring_casefold_and_duplicate_terms() -> None:
@@ -52,10 +118,12 @@ def test_multi_term_scoring_casefold_and_duplicate_terms() -> None:
 
     hits = index.search("CHECKPOINT checkpoint resume")
 
-    assert [(hit.chunk.chunk_id, hit.score, hit.matched_terms) for hit in hits] == [
-        ("chunk-b", 2, ("checkpoint", "resume")),
-        ("chunk-a", 1, ("checkpoint",)),
+    assert [(hit.chunk.chunk_id, hit.matched_terms) for hit in hits] == [
+        ("chunk-b", ("checkpoint", "resume")),
+        ("chunk-a", ("checkpoint",)),
     ]
+    assert all(type(hit.score) is float for hit in hits)
+    assert hits[0].score > hits[1].score
 
 
 def test_ties_use_chunk_id_and_limit_is_applied() -> None:
@@ -71,8 +139,36 @@ def test_unicode_casefold_is_deterministic() -> None:
 
     first = index.search("straße 中文")
 
-    assert [(hit.chunk.chunk_id, hit.score) for hit in first] == [("chunk-1", 2), ("chunk-2", 1)]
+    assert [hit.chunk.chunk_id for hit in first] == ["chunk-1", "chunk-2"]
+    assert first[0].score > first[1].score
     assert index.search("straße 中文") == first
+
+
+def test_add_updates_bm25_corpus_statistics() -> None:
+    index = InMemoryChunkIndex()
+    index.add((_chunk("term", "term", "doc-1"),))
+    score_before = index.search("term")[0].score
+
+    index.add((_chunk("other", "other", "doc-2"),))
+
+    assert index.search("term")[0].score > score_before
+
+
+def test_remove_document_updates_bm25_corpus_statistics() -> None:
+    index = InMemoryChunkIndex()
+    index.add(
+        (
+            _chunk("term", "term", "doc-1"),
+            _chunk("other", "other", "doc-2"),
+        )
+    )
+    score_before = index.search("term")[0].score
+
+    index.remove_document("doc-2")
+
+    score_after = index.search("term")[0].score
+    assert score_after < score_before
+    assert score_after == pytest.approx(math.log(4 / 3))
 
 
 def test_exact_duplicate_add_is_idempotent() -> None:
@@ -89,6 +185,7 @@ def test_clone_has_independent_mutable_state() -> None:
     original.add((_chunk("chunk-1", "original"),))
 
     clone = original.clone()
+    assert clone.search("original") == original.search("original")
     clone.replace_document("doc-1", (_chunk("chunk-2", "changed"),))
 
     assert original.search("original")
@@ -101,10 +198,12 @@ def test_conflicting_chunk_id_is_rejected_without_mutation() -> None:
     original = _chunk("chunk-1", "original")
     index = InMemoryChunkIndex()
     index.add((original,))
+    before = index.search("original changed")
 
     with pytest.raises(ChunkIdentityConflictError):
         index.add((_chunk("chunk-1", "changed"),))
 
+    assert index.search("original changed") == before
     assert index.search("original")[0].chunk == original
     assert index.search("changed") == ()
 
@@ -130,15 +229,30 @@ def test_replace_document_removes_stale_chunks_and_empty_replacement_removes_all
     assert index.search("fresh") == ()
 
 
+def test_replace_document_rebuilds_statistics_equivalent_to_fresh_index() -> None:
+    replacement = _chunk("replacement", "other", "doc-1")
+    retained = _chunk("retained", "term", "doc-2")
+    index = InMemoryChunkIndex()
+    index.add((_chunk("old", "term term term term", "doc-1"), retained))
+
+    index.replace_document("doc-1", (replacement,))
+
+    fresh = InMemoryChunkIndex()
+    fresh.add((replacement, retained))
+    assert index.search("term other") == fresh.search("term other")
+
+
 def test_failed_replacement_is_atomic() -> None:
     old = _chunk("old", "old searchable", "doc-1")
     limits = ChunkIndexLimits(max_total_chars=len(old.content), max_chunks=5, max_chunks_per_document=5)
     index = InMemoryChunkIndex(limits=limits)
     index.add((old,))
+    before = index.search("old long")
 
     with pytest.raises(ChunkIndexLimitError):
         index.replace_document("doc-1", (_chunk("new", "content is too long", "doc-1"),))
 
+    assert index.search("old long") == before
     assert index.search("old")[0].chunk == old
     assert index.search("long") == ()
 
@@ -181,10 +295,12 @@ def test_index_count_content_and_per_document_limits_are_atomic() -> None:
         limits=ChunkIndexLimits(max_chunks=2, max_total_chars=4, max_chunks_per_document=1)
     )
     index.add((_chunk("a", "ab", "doc-1"),))
+    before_failures = index.search("ab")
     with pytest.raises(ChunkIndexLimitError, match="max_chunks_per_document"):
         index.add((_chunk("b", "c", "doc-1"),))
     with pytest.raises(ChunkIndexLimitError, match="max_total_chars"):
         index.add((_chunk("b", "cde", "doc-2"),))
+    assert index.search("ab") == before_failures
     index.add((_chunk("b", "cd", "doc-2"),))
     with pytest.raises(ChunkIndexLimitError, match="max_chunks"):
         index.add((_chunk("c", "", "doc-3"),))
