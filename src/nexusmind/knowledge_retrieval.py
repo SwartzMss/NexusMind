@@ -8,10 +8,16 @@ ascending ``chunk_id``.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
+from math import log
 from typing import Protocol
 
 from .knowledge_chunking import Chunk
+
+
+_BM25_K1 = 1.2
+_BM25_B = 0.75
 
 
 class ChunkIndexError(Exception):
@@ -62,7 +68,7 @@ class SearchHit:
     """One deterministic lexical match and its explicit score details."""
 
     chunk: Chunk
-    score: int
+    score: float
     matched_terms: tuple[str, ...]
 
 
@@ -88,6 +94,10 @@ class InMemoryChunkIndex:
         self._chunks: dict[str, Chunk] = {}
         self._document_chunks: dict[str, set[str]] = {}
         self._total_chars = 0
+        self._term_frequencies: dict[str, Counter[str]] = {}
+        self._token_counts: dict[str, int] = {}
+        self._document_frequencies: Counter[str] = Counter()
+        self._total_tokens = 0
 
     def add(self, chunks: tuple[Chunk, ...]) -> None:
         additions = self._validated_additions(chunks)
@@ -99,10 +109,22 @@ class InMemoryChunkIndex:
             total_chars=self._total_chars + sum(len(chunk.content) for chunk in additions.values()),
             document_counts=document_counts.values(),
         )
+        candidate_chunks = self._chunks.copy()
+        candidate_document_chunks = {
+            document_id: chunk_ids.copy()
+            for document_id, chunk_ids in self._document_chunks.items()
+        }
         for chunk in additions.values():
-            self._chunks[chunk.chunk_id] = chunk
-            self._document_chunks.setdefault(chunk.document_id, set()).add(chunk.chunk_id)
-            self._total_chars += len(chunk.content)
+            candidate_chunks[chunk.chunk_id] = chunk
+            candidate_document_chunks.setdefault(chunk.document_id, set()).add(
+                chunk.chunk_id
+            )
+        self._commit_candidate(
+            chunks=candidate_chunks,
+            document_chunks=candidate_document_chunks,
+            total_chars=self._total_chars
+            + sum(len(chunk.content) for chunk in additions.values()),
+        )
 
     def clone(self) -> "InMemoryChunkIndex":
         """Return an independent index with the same limits and state."""
@@ -114,6 +136,13 @@ class InMemoryChunkIndex:
             for document_id, chunk_ids in self._document_chunks.items()
         }
         clone._total_chars = self._total_chars
+        clone._term_frequencies = {
+            chunk_id: frequencies.copy()
+            for chunk_id, frequencies in self._term_frequencies.items()
+        }
+        clone._token_counts = self._token_counts.copy()
+        clone._document_frequencies = self._document_frequencies.copy()
+        clone._total_tokens = self._total_tokens
         return clone
 
     def replace_document(self, document_id: str, chunks: tuple[Chunk, ...]) -> None:
@@ -145,21 +174,42 @@ class InMemoryChunkIndex:
             document_counts=(*other_counts, len(replacement)),
         )
 
+        candidate_chunks = self._chunks.copy()
+        candidate_document_chunks = {
+            key: chunk_ids.copy()
+            for key, chunk_ids in self._document_chunks.items()
+        }
         for chunk_id in old_ids:
-            del self._chunks[chunk_id]
+            del candidate_chunks[chunk_id]
         if replacement:
-            self._document_chunks[document_id] = set(replacement)
-            self._chunks.update(replacement)
+            candidate_document_chunks[document_id] = set(replacement)
+            candidate_chunks.update(replacement)
         else:
-            self._document_chunks.pop(document_id, None)
-        self._total_chars = remaining_chars + sum(len(chunk.content) for chunk in replacement.values())
+            candidate_document_chunks.pop(document_id, None)
+        self._commit_candidate(
+            chunks=candidate_chunks,
+            document_chunks=candidate_document_chunks,
+            total_chars=remaining_chars
+            + sum(len(chunk.content) for chunk in replacement.values()),
+        )
 
     def remove_document(self, document_id: str) -> None:
         self._require_document_id(document_id)
-        chunk_ids = self._document_chunks.pop(document_id, set())
+        candidate_chunks = self._chunks.copy()
+        candidate_document_chunks = {
+            key: chunk_ids.copy()
+            for key, chunk_ids in self._document_chunks.items()
+        }
+        chunk_ids = candidate_document_chunks.pop(document_id, set())
+        removed_chars = 0
         for chunk_id in chunk_ids:
-            self._total_chars -= len(self._chunks[chunk_id].content)
-            del self._chunks[chunk_id]
+            removed_chars += len(candidate_chunks[chunk_id].content)
+            del candidate_chunks[chunk_id]
+        self._commit_candidate(
+            chunks=candidate_chunks,
+            document_chunks=candidate_document_chunks,
+            total_chars=self._total_chars - removed_chars,
+        )
 
     def search(self, query: str, *, limit: int = 10) -> tuple[SearchHit, ...]:
         if type(query) is not str:
@@ -179,14 +229,77 @@ class InMemoryChunkIndex:
         terms = tuple(dict.fromkeys(term.casefold() for term in raw_terms))
         if not terms:
             return ()
+        chunk_count = len(self._chunks)
+        if chunk_count == 0 or self._total_tokens == 0:
+            return ()
+        average_length = self._total_tokens / chunk_count
         hits: list[SearchHit] = []
-        for chunk in self._chunks.values():
-            normalized_content = chunk.content.casefold()
-            matched = tuple(term for term in terms if term in normalized_content)
+        for chunk_id, chunk in self._chunks.items():
+            frequencies = self._term_frequencies[chunk_id]
+            matched = tuple(term for term in terms if frequencies.get(term, 0) > 0)
             if matched:
-                hits.append(SearchHit(chunk=chunk, score=len(matched), matched_terms=matched))
+                chunk_length = self._token_counts[chunk_id]
+                score = 0.0
+                for term in matched:
+                    term_frequency = frequencies[term]
+                    document_frequency = self._document_frequencies[term]
+                    inverse_document_frequency = log(
+                        1
+                        + (chunk_count - document_frequency + 0.5)
+                        / (document_frequency + 0.5)
+                    )
+                    normalizer = term_frequency + _BM25_K1 * (
+                        1
+                        - _BM25_B
+                        + _BM25_B * chunk_length / average_length
+                    )
+                    score += (
+                        inverse_document_frequency
+                        * term_frequency
+                        * (_BM25_K1 + 1)
+                        / normalizer
+                    )
+                hits.append(SearchHit(chunk=chunk, score=score, matched_terms=matched))
         hits.sort(key=lambda hit: (-hit.score, hit.chunk.chunk_id))
         return tuple(hits[:limit])
+
+    @staticmethod
+    def _statistics_for(
+        chunks: dict[str, Chunk],
+    ) -> tuple[dict[str, Counter[str]], dict[str, int], Counter[str], int]:
+        term_frequencies: dict[str, Counter[str]] = {}
+        token_counts: dict[str, int] = {}
+        document_frequencies: Counter[str] = Counter()
+        total_tokens = 0
+        for chunk_id, chunk in chunks.items():
+            tokens = tuple(token.casefold() for token in chunk.content.split())
+            frequencies = Counter(tokens)
+            term_frequencies[chunk_id] = frequencies
+            token_counts[chunk_id] = len(tokens)
+            document_frequencies.update(frequencies.keys())
+            total_tokens += len(tokens)
+        return term_frequencies, token_counts, document_frequencies, total_tokens
+
+    def _commit_candidate(
+        self,
+        *,
+        chunks: dict[str, Chunk],
+        document_chunks: dict[str, set[str]],
+        total_chars: int,
+    ) -> None:
+        (
+            term_frequencies,
+            token_counts,
+            document_frequencies,
+            total_tokens,
+        ) = self._statistics_for(chunks)
+        self._chunks = chunks
+        self._document_chunks = document_chunks
+        self._total_chars = total_chars
+        self._term_frequencies = term_frequencies
+        self._token_counts = token_counts
+        self._document_frequencies = document_frequencies
+        self._total_tokens = total_tokens
 
     def _validated_additions(self, chunks: tuple[Chunk, ...]) -> dict[str, Chunk]:
         self._require_chunk_tuple(chunks)

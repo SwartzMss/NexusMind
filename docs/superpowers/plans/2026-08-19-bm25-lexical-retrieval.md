@@ -138,7 +138,7 @@ assert index.search("old") == ()
 assert index.search("new")
 
 # removal changes rarity statistics for remaining chunks
-assert score_after_remove > score_before_remove
+assert score_after_remove < score_before_remove
 
 # clone initially ranks identically, then mutation changes only the clone
 assert clone.search("term") == original.search("term")
