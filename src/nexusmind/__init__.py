@@ -1,5 +1,13 @@
 """NexusMind public package exports."""
 
+from .embeddings import (
+    EmbeddingError,
+    EmbeddingProvider,
+    EmbeddingProviderError,
+    EmbeddingValidationError,
+    EmbeddingVector,
+)
+
 from .knowledge import (
     Document,
     KnowledgeSource,
@@ -91,6 +99,11 @@ __all__ = [
     "Document",
     "DocumentChunker",
     "DocumentReplacementError",
+    "EmbeddingError",
+    "EmbeddingProvider",
+    "EmbeddingProviderError",
+    "EmbeddingValidationError",
+    "EmbeddingVector",
     "InMemoryChunkIndex",
     "KnowledgeSource",
     "KnowledgeSourceType",
