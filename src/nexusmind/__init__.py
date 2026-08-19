@@ -37,6 +37,14 @@ from .knowledge_store import (
     KnowledgeSnapshotStoreError,
     SQLiteKnowledgeSnapshotStore,
 )
+from .retrieval_evaluation import (
+    RetrievalEvaluationCase,
+    RetrievalEvaluationCaseResult,
+    RetrievalEvaluationError,
+    RetrievalEvaluationReport,
+    RetrievalTarget,
+    evaluate_retrieval,
+)
 from .knowledge_ingestion import (
     DEFAULT_MAX_DIRECTORY_DEPTH,
     DEFAULT_MAX_DOCUMENTS,
@@ -110,6 +118,11 @@ __all__ = [
     "LocalFileAdapter",
     "LocalIngestionLimits",
     "PathEscapeError",
+    "RetrievalEvaluationCase",
+    "RetrievalEvaluationCaseResult",
+    "RetrievalEvaluationError",
+    "RetrievalEvaluationReport",
+    "RetrievalTarget",
     "SourceNotFoundError",
     "SourceTypeError",
     "SearchHit",
@@ -118,6 +131,7 @@ __all__ = [
     "TotalBytesLimitError",
     "TextChunker",
     "UnsupportedFileTypeError",
+    "evaluate_retrieval",
     "__version__",
 ]
 
