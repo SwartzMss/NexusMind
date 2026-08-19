@@ -7,7 +7,7 @@ name = "nexusmind"
 version = "0.1.0"
 description = "Provider-neutral bounded Agent runtime with Tool, Workspace, MCP, checkpoint, and lease controls."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 license = "MIT"
 classifiers = [
   "Operating System :: Microsoft :: Windows",
@@ -35,4 +35,3 @@ nexusmind = "nexusmind.cli:main"
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-q"
-
