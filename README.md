@@ -33,7 +33,18 @@ Local File / Directory
 
 Knowledge Chunking 位于 ingestion 之后的独立层。`TextChunker` 使用确定性的字符分块策略，默认 `chunk_size=1000`、`overlap=100`、`max_chunks=10000`；配置会被严格校验，空 Document 返回空 tuple，超过最大块数会在生成任何部分结果前失败。Chunk ID 由 Document ID、内容 hash、字符区间和影响边界的分块配置确定性派生，因此同一输入与配置保持稳定，文档内容变化时不会让同一个 ID 指向不同切片。
 
-Knowledge Retrieval 在 chunking 之后提供 source-neutral 的 `ChunkIndex` / `SearchHit` 契约。首个 `InMemoryChunkIndex` 进行进程内 BM25 词法检索：Chunk 和 query 都以 Unicode 空白切分 token 并用 `str.casefold()` 归一化，query token 按首次出现顺序去重，因此匹配基于完整 token 而不是任意 substring。当前 analyzer 不做 stemming、stop-word 过滤或中文分词等语言处理，因此对没有空白词边界的语言能力有限。
+Knowledge Retrieval 在 chunking 之后提供 source-neutral 的 `ChunkIndex` / `SearchHit` 契约。首个 `InMemoryChunkIndex` 进行进程内 BM25 词法检索，Chunk 和 query 都通过同一个显式 `LexicalAnalyzer` 边界。默认的 `UnicodeCJKLexicalAnalyzer` 先做 NFKC 检索归一化（不修改 canonical Document 原文），再将标点、符号、空白、独立组合标记、控制字符和未分配字符作为边界；非 Han 的 Unicode 字母/数字连续段使用 `str.casefold()` 成为词项，Han 连续段产生重叠字符 bigram，只有单个 Han 字符的段则产生 singleton。Han 与非 Han 段之间也是边界。
+
+为使 Python 3.11–3.13 上的可检索字符集一致，默认 analyzer 显式采用 Unicode 14.0 common repertoire policy：Unicode 15.0/15.1 才分配的字符在 NFKC 前就作为边界，Han 识别也固定为 Unicode 14.0 已分配的显式区间。对需要完全保留历史“Unicode 空白切分后 casefold”行为的调用方，可显式选择兼容 analyzer：
+
+```python
+from nexusmind import InMemoryChunkIndex, WhitespaceLexicalAnalyzer
+
+index = InMemoryChunkIndex()
+legacy_index = InMemoryChunkIndex(analyzer=WhitespaceLexicalAnalyzer())
+```
+
+`WhitespaceLexicalAnalyzer` 会保留标点附着于空白 token 的旧行为。两种 analyzer 都不做词典分词、stemming、stop-word 过滤、同义词或语义理解；Han bigram 可能过度匹配常见相邻字，singleton query 的特异性较弱，兼容归一化也会有意合并某些视觉形式。
 
 BM25 使用 `k1 = 1.2`、`b = 0.75` 和始终为正的 IDF：
 
@@ -46,9 +57,11 @@ score(q, D) = sum over distinct matched query terms:
     tf(term, D) + k1 * (1 - b + b * |D| / avgdl)
 ```
 
-`SearchHit.score` 是有限非负 float，结果按 score 降序、`chunk_id` 升序稳定排序。TF、chunk frequency、token length 和平均 chunk length 都是 index 的 derived runtime state；add/replace/remove 会在候选 corpus 上重建统计并原子交换，restore 则从 canonical Documents 重新分块并重建，不写入 snapshot 或 SQLite。索引规模、每次文档更新、内容字符数、查询长度/词数和结果数仍有显式上限。
+`SearchHit.score` 是有限非负 float，结果按 score 降序、`chunk_id` 升序稳定排序。Query 的 `max_query_chars` 先于 analysis 检查；`max_query_terms` 则应用于 analyzer 返回的原始词项流，在按首次出现顺序去重之前计数，因此重复输入和 Han bigram 放大都不能绕过上限。Analyzer 选择、analyzed tokens、TF、chunk frequency、token length 和平均 chunk length 都是未持久化的 derived runtime state；add/replace/remove 会在候选 corpus 上重建统计并原子交换，restore 则从 canonical Documents 重新分块，并使用当前 collection/index 配置的 analyzer 重建 derived state。Snapshot 和 SQLite 都不保存 analyzer、tokens 或 postings。索引规模、每次文档更新、内容字符数、查询长度/词数和结果数仍有显式上限。
 
 `retrieval_evaluation` 提供确定性的离线 Hit@K、Recall@K 和 MRR 评估，ground truth 使用 canonical Document `(source_id, logical_path)`，同时保留实际 chunk 排名和重复 document hits 作为诊断信息。首个原创 corpus、15 个显式 labels、固定配置、当前指标及复现命令见 [`evals/knowledge/baseline.md`](evals/knowledge/baseline.md)；该 baseline 通过真实 LocalDirectoryAdapter -> KnowledgeCollection -> BM25 -> provenance 路径运行，不是 release gate 或公共 benchmark。
+
+CJK analyzer 对比评估的语料、labels、固定配置、复现命令和当前 Hit@3 / Recall@3 / MRR 位于 [`evals/knowledge/cjk/`](evals/knowledge/cjk/)。它使用 7 份原创文档（包含刻意加入的近邻文档与排名余量）和 10 个文档相关性 cases，通过真实 ingestion -> collection -> BM25 -> provenance -> evaluator 路径比较两种 analyzer。记录值只是 descriptive、non-gate 指标，测试检查确定性、范围、fixture coverage、定性改进和非饱和 MRR，不将精确指标锁定为 CI 质量门槛。
 
 `KnowledgeCollection` 组合现有 adapter、chunker 和 index，提供显式的 `sync()` / `search()` 工作流。每次同步加载完整 source snapshot，以 `document_id` 和 `content_hash` 确定新增、更新、未变化及删除的 Documents；只有新增/变化的文档会重新分块，删除文档的旧 chunks 会从检索中移除。第一版 collection 依赖独立的 `CloneableChunkIndex` staging capability：所有变更先在克隆的候选 index 上按稳定顺序完成，成功后才交换 collection snapshot 和 index，因此失败不会留下部分状态。可选的 `index_factory=` 必须在每次调用时创建一个全新、空且由 collection 独占的 index，避免 searchable state 脱离 authoritative source/document snapshot；调用方应通过 collection 搜索已提交状态。基础 `ChunkIndex` 仍只定义 add/replace/remove/search，未来事务型持久化 backend 不必支持 clone。同步由调用方显式触发，不包含后台监听或定时刷新。
 

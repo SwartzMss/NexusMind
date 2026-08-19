@@ -36,15 +36,18 @@ Two frozen, stateless implementations are public package exports:
 
 - `WhitespaceLexicalAnalyzer` uses `text.split()` followed by `casefold()` and
   exactly preserves the legacy behavior, including punctuation attachment.
-- `UnicodeCJKLexicalAnalyzer` first applies Unicode NFKC normalization, then
+- `UnicodeCJKLexicalAnalyzer` uses a Unicode 14.0 common repertoire policy,
+  treating characters first assigned in Unicode 15.0/15.1 as boundaries before
+  applying Unicode NFKC normalization to each remaining segment. It then
   extracts tokens deterministically without locale-sensitive behavior.
 
 The Unicode/CJK analyzer classifies characters as follows:
 
-- Han characters are the code points in the explicitly documented CJK Unified
-  Ideographs ranges supported by the implementation. A contiguous Han run
-  emits overlapping character bigrams. A one-character run emits that single
-  character.
+- Han characters are the code points in explicitly vendored, assigned Unicode
+  14.0 CJK Unified and Compatibility Ideograph intervals (plus U+3007), rather
+  than whole blocks or the host runtime's evolving Unicode database. A
+  contiguous Han run emits overlapping character bigrams. A one-character run
+  emits that single character.
 - All other Unicode letters and numbers form contiguous word-like runs. Each
   run is normalized with `casefold()` and emitted as one token.
 - Whitespace, punctuation, symbols, marks outside a word run, controls, and
@@ -100,9 +103,11 @@ checks are unchanged.
 
 ## Evaluation fixture
 
-A checked-in `evals/knowledge/cjk/` fixture will contain a small original
-Chinese and mixed Chinese/Latin corpus, document-level relevance labels, and a
-baseline report. Tests run the fixture through
+A checked-in `evals/knowledge/cjk/` fixture contains seven original Chinese and
+mixed Chinese/Latin documents: four canonical relevance targets and three
+plausible near neighbors that preserve ranking headroom. Ten document-level
+relevance cases and a baseline report accompany the corpus. Tests run the
+fixture through
 `LocalDirectoryAdapter -> KnowledgeCollection -> TextChunker ->
 InMemoryChunkIndex -> KnowledgeSearchResult -> retrieval evaluator` with both
 analyzers.
