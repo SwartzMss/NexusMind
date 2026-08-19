@@ -57,7 +57,7 @@ score(q, D) = sum over distinct matched query terms:
     tf(term, D) + k1 * (1 - b + b * |D| / avgdl)
 ```
 
-`SearchHit.score` 是有限非负 float，结果按 score 降序、`chunk_id` 升序稳定排序。Query 的 `max_query_chars` 先于 analysis 检查；`max_query_terms` 则应用于 analyzer 返回的原始词项流，在按首次出现顺序去重之前计数，因此重复输入和 Han bigram 放大都不能绕过上限。Analyzer 选择、analyzed tokens、TF、chunk frequency、token length 和平均 chunk length 都是未持久化的 derived runtime state；add/replace/remove 会在候选 corpus 上重建统计并原子交换，restore 则从 canonical Documents 重新分块，并使用当前 collection/index 配置的 analyzer 重建 derived state。Snapshot 和 SQLite 都不保存 analyzer、tokens 或 postings。索引规模、每次文档更新、内容字符数、查询长度/词数和结果数仍有显式上限。
+`SearchHit.score` 是有限非负 float，结果按 score 降序、`chunk_id` 升序稳定排序。Query 的 `max_query_chars` 先于 analysis 检查；`max_query_terms` 则应用于 analyzer 返回的原始词项流，在按首次出现顺序去重之前计数，因此重复输入和 Han bigram 放大都不能绕过上限。Analyzer 选择是未持久化的 runtime configuration；analyzed tokens、TF、chunk frequency、token length 和平均 chunk length 是未持久化的 derived runtime state。Add/replace/remove 会在候选 corpus 上重建统计并原子交换，restore 则从 canonical Documents 重新分块，并使用当前 collection/index 配置的 analyzer 重建 derived state。Snapshot 和 SQLite 都不保存 analyzer、tokens 或 postings。索引规模、每次文档更新、内容字符数、查询长度/词数和结果数仍有显式上限。
 
 `retrieval_evaluation` 提供确定性的离线 Hit@K、Recall@K 和 MRR 评估，ground truth 使用 canonical Document `(source_id, logical_path)`，同时保留实际 chunk 排名和重复 document hits 作为诊断信息。首个原创 corpus、15 个显式 labels、固定配置、当前指标及复现命令见 [`evals/knowledge/baseline.md`](evals/knowledge/baseline.md)；该 baseline 通过真实 LocalDirectoryAdapter -> KnowledgeCollection -> BM25 -> provenance 路径运行，不是 release gate 或公共 benchmark。
 
