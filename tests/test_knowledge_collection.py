@@ -15,6 +15,7 @@ from nexusmind import (
     KnowledgeCollection,
     KnowledgeCollectionLimitError,
     KnowledgeCollectionLimits,
+    KnowledgeSearchResult,
     KnowledgeSnapshotError,
     KnowledgeSource,
     KnowledgeSyncResult,
@@ -85,7 +86,35 @@ def test_first_sync_indexes_one_document_and_returns_summary() -> None:
     result = collection.sync(FakeAdapter("docs", (document,)))
 
     assert result == KnowledgeSyncResult("docs", 1, 0, 0, 0, 1)
-    assert collection.search("checkpoint")[0].chunk.document_id == document.document_id
+    assert collection.search("checkpoint")[0].hit.chunk.document_id == document.document_id
+
+
+def test_search_resolves_ordered_hits_to_canonical_source_and_document() -> None:
+    collection = KnowledgeCollection()
+    one = _document("one", "a.txt", "checkpoint resume")
+    two = _document("two", "b.txt", "checkpoint")
+    collection.sync(FakeAdapter("one", (one,), display_name="Source one"))
+    collection.sync(FakeAdapter("two", (two,), display_name="Source two"))
+
+    results = collection.search("checkpoint resume")
+
+    assert isinstance(results[0], KnowledgeSearchResult)
+    assert [result.source.source_id for result in results] == ["one", "two"]
+    assert results[0].source.display_name == "Source one"
+    assert results[0].document == one
+    assert results[0].document.logical_path == "a.txt"
+    assert results[0].hit.chunk.document_id == one.document_id
+    assert results[0].hit.chunk.content == "checkpoint resume"
+    assert (results[0].hit.chunk.start_offset, results[0].hit.chunk.end_offset) == (
+        0,
+        len(one.content),
+    )
+    assert results[0].hit.score == 2
+    assert results[0].hit.matched_terms == ("checkpoint", "resume")
+
+
+def test_resolved_search_returns_empty_tuple_for_no_hits() -> None:
+    assert KnowledgeCollection().search("missing") == ()
 
 
 def test_sync_detaches_committed_state_from_adapter_objects() -> None:
@@ -211,8 +240,8 @@ def test_first_multi_document_sync_and_search_ranking() -> None:
     hits = collection.search("checkpoint resume", limit=1)
 
     assert len(hits) == 1
-    assert hits[0].score == 2
-    assert hits[0].chunk.content == "checkpoint resume"
+    assert hits[0].hit.score == 2
+    assert hits[0].hit.chunk.content == "checkpoint resume"
 
 
 def test_identical_sync_is_unchanged_and_does_not_rechunk() -> None:

@@ -33,6 +33,10 @@ class KnowledgeRestoreError(KnowledgeCollectionError):
     """A snapshot cannot be restored into a coherent collection state."""
 
 
+class KnowledgeSearchResolutionError(KnowledgeCollectionError):
+    """A retrieval hit cannot be resolved to committed canonical state."""
+
+
 class DocumentChunker(Protocol):
     """Source-neutral document-to-chunk transformation contract."""
 
@@ -90,6 +94,15 @@ class KnowledgeRestoreResult:
     sources_restored: int
     documents_restored: int
     chunks_indexed: int
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeSearchResult:
+    """One retrieval hit with detached canonical source and document provenance."""
+
+    source: KnowledgeSource
+    document: Document
+    hit: SearchHit
 
 
 class KnowledgeCollection:
@@ -203,8 +216,34 @@ class KnowledgeCollection:
         del self._documents[source_id]
         del self._sources[source_id]
 
-    def search(self, query: str, *, limit: int = 10) -> tuple[SearchHit, ...]:
-        return self._index.search(query, limit=limit)
+    def search(self, query: str, *, limit: int = 10) -> tuple[KnowledgeSearchResult, ...]:
+        results: list[KnowledgeSearchResult] = []
+        for hit in self._index.search(query, limit=limit):
+            document = next(
+                (
+                    documents[hit.chunk.document_id]
+                    for documents in self._documents.values()
+                    if hit.chunk.document_id in documents
+                ),
+                None,
+            )
+            if document is None:
+                raise KnowledgeSearchResolutionError(
+                    "search hit references an unknown document_id"
+                )
+            source = self._sources.get(document.source_id)
+            if source is None:
+                raise KnowledgeSearchResolutionError(
+                    "search hit references a document with no canonical source"
+                )
+            results.append(
+                KnowledgeSearchResult(
+                    source=deepcopy(source),
+                    document=deepcopy(document),
+                    hit=hit,
+                )
+            )
+        return tuple(results)
 
     def snapshot(self) -> KnowledgeSnapshot:
         """Export only committed canonical state in stable identity order."""
@@ -328,6 +367,8 @@ __all__ = [
     "KnowledgeCollectionLimits",
     "KnowledgeRestoreError",
     "KnowledgeRestoreResult",
+    "KnowledgeSearchResolutionError",
+    "KnowledgeSearchResult",
     "KnowledgeSnapshot",
     "KnowledgeSnapshotError",
     "KnowledgeSyncResult",
