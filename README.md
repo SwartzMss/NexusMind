@@ -33,7 +33,20 @@ Local File / Directory
 
 Knowledge Chunking 位于 ingestion 之后的独立层。`TextChunker` 使用确定性的字符分块策略，默认 `chunk_size=1000`、`overlap=100`、`max_chunks=10000`；配置会被严格校验，空 Document 返回空 tuple，超过最大块数会在生成任何部分结果前失败。Chunk ID 由 Document ID、内容 hash、字符区间和影响边界的分块配置确定性派生，因此同一输入与配置保持稳定，文档内容变化时不会让同一个 ID 指向不同切片。
 
-Knowledge Retrieval 在 chunking 之后提供 source-neutral 的 `ChunkIndex` / `SearchHit` 契约。首个 `InMemoryChunkIndex` 仅进行进程内词法检索：查询以 Unicode 空白切分并用 `str.casefold()` 归一化，每个不同查询词命中计一分，结果按分数降序、`chunk_id` 升序稳定排序。索引规模、每次文档更新、内容字符数、查询长度/词数和结果数均有显式上限；`replace_document` 会原子替换同一逻辑文档的旧 chunks。
+Knowledge Retrieval 在 chunking 之后提供 source-neutral 的 `ChunkIndex` / `SearchHit` 契约。首个 `InMemoryChunkIndex` 进行进程内 BM25 词法检索：Chunk 和 query 都以 Unicode 空白切分 token 并用 `str.casefold()` 归一化，query token 按首次出现顺序去重，因此匹配基于完整 token 而不是任意 substring。当前 analyzer 不做 stemming、stop-word 过滤或中文分词等语言处理，因此对没有空白词边界的语言能力有限。
+
+BM25 使用 `k1 = 1.2`、`b = 0.75` 和始终为正的 IDF：
+
+```text
+idf(term) = log(1 + (N - df(term) + 0.5) / (df(term) + 0.5))
+
+score(q, D) = sum over distinct matched query terms:
+    idf(term) * tf(term, D) * (k1 + 1)
+    ---------------------------------------------------
+    tf(term, D) + k1 * (1 - b + b * |D| / avgdl)
+```
+
+`SearchHit.score` 是有限非负 float，结果按 score 降序、`chunk_id` 升序稳定排序。TF、chunk frequency、token length 和平均 chunk length 都是 index 的 derived runtime state；add/replace/remove 会在候选 corpus 上重建统计并原子交换，restore 则从 canonical Documents 重新分块并重建，不写入 snapshot 或 SQLite。索引规模、每次文档更新、内容字符数、查询长度/词数和结果数仍有显式上限。
 
 `KnowledgeCollection` 组合现有 adapter、chunker 和 index，提供显式的 `sync()` / `search()` 工作流。每次同步加载完整 source snapshot，以 `document_id` 和 `content_hash` 确定新增、更新、未变化及删除的 Documents；只有新增/变化的文档会重新分块，删除文档的旧 chunks 会从检索中移除。第一版 collection 依赖独立的 `CloneableChunkIndex` staging capability：所有变更先在克隆的候选 index 上按稳定顺序完成，成功后才交换 collection snapshot 和 index，因此失败不会留下部分状态。可选的 `index_factory=` 必须在每次调用时创建一个全新、空且由 collection 独占的 index，避免 searchable state 脱离 authoritative source/document snapshot；调用方应通过 collection 搜索已提交状态。基础 `ChunkIndex` 仍只定义 add/replace/remove/search，未来事务型持久化 backend 不必支持 clone。同步由调用方显式触发，不包含后台监听或定时刷新。
 
