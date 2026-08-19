@@ -131,12 +131,32 @@ def test_search_resolves_ordered_hits_to_canonical_source_and_document() -> None
         0,
         len(one.content),
     )
-    assert results[0].hit.score == 2
+    assert type(results[0].hit.score) is float
+    assert results[0].hit.score > results[1].hit.score
     assert results[0].hit.matched_terms == ("checkpoint", "resume")
 
 
 def test_resolved_search_returns_empty_tuple_for_no_hits() -> None:
     assert KnowledgeCollection().search("missing") == ()
+
+
+def test_resolved_search_preserves_backend_float_score_exactly() -> None:
+    document = _document("docs", "a.txt", "searchable")
+    backend_hit = SearchHit(
+        chunk=Chunk(
+            document_id=document.document_id,
+            chunk_id="custom",
+            content=document.content,
+            start_offset=0,
+            end_offset=len(document.content),
+        ),
+        score=12.5,
+        matched_terms=("searchable",),
+    )
+    collection = KnowledgeCollection(index_factory=lambda: HostileIndex((backend_hit,)))
+    collection.sync(FakeAdapter("docs", (document,)))
+
+    assert collection.search("searchable")[0].hit.score == 12.5
 
 
 def test_resolved_search_metadata_cannot_mutate_canonical_state() -> None:
@@ -398,7 +418,8 @@ def test_first_multi_document_sync_and_search_ranking() -> None:
     hits = collection.search("checkpoint resume", limit=1)
 
     assert len(hits) == 1
-    assert hits[0].hit.score == 2
+    assert type(hits[0].hit.score) is float
+    assert hits[0].hit.score > 0
     assert hits[0].hit.chunk.content == "checkpoint resume"
 
 

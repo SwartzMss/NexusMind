@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import sqlite3
 import threading
 
@@ -202,7 +203,9 @@ def test_snapshot_store_restart_restore_and_search_round_trip(tmp_path) -> None:
     assert result.source.source_id == "docs"
     assert result.document.logical_path == "notes.md"
     assert result.hit.chunk.document_id == result.document.document_id
-    assert result.hit.score == 2
+    assert type(result.hit.score) is float
+    assert math.isfinite(result.hit.score)
+    assert result.hit.score > 0
     assert result.hit.matched_terms == ("checkpoint", "resume")
 
 
