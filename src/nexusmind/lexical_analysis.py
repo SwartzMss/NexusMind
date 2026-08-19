@@ -60,7 +60,9 @@ _HAN_RANGES: tuple[tuple[int, int], ...] = (
 
 def _is_han(character: str) -> bool:
     code_point = ord(character)
-    return any(start <= code_point <= end for start, end in _HAN_RANGES)
+    return unicodedata.category(character) != "Cn" and any(
+        start <= code_point <= end for start, end in _HAN_RANGES
+    )
 
 
 @dataclass(frozen=True, slots=True)

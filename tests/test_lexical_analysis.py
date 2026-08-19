@@ -91,12 +91,12 @@ def test_combining_marks_are_boundaries_after_nfkc() -> None:
     ("text", "expected"),
     [
         ("\u3400\u4dbf", ("\u3400\u4dbf",)),
-        ("\u4e00\u9fff", ("\u4e00\u9fff",)),
-        ("\U00020000\U0002a6df", ("\U00020000\U0002a6df",)),
-        ("\U00030000\U0003134f", ("\U00030000\U0003134f",)),
+        ("\u4e00\u9fa5", ("\u4e00\u9fa5",)),
+        ("\U00020000\U0002a6d6", ("\U00020000\U0002a6d6",)),
+        ("\U00030000\U0003134a", ("\U00030000\U0003134a",)),
         (
-            "\uf900\ufaff",
-            (unicodedata.normalize("NFKC", "\uf900\ufaff"),),
+            "\uf900\ufa6d",
+            (unicodedata.normalize("NFKC", "\uf900\ufa6d"),),
         ),
     ],
 )
@@ -110,6 +110,14 @@ def test_code_points_outside_han_ranges_are_not_treated_as_han() -> None:
     analyzer = UnicodeCJKLexicalAnalyzer()
 
     assert analyzer.analyze("\u4dc0B \U0002fa20C") == ("b", "c")
+
+
+def test_unassigned_code_points_inside_han_blocks_are_boundaries() -> None:
+    analyzer = UnicodeCJKLexicalAnalyzer()
+
+    # U+FA6E is unassigned across the Unicode databases in supported Pythons.
+    assert unicodedata.category("\ufa6e") == "Cn"
+    assert analyzer.analyze("a\ufa6eb") == ("a", "b")
 
 
 def test_results_are_stable_tuples_without_empty_tokens() -> None:
