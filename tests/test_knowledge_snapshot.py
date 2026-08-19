@@ -20,6 +20,7 @@ from nexusmind import (
     KnowledgeSnapshotError,
     KnowledgeSource,
     TextChunker,
+    WhitespaceLexicalAnalyzer,
 )
 
 
@@ -142,6 +143,31 @@ def test_restore_replaces_existing_state_and_rebuilds_searchable_chunks() -> Non
     assert search_result.document == restored
     assert search_result.hit.chunk.document_id == restored.document_id
     assert collection.snapshot() == KnowledgeSnapshot((_source("docs"),), (restored,))
+
+
+def test_restore_rebuilds_chinese_search_state_with_current_index_analyzer() -> None:
+    source = _source("docs")
+    document = _document("docs", "guide.txt", "知识图谱支持语义检索")
+    snapshot = KnowledgeSnapshot((source,), (document,))
+
+    default_collection = KnowledgeCollection()
+    default_collection.restore(snapshot)
+    default_result = default_collection.search("语义检索")[0]
+
+    assert default_result.source == source
+    assert default_result.document == document
+    assert default_result.hit.chunk.document_id == document.document_id
+    assert default_result.hit.chunk.content == document.content
+    assert default_result.hit.matched_terms == ("语义", "义检", "检索")
+
+    whitespace_collection = KnowledgeCollection(
+        index_factory=lambda: InMemoryChunkIndex(
+            analyzer=WhitespaceLexicalAnalyzer()
+        )
+    )
+    whitespace_collection.restore(snapshot)
+
+    assert whitespace_collection.search("语义检索") == ()
 
 
 def test_restore_empty_snapshot_replaces_non_empty_collection() -> None:

@@ -209,6 +209,25 @@ def test_snapshot_store_restart_restore_and_search_round_trip(tmp_path) -> None:
     assert result.hit.matched_terms == ("checkpoint", "resume")
 
 
+def test_sqlite_restart_rebuilds_chinese_search_state_from_canonical_data(tmp_path) -> None:
+    path = tmp_path / "knowledge.db"
+    source = _source("docs")
+    document = _document("docs", "guide.md", "知识图谱支持语义检索")
+    snapshot = KnowledgeSnapshot((source,), (document,))
+    SQLiteKnowledgeSnapshotStore(path).save(snapshot)
+
+    restarted = KnowledgeCollection()
+    restarted.restore(SQLiteKnowledgeSnapshotStore(path).load())
+    result = restarted.search("语义检索")[0]
+
+    assert restarted.snapshot() == snapshot
+    assert result.source == source
+    assert result.document == document
+    assert result.hit.chunk.document_id == document.document_id
+    assert result.hit.chunk.content == document.content
+    assert result.hit.matched_terms == ("语义", "义检", "检索")
+
+
 def test_second_save_fully_replaces_old_sources_and_documents(tmp_path) -> None:
     store = SQLiteKnowledgeSnapshotStore(tmp_path / "knowledge.db")
     store.save(_snapshot("old", "old content"))
@@ -340,13 +359,30 @@ def test_schema_persists_no_derived_retrieval_state(tmp_path) -> None:
             )
         }
         columns = {
-            row[1]
+            table: {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
             for table in tables
-            for row in db.execute(f"PRAGMA table_info({table})")
         }
 
     assert tables == {"knowledge_store_metadata", "sources", "documents"}
-    assert {"chunk_id", "score", "matched_terms"}.isdisjoint(columns)
+    assert columns == {
+        "knowledge_store_metadata": {"key", "value"},
+        "sources": {
+            "source_id",
+            "source_type",
+            "display_name",
+            "logical_location",
+            "metadata_json",
+        },
+        "documents": {
+            "document_id",
+            "source_id",
+            "logical_path",
+            "content",
+            "content_type",
+            "metadata_json",
+            "content_hash",
+        },
+    }
 
 
 def test_save_rejects_incoherent_snapshot_without_replacing_old_state(tmp_path) -> None:
