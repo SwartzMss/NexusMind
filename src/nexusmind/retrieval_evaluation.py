@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+from pathlib import Path
 
 from .knowledge_collection import KnowledgeCollection
 
 
 class RetrievalEvaluationError(Exception):
     """Evaluation input or canonical relevance state is invalid."""
+
+
+class RetrievalEvaluationDatasetError(RetrievalEvaluationError):
+    """A retrieval evaluation dataset is malformed or unreadable."""
 
 
 def _require_text(value: object, field_name: str) -> str:
@@ -67,6 +73,79 @@ class RetrievalEvaluationReport:
     hit_at_k: float
     recall_at_k: float
     mrr: float
+
+
+def load_retrieval_evaluation_cases(
+    path: str | Path,
+) -> tuple[RetrievalEvaluationCase, ...]:
+    """Load and strictly validate a UTF-8 JSON evaluation dataset."""
+
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeError, TypeError) as exc:
+        raise RetrievalEvaluationDatasetError("failed to read dataset") from exc
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RetrievalEvaluationDatasetError("dataset must contain valid JSON") from exc
+    if type(payload) is not dict:
+        raise RetrievalEvaluationDatasetError("dataset root must be an object")
+    if set(payload) != {"cases"}:
+        raise RetrievalEvaluationDatasetError("dataset root fields must be exactly: cases")
+    raw_cases = payload["cases"]
+    if type(raw_cases) is not list:
+        raise RetrievalEvaluationDatasetError("cases must be an array")
+    if not raw_cases:
+        raise RetrievalEvaluationDatasetError("dataset must contain at least one case")
+
+    cases: list[RetrievalEvaluationCase] = []
+    seen_case_ids: set[str] = set()
+    for raw_case in raw_cases:
+        if type(raw_case) is not dict:
+            raise RetrievalEvaluationDatasetError("each case must be an object")
+        if set(raw_case) != {"case_id", "query", "relevant_documents"}:
+            raise RetrievalEvaluationDatasetError(
+                "case fields must be exactly: case_id, query, relevant_documents"
+            )
+        raw_targets = raw_case["relevant_documents"]
+        if type(raw_targets) is not list:
+            raise RetrievalEvaluationDatasetError(
+                "relevant_documents must be an array"
+            )
+        targets: list[RetrievalTarget] = []
+        for raw_target in raw_targets:
+            if type(raw_target) is not dict:
+                raise RetrievalEvaluationDatasetError("each target must be an object")
+            if set(raw_target) != {"source_id", "logical_path"}:
+                raise RetrievalEvaluationDatasetError(
+                    "target fields must be exactly: source_id, logical_path"
+                )
+            try:
+                targets.append(
+                    RetrievalTarget(
+                        source_id=raw_target["source_id"],
+                        logical_path=raw_target["logical_path"],
+                    )
+                )
+            except (TypeError, ValueError) as exc:
+                raise RetrievalEvaluationDatasetError(str(exc)) from exc
+        if len(set(targets)) != len(targets):
+            raise RetrievalEvaluationDatasetError(
+                "relevant_documents contains duplicate targets"
+            )
+        try:
+            case = RetrievalEvaluationCase(
+                case_id=raw_case["case_id"],
+                query=raw_case["query"],
+                relevant_documents=tuple(targets),
+            )
+        except (TypeError, ValueError) as exc:
+            raise RetrievalEvaluationDatasetError(str(exc)) from exc
+        if case.case_id in seen_case_ids:
+            raise RetrievalEvaluationDatasetError("dataset contains duplicate case_id values")
+        seen_case_ids.add(case.case_id)
+        cases.append(case)
+    return tuple(cases)
 
 
 def evaluate_retrieval(
@@ -155,8 +234,10 @@ def evaluate_retrieval(
 __all__ = [
     "RetrievalEvaluationCase",
     "RetrievalEvaluationCaseResult",
+    "RetrievalEvaluationDatasetError",
     "RetrievalEvaluationError",
     "RetrievalEvaluationReport",
     "RetrievalTarget",
     "evaluate_retrieval",
+    "load_retrieval_evaluation_cases",
 ]

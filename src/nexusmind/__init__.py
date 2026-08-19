@@ -40,10 +40,12 @@ from .knowledge_store import (
 from .retrieval_evaluation import (
     RetrievalEvaluationCase,
     RetrievalEvaluationCaseResult,
+    RetrievalEvaluationDatasetError,
     RetrievalEvaluationError,
     RetrievalEvaluationReport,
     RetrievalTarget,
     evaluate_retrieval,
+    load_retrieval_evaluation_cases,
 )
 from .knowledge_ingestion import (
     DEFAULT_MAX_DIRECTORY_DEPTH,
@@ -120,6 +122,7 @@ __all__ = [
     "PathEscapeError",
     "RetrievalEvaluationCase",
     "RetrievalEvaluationCaseResult",
+    "RetrievalEvaluationDatasetError",
     "RetrievalEvaluationError",
     "RetrievalEvaluationReport",
     "RetrievalTarget",
@@ -132,6 +135,7 @@ __all__ = [
     "TextChunker",
     "UnsupportedFileTypeError",
     "evaluate_retrieval",
+    "load_retrieval_evaluation_cases",
     "__version__",
 ]
 
