@@ -162,6 +162,56 @@ def test_hybrid_rejects_duplicate_and_cross_backend_conflicting_chunks() -> None
         conflict.search("query")
 
 
+def test_hybrid_rejects_child_results_over_requested_candidate_limit_early() -> None:
+    class UninspectableHit:
+        @property
+        def chunk(self) -> object:
+            raise AssertionError("oversized results must not be inspected")
+
+    oversized = tuple(UninspectableHit() for _ in range(3))
+
+    class OverReturningIndex(_ScriptedIndex):
+        def search(self, query: str, *, limit: int = 10) -> tuple[SearchHit, ...]:
+            self.search_calls.append((query, limit))
+            return self.hits
+
+    semantic = _ScriptedIndex()
+    index = _hybrid(
+        OverReturningIndex(oversized),  # type: ignore[arg-type]
+        semantic,
+        candidate_depth=2,
+    )
+
+    with pytest.raises(
+        HybridBackendCoherenceError,
+        match="exceeded requested candidate limit",
+    ):
+        index.search("query", limit=1)
+
+    assert semantic.search_calls == []
+
+
+def test_hybrid_checks_combined_fusion_bound_before_hit_validation() -> None:
+    class UninspectableHit:
+        @property
+        def chunk(self) -> object:
+            raise AssertionError("over-bound results must not be inspected")
+
+    hits = (UninspectableHit(), UninspectableHit())
+    index = _hybrid(
+        _ScriptedIndex(hits),  # type: ignore[arg-type]
+        _ScriptedIndex(hits),  # type: ignore[arg-type]
+        limits=HybridChunkIndexLimits(
+            max_candidates_per_backend=2,
+            max_fusion_entries=3,
+        ),
+        candidate_depth=2,
+    )
+
+    with pytest.raises(HybridChunkIndexLimitError, match="max_fusion_entries"):
+        index.search("query", limit=1)
+
+
 @pytest.mark.parametrize(
     "hits",
     [
@@ -199,6 +249,27 @@ def test_hybrid_mutations_commit_both_clones_and_clone_is_independent() -> None:
     ]
     assert [call[0] for call in clone._lexical.mutations][-1] == "remove_document"
     assert len(index._lexical.mutations) == 2
+
+
+def test_hybrid_rejects_cross_child_clone_aliasing_without_mutation() -> None:
+    shared_candidate = _ScriptedIndex()
+
+    class AliasingCloneIndex(_ScriptedIndex):
+        def clone(self) -> _ScriptedIndex:
+            return shared_candidate
+
+    lexical = AliasingCloneIndex()
+    semantic = AliasingCloneIndex()
+    index = _hybrid(lexical, semantic)
+
+    with pytest.raises(HybridChunkIndexError, match="clone failed"):
+        index.clone()
+    with pytest.raises(HybridChunkIndexError, match="mutation failed"):
+        index.add((_chunk("new"),))
+
+    assert index._lexical is lexical
+    assert index._semantic is semantic
+    assert shared_candidate.mutations == []
 
 
 @pytest.mark.parametrize("failing_backend", ["lexical", "semantic"])

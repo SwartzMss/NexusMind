@@ -37,9 +37,11 @@ result limit, each child receives `max(limit, candidate_depth)`. Construction
 requires candidate depth not to exceed `max_candidates_per_backend`; search
 never silently truncates the configured depth. `HybridChunkIndexLimits` bounds
 final results, candidates per backend, and the combined temporary child-hit
-count (`max_fusion_entries`). Child indexes may impose tighter result/query
-limits; an incompatible child configuration fails predictably as a chained,
-redacted hybrid backend error.
+count (`max_fusion_entries`). Child results that exceed their requested limit,
+or whose combined tuple lengths exceed the fusion bound, are rejected before
+per-hit validation allocates duplicate-detection bookkeeping. Child indexes may
+impose tighter result/query limits; an incompatible child configuration fails
+predictably as a chained, redacted hybrid backend error.
 
 ## Ownership, mutation, and clone behavior
 
@@ -49,9 +51,11 @@ succeed. Thus a later semantic/provider failure cannot retain an earlier
 lexical mutation, and the reverse ordering is also atomic. Child error text is
 not exposed through the public hybrid message.
 
-`clone()` clones both children and rejects a child that returns itself. Frozen
-limits and fusion configuration, child factories, and child-specific immutable
-runtime configuration may be shared. Mutable child corpus state is independent.
+`clone()` clones both children and rejects a child that returns itself or two
+children that return the same candidate object. Mutation staging enforces the
+same cross-child independence. Frozen limits and fusion configuration, child
+factories, and child-specific immutable runtime configuration may be shared.
+Mutable child corpus state is independent.
 
 Search invokes lexical then semantic for the same query and is fail-closed: a
 failure in either child returns no partial fusion result. Graceful degradation

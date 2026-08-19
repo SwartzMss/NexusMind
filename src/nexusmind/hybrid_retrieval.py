@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import isfinite
-from typing import Callable
+from typing import Callable, cast
 
 from .knowledge_chunking import Chunk
 from .knowledge_collection import CloneableChunkIndex
@@ -107,7 +107,11 @@ class HybridChunkIndex:
             semantic = self._semantic.clone()
             self._require_child(lexical)
             self._require_child(semantic)
-            if lexical is self._lexical or semantic is self._semantic:
+            if (
+                lexical is self._lexical
+                or semantic is self._semantic
+                or lexical is semantic
+            ):
                 raise TypeError
         except Exception as exc:
             raise HybridChunkIndexError("hybrid backend clone failed") from exc
@@ -135,13 +139,18 @@ class HybridChunkIndex:
             )
         try:
             lexical_hits = self._lexical.search(query, limit=backend_limit)
+        except Exception as exc:
+            raise HybridChunkIndexError("hybrid backend search failed") from exc
+        lexical = self._bounded_hits(lexical_hits, "lexical", backend_limit)
+        try:
             semantic_hits = self._semantic.search(query, limit=backend_limit)
         except Exception as exc:
             raise HybridChunkIndexError("hybrid backend search failed") from exc
-        lexical = self._validated_hits(lexical_hits, "lexical")
-        semantic = self._validated_hits(semantic_hits, "semantic")
+        semantic = self._bounded_hits(semantic_hits, "semantic", backend_limit)
         if len(lexical) + len(semantic) > self._limits.max_fusion_entries:
             raise HybridChunkIndexLimitError("fusion exceeds max_fusion_entries")
+        lexical = self._validated_hits(lexical, "lexical")
+        semantic = self._validated_hits(semantic, "semantic")
 
         chunks: dict[str, Chunk] = {}
         scores: dict[str, float] = {}
@@ -177,7 +186,11 @@ class HybridChunkIndex:
             semantic = self._semantic.clone()
             self._require_child(lexical)
             self._require_child(semantic)
-            if lexical is self._lexical or semantic is self._semantic:
+            if (
+                lexical is self._lexical
+                or semantic is self._semantic
+                or lexical is semantic
+            ):
                 raise TypeError
             getattr(lexical, method)(*args)
             getattr(semantic, method)(*args)
@@ -187,11 +200,25 @@ class HybridChunkIndex:
         self._semantic = semantic
 
     @staticmethod
-    def _validated_hits(hits: object, backend: str) -> tuple[SearchHit, ...]:
+    def _bounded_hits(
+        hits: object,
+        backend: str,
+        backend_limit: int,
+    ) -> tuple[SearchHit, ...]:
         if type(hits) is not tuple:
             raise HybridBackendCoherenceError(
                 f"{backend} backend must return an exact tuple"
             )
+        if len(hits) > backend_limit:
+            raise HybridBackendCoherenceError(
+                f"{backend} backend exceeded requested candidate limit"
+            )
+        return hits
+
+    @staticmethod
+    def _validated_hits(
+        hits: tuple[object, ...], backend: str
+    ) -> tuple[SearchHit, ...]:
         seen: set[str] = set()
         for hit in hits:
             if type(hit) is not SearchHit or not isinstance(hit.chunk, Chunk):
@@ -213,7 +240,7 @@ class HybridChunkIndex:
                     f"{backend} backend returned a duplicate chunk_id"
                 )
             seen.add(hit.chunk.chunk_id)
-        return hits
+        return cast(tuple[SearchHit, ...], hits)
 
     @staticmethod
     def _require_child(child: object) -> None:
