@@ -137,7 +137,10 @@ def test_restore_replaces_existing_state_and_rebuilds_searchable_chunks() -> Non
 
     assert result == KnowledgeRestoreResult(1, 1, 1)
     assert collection.search("old") == ()
-    assert collection.search("searchable")[0].chunk.document_id == restored.document_id
+    search_result = collection.search("searchable")[0]
+    assert search_result.source == _source("docs")
+    assert search_result.document == restored
+    assert search_result.hit.chunk.document_id == restored.document_id
     assert collection.snapshot() == KnowledgeSnapshot((_source("docs"),), (restored,))
 
 
@@ -161,7 +164,10 @@ def test_round_trip_multiple_sources_preserves_canonical_state_and_isolation() -
     restored.restore(snapshot)
 
     assert restored.snapshot() == snapshot
-    assert [hit.chunk.document_id for hit in restored.search("first")] == [
+    first_result = restored.search("first")[0]
+    assert first_result.source.source_id == "one"
+    assert first_result.document == snapshot.documents[0]
+    assert [result.hit.chunk.document_id for result in restored.search("first")] == [
         snapshot.documents[0].document_id
     ]
     assert len(restored.search("second")) == 1

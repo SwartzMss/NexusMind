@@ -198,7 +198,12 @@ def test_snapshot_store_restart_restore_and_search_round_trip(tmp_path) -> None:
     restarted.restore(SQLiteKnowledgeSnapshotStore(path).load())
 
     assert restarted.snapshot() == original.snapshot()
-    assert restarted.search("checkpoint resume")[0].score == 2
+    result = restarted.search("checkpoint resume")[0]
+    assert result.source.source_id == "docs"
+    assert result.document.logical_path == "notes.md"
+    assert result.hit.chunk.document_id == result.document.document_id
+    assert result.hit.score == 2
+    assert result.hit.matched_terms == ("checkpoint", "resume")
 
 
 def test_second_save_fully_replaces_old_sources_and_documents(tmp_path) -> None:
