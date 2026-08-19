@@ -80,6 +80,7 @@ The limits are frozen positive plain integers covering:
 - total chunk-content characters;
 - vector dimensions;
 - total retained vector values;
+- maximum document embedding batch size;
 - query characters; and
 - returned results.
 
