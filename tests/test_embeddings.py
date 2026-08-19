@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import FrozenInstanceError
 import json
 import math
@@ -25,6 +26,17 @@ class _FixtureProvider:
 
     def embed_query(self, text: str) -> EmbeddingVector:
         return EmbeddingVector((1, 1))
+
+
+class _ChunkedStream(httpx.SyncByteStream):
+    def __init__(self, chunks: tuple[bytes, ...]) -> None:
+        self.chunks = chunks
+        self.yielded = 0
+
+    def __iter__(self) -> Iterator[bytes]:
+        for chunk in self.chunks:
+            self.yielded += 1
+            yield chunk
 
 
 def test_embedding_contracts_are_public_and_values_become_floats() -> None:
@@ -174,6 +186,38 @@ def test_openai_provider_rejects_inconsistent_batch_dimensions() -> None:
 
     with pytest.raises(EmbeddingProviderError, match="embedding provider response is invalid"):
         provider.embed_documents(("first", "second"))
+
+
+def test_openai_provider_enforces_response_limit_while_streaming(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stream = _ChunkedStream((b"12345678", b"abcd", b"unread"))
+    provider = _openai_provider(lambda _: httpx.Response(200, stream=stream))
+    monkeypatch.setattr(provider, "_MAX_RESPONSE_BYTES", 10)
+
+    with pytest.raises(EmbeddingProviderError, match="response is too large"):
+        provider.embed_query("query")
+
+    assert stream.yielded == 2
+
+
+def test_openai_provider_rejects_oversized_content_length_before_reading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stream = _ChunkedStream((b"unread",))
+    provider = _openai_provider(
+        lambda _: httpx.Response(
+            200,
+            headers={"content-length": "11"},
+            stream=stream,
+        )
+    )
+    monkeypatch.setattr(provider, "_MAX_RESPONSE_BYTES", 10)
+
+    with pytest.raises(EmbeddingProviderError, match="response is too large"):
+        provider.embed_query("query")
+
+    assert stream.yielded == 0
 
 
 @pytest.mark.parametrize(

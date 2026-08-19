@@ -106,6 +106,26 @@ def test_semantic_add_batches_and_search_ranks_all_cosine_scores() -> None:
     assert all(hit.matched_terms == () for hit in hits)
 
 
+def test_semantic_add_splits_provider_requests_at_batch_limit() -> None:
+    provider = _RecordingProvider(
+        {f"text-{index}": (float(index + 1),) for index in range(5)}
+    )
+    index = InMemorySemanticChunkIndex(
+        embedding_provider=provider,
+        limits=SemanticChunkIndexLimits(max_embedding_batch_size=2),
+    )
+
+    index.add(
+        tuple(_chunk(f"chunk-{number}", f"text-{number}") for number in range(5))
+    )
+
+    assert provider.document_calls == [
+        ("text-0", "text-1"),
+        ("text-2", "text-3"),
+        ("text-4",),
+    ]
+
+
 def test_semantic_ties_use_chunk_id_and_result_limit() -> None:
     provider = _RecordingProvider({"one": (1.0, 0.0), "two": (2.0, 0.0), "q": (1.0, 0.0)})
     index = InMemorySemanticChunkIndex(embedding_provider=provider)
@@ -261,6 +281,45 @@ def test_failed_replace_keeps_exact_previous_results() -> None:
     assert str(caught.value) == "document embedding failed"
     assert "private" not in str(caught.value)
     assert caught.value.__cause__ is not None
+    assert index.search("q") == before
+
+
+def test_failed_later_embedding_batch_keeps_previous_state() -> None:
+    class FailingSecondBatchProvider(_RecordingProvider):
+        fail_on_call: int | None = None
+
+        def embed_documents(
+            self, texts: tuple[str, ...]
+        ) -> tuple[EmbeddingVector, ...]:
+            if self.fail_on_call == len(self.document_calls) + 1:
+                self.document_calls.append(texts)
+                raise RuntimeError("sentinel private batch")
+            return super().embed_documents(texts)
+
+    provider = FailingSecondBatchProvider(
+        {
+            "old": (1.0,),
+            "new-0": (1.0,),
+            "new-1": (1.0,),
+            "new-2": (1.0,),
+            "q": (1.0,),
+        }
+    )
+    index = InMemorySemanticChunkIndex(
+        embedding_provider=provider,
+        limits=SemanticChunkIndexLimits(max_embedding_batch_size=2),
+    )
+    index.add((_chunk("old", "old"),))
+    before = index.search("q")
+    provider.fail_on_call = 3
+
+    replacement = tuple(
+        _chunk(f"new-{number}", f"new-{number}") for number in range(3)
+    )
+    with pytest.raises(SemanticEmbeddingError, match="document embedding failed"):
+        index.replace_document("doc-1", replacement)
+
+    provider.fail_on_call = None
     assert index.search("q") == before
 
 

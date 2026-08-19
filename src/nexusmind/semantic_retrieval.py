@@ -37,7 +37,7 @@ class SemanticChunkIndexLimits:
 
     max_chunks: int = 10_000
     max_total_chars: int = 10_000_000
-    max_total_vector_values: int = 100_000_000
+    max_total_vector_values: int = 2_000_000
     max_dimensions: int = 65_536
     max_chunks_per_document: int = 10_000
     max_embedding_batch_size: int = 2_048
@@ -272,17 +272,23 @@ class InMemorySemanticChunkIndex:
     def _embed_documents(
         self, texts: tuple[str, ...]
     ) -> tuple[EmbeddingVector, ...]:
-        if len(texts) > self._limits.max_embedding_batch_size:
-            raise SemanticChunkIndexLimitError(
-                "embedding batch exceeds max_embedding_batch_size"
-            )
         try:
-            vectors = self._provider.embed_documents(texts)
-            if type(vectors) is not tuple or len(vectors) != len(texts):
-                raise TypeError
-            if any(type(vector) is not EmbeddingVector for vector in vectors):
-                raise TypeError
-            return vectors
+            vectors: list[EmbeddingVector] = []
+            batch_size = self._limits.max_embedding_batch_size
+            for offset in range(0, len(texts), batch_size):
+                batch = texts[offset : offset + batch_size]
+                batch_vectors = self._provider.embed_documents(batch)
+                if (
+                    type(batch_vectors) is not tuple
+                    or len(batch_vectors) != len(batch)
+                ):
+                    raise TypeError
+                if any(
+                    type(vector) is not EmbeddingVector for vector in batch_vectors
+                ):
+                    raise TypeError
+                vectors.extend(batch_vectors)
+            return tuple(vectors)
         except SemanticChunkIndexError:
             raise
         except Exception as exc:

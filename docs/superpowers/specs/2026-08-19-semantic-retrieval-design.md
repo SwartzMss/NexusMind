@@ -54,7 +54,8 @@ one request for a non-empty tuple rather than one request per text.
 method. Inputs must be exact strings; batching order is preserved by response
 indexes, not response array order.
 
-The adapter validates status, bounded response size, JSON shape, result count,
+The adapter validates status, bounds response bytes while streaming before JSON
+decoding, and validates JSON shape, result count,
 integer index coverage `0..n-1`, duplicate/missing indexes, vector shape, and
 consistent dimensions within the response. It rejects empty, non-finite, zero,
 or malformed vectors through `EmbeddingVector`. Transport, timeout, HTTP, JSON,
@@ -80,7 +81,7 @@ The limits are frozen positive plain integers covering:
 - total chunk-content characters;
 - vector dimensions;
 - total retained vector values;
-- maximum document embedding batch size;
+- maximum document embedding provider-request batch size;
 - query characters; and
 - returned results.
 
@@ -92,11 +93,12 @@ and external vector stores are not introduced.
 ## Indexing and atomic mutation
 
 Add validates chunk identity and resource preconditions, embeds only truly new
-chunks in one document batch, and constructs a complete candidate state from
-existing vectors plus new vectors. Replacement reuses an existing vector only
-when the exact same chunk already exists; otherwise it batch-embeds replacement
-chunks. Unchanged chunks belonging to other documents retain their vectors.
-Removal does not call the provider.
+chunks in bounded provider-request batches, and constructs a complete candidate
+state from existing vectors plus new vectors. Replacement reuses an existing
+vector only when the exact same chunk already exists; otherwise it embeds
+replacement chunks in the same bounded batches. All batches must succeed before
+the candidate is committed. Unchanged chunks belonging to other documents retain
+their vectors. Removal does not call the provider.
 
 Every provider call and vector/count/dimension/resource validation finishes
 before any instance field is assigned. Provider exceptions are wrapped as a

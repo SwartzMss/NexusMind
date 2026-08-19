@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from math import isfinite
 from numbers import Real
 from typing import Protocol
@@ -107,15 +108,35 @@ class OpenAICompatibleEmbeddingProvider:
             with httpx.Client(
                 timeout=self._timeout, transport=self._transport
             ) as client:
-                response = client.post(
+                with client.stream(
+                    "POST",
                     f"{self._base_url.rstrip('/')}/embeddings",
                     headers={"Authorization": f"Bearer {self._api_key}"},
                     json={"model": self._model, "input": list(texts)},
-                )
-                response.raise_for_status()
-            if len(response.content) > self._MAX_RESPONSE_BYTES:
-                raise EmbeddingProviderError("embedding provider response is invalid")
-            payload = response.json()
+                ) as response:
+                    response.raise_for_status()
+                    content_length = response.headers.get("content-length")
+                    if content_length is not None:
+                        try:
+                            declared_size = int(content_length)
+                        except ValueError:
+                            declared_size = None
+                        if (
+                            declared_size is not None
+                            and declared_size > self._MAX_RESPONSE_BYTES
+                        ):
+                            raise EmbeddingProviderError(
+                                "embedding provider response is too large"
+                            )
+
+                    body = bytearray()
+                    for chunk in response.iter_bytes():
+                        if len(body) + len(chunk) > self._MAX_RESPONSE_BYTES:
+                            raise EmbeddingProviderError(
+                                "embedding provider response is too large"
+                            )
+                        body.extend(chunk)
+            payload = json.loads(body)
             return self._parse_response(payload, len(texts))
         except EmbeddingProviderError:
             raise
