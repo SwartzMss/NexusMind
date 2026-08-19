@@ -12,7 +12,10 @@ from nexusmind import (
     ChunkIndexLimits,
     DocumentReplacementError,
     InMemoryChunkIndex,
+    LexicalAnalysisError,
+    LexicalAnalyzer,
     SearchHit,
+    WhitespaceLexicalAnalyzer,
 )
 
 
@@ -55,11 +58,154 @@ def test_bm25_single_term_formula_and_score_type() -> None:
     assert hit.score == pytest.approx(math.log(4 / 3))
 
 
-def test_matching_is_whitespace_token_based() -> None:
+def test_matching_does_not_match_substrings() -> None:
     index = InMemoryChunkIndex()
     index.add((_chunk("substring", "concatenate"), _chunk("token", "cat")))
 
     assert [hit.chunk.chunk_id for hit in index.search("cat")] == ["token"]
+
+
+def test_default_analyzer_matches_across_punctuation_and_han_bigrams() -> None:
+    index = InMemoryChunkIndex()
+    index.add((_chunk("mixed", "Android Binder，提供安全检索"),))
+
+    hit = index.search("Binder 安全检索")[0]
+
+    assert hit.chunk.chunk_id == "mixed"
+    assert hit.matched_terms == ("binder", "安全", "全检", "检索")
+
+
+def test_explicit_whitespace_analyzer_preserves_legacy_matching() -> None:
+    index = InMemoryChunkIndex(analyzer=WhitespaceLexicalAnalyzer())
+    index.add((_chunk("punctuated", "alpha,beta"), _chunk("spaced", "alpha beta")))
+
+    assert [hit.chunk.chunk_id for hit in index.search("beta")] == ["spaced"]
+
+
+def test_same_configured_analyzer_is_used_once_per_corpus_text_and_query() -> None:
+    class MappingAnalyzer:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def __bool__(self) -> bool:
+            return False
+
+        def analyze(self, text: str) -> tuple[str, ...]:
+            self.calls.append(text)
+            return {
+                "source one": ("shared", "shared"),
+                "source two": ("other",),
+                "lookup": ("shared", "shared"),
+            }[text]
+
+    analyzer: LexicalAnalyzer = MappingAnalyzer()
+    index = InMemoryChunkIndex(analyzer=analyzer)
+    index.add((_chunk("one", "source one"), _chunk("two", "source two")))
+
+    hit = index.search("lookup")[0]
+
+    assert hit.chunk.chunk_id == "one"
+    assert hit.matched_terms == ("shared",)
+    assert analyzer.calls == ["source one", "source two", "lookup"]
+
+
+def test_explicit_analyzer_requires_callable_analyze() -> None:
+    with pytest.raises(TypeError, match="callable analyze"):
+        InMemoryChunkIndex(analyzer=object())  # type: ignore[arg-type]
+
+
+class _StrSubclass(str):
+    pass
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        ["term"],
+        "term",
+        ("",),
+        (1,),
+        (_StrSubclass("term"),),
+    ],
+)
+@pytest.mark.parametrize("path", ["corpus", "query"])
+def test_malformed_analyzer_output_is_rejected_at_each_use_path(
+    malformed: object, path: str
+) -> None:
+    class MalformedAnalyzer:
+        def analyze(self, text: str) -> tuple[str, ...]:
+            return malformed  # type: ignore[return-value]
+
+    index = InMemoryChunkIndex(analyzer=MalformedAnalyzer())
+
+    with pytest.raises(LexicalAnalysisError, match="lexical analysis failed"):
+        if path == "corpus":
+            index.add((_chunk("one", "source"),))
+        else:
+            index.search("query")
+
+
+def test_analyzer_exception_is_controlled_for_search() -> None:
+    class FailingAnalyzer:
+        def analyze(self, text: str) -> tuple[str, ...]:
+            raise RuntimeError(f"secret input: {text}")
+
+    index = InMemoryChunkIndex(analyzer=FailingAnalyzer())
+
+    with pytest.raises(LexicalAnalysisError, match="^lexical analysis failed$") as caught:
+        index.search("private query")
+
+    assert isinstance(caught.value.__cause__, RuntimeError)
+    assert "private query" not in str(caught.value)
+
+
+def test_failed_analyzed_add_and_replacement_leave_index_state_unchanged() -> None:
+    class SelectiveAnalyzer:
+        def analyze(self, text: str) -> tuple[str, ...]:
+            if "broken" in text:
+                raise RuntimeError("analyzer internals include broken content")
+            return tuple(text.split())
+
+    old = _chunk("old", "stable term", "doc-1")
+    retained = _chunk("retained", "term filler", "doc-2")
+    index = InMemoryChunkIndex(analyzer=SelectiveAnalyzer())
+    index.add((old, retained))
+    before = index.search("term")
+
+    with pytest.raises(LexicalAnalysisError):
+        index.add((_chunk("broken-add", "broken new", "doc-3"),))
+    assert index.search("term") == before
+    assert index.search("new") == ()
+
+    with pytest.raises(LexicalAnalysisError):
+        index.replace_document("doc-1", (_chunk("replacement", "broken replacement", "doc-1"),))
+    assert index.search("term") == before
+    assert index.search("replacement") == ()
+    assert index.search("stable")[0].chunk == old
+
+
+def test_malformed_analyzer_output_during_add_leaves_index_state_unchanged() -> None:
+    class MutableAnalyzer:
+        malformed = False
+
+        def analyze(self, text: str) -> tuple[str, ...]:
+            if self.malformed:
+                return [text]  # type: ignore[return-value]
+            return tuple(text.split())
+
+    analyzer = MutableAnalyzer()
+    old = _chunk("old", "stable term")
+    index = InMemoryChunkIndex(analyzer=analyzer)
+    index.add((old,))
+    before = index.search("term")
+    analyzer.malformed = True
+
+    with pytest.raises(LexicalAnalysisError):
+        index.add((_chunk("new", "new term", "doc-2"),))
+
+    analyzer.malformed = False
+    assert index.search("term") == before
+    assert index.search("new") == ()
 
 
 def test_repeated_term_frequency_increases_score_at_equal_length() -> None:
@@ -181,7 +327,7 @@ def test_exact_duplicate_add_is_idempotent() -> None:
 
 
 def test_clone_has_independent_mutable_state() -> None:
-    original = InMemoryChunkIndex()
+    original = InMemoryChunkIndex(analyzer=WhitespaceLexicalAnalyzer())
     original.add((_chunk("chunk-1", "original"),))
 
     clone = original.clone()
@@ -192,6 +338,23 @@ def test_clone_has_independent_mutable_state() -> None:
     assert original.search("changed") == ()
     assert clone.search("original") == ()
     assert clone.search("changed")
+
+
+def test_clone_preserves_falsey_configured_analyzer() -> None:
+    class FalseyAnalyzer:
+        def __bool__(self) -> bool:
+            return False
+
+        def analyze(self, text: str) -> tuple[str, ...]:
+            return ("mapped",) if text else ()
+
+    analyzer = FalseyAnalyzer()
+    original = InMemoryChunkIndex(analyzer=analyzer)
+    original.add((_chunk("chunk-1", "source"),))
+
+    clone = original.clone()
+
+    assert clone.search("query") == original.search("query")
 
 
 def test_conflicting_chunk_id_is_rejected_without_mutation() -> None:
@@ -288,6 +451,72 @@ def test_query_and_result_limits_are_enforced() -> None:
         index.search("a b c")
     with pytest.raises(ChunkIndexLimitError, match="max_results"):
         index.search("a", limit=2)
+
+
+def test_query_term_limit_counts_analyzed_repetitions_before_deduplication() -> None:
+    index = InMemoryChunkIndex(limits=ChunkIndexLimits(max_query_terms=2))
+
+    with pytest.raises(ChunkIndexLimitError, match="max_query_terms"):
+        index.search("term term term")
+
+
+def test_query_term_limit_counts_default_han_bigram_amplification() -> None:
+    index = InMemoryChunkIndex(limits=ChunkIndexLimits(max_query_terms=2))
+
+    with pytest.raises(ChunkIndexLimitError, match="max_query_terms"):
+        index.search("安全检索")
+
+
+def test_query_analyzed_character_limit_rejects_one_huge_custom_token() -> None:
+    class ExpandingAnalyzer:
+        def analyze(self, text: str) -> tuple[str, ...]:
+            return ("x" * 5,)
+
+    index = InMemoryChunkIndex(
+        analyzer=ExpandingAnalyzer(),
+        limits=ChunkIndexLimits(max_query_analyzed_chars=4),
+    )
+
+    with pytest.raises(ChunkIndexLimitError, match="max_query_analyzed_chars"):
+        index.search("q")
+
+
+def test_corpus_analyzed_token_limit_rejects_add_without_mutating_scores() -> None:
+    class MappingAnalyzer:
+        def analyze(self, text: str) -> tuple[str, ...]:
+            return {"old": ("shared",), "attack": ("x", "x", "x")}[text]
+
+    old = _chunk("old", "old")
+    index = InMemoryChunkIndex(
+        analyzer=MappingAnalyzer(),
+        limits=ChunkIndexLimits(max_total_analyzed_tokens=2),
+    )
+    index.add((old,))
+    before = index.search("old")
+
+    with pytest.raises(ChunkIndexLimitError, match="max_total_analyzed_tokens"):
+        index.add((_chunk("attack", "attack", "doc-2"),))
+
+    assert index.search("old") == before
+
+
+def test_corpus_analyzed_character_limit_rejects_replace_without_mutation() -> None:
+    class MappingAnalyzer:
+        def analyze(self, text: str) -> tuple[str, ...]:
+            return {"old": ("old",), "attack": ("x" * 6,)}[text]
+
+    old = _chunk("old", "old")
+    index = InMemoryChunkIndex(
+        analyzer=MappingAnalyzer(),
+        limits=ChunkIndexLimits(max_total_analyzed_token_chars=5),
+    )
+    index.add((old,))
+    before = index.search("old")
+
+    with pytest.raises(ChunkIndexLimitError, match="max_total_analyzed_token_chars"):
+        index.replace_document("doc-1", (_chunk("attack", "attack"),))
+
+    assert index.search("old") == before
 
 
 def test_index_count_content_and_per_document_limits_are_atomic() -> None:

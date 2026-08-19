@@ -3,9 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from nexusmind import (
+    InMemoryChunkIndex,
     KnowledgeCollection,
     LocalDirectoryAdapter,
     TextChunker,
+    UnicodeCJKLexicalAnalyzer,
     evaluate_retrieval,
     load_retrieval_evaluation_cases,
 )
@@ -18,7 +20,10 @@ CASES = EVAL_ROOT / "cases.json"
 
 def _run_baseline():
     collection = KnowledgeCollection(
-        chunker=TextChunker(chunk_size=240, overlap=40)
+        chunker=TextChunker(chunk_size=240, overlap=40),
+        index_factory=lambda: InMemoryChunkIndex(
+            analyzer=UnicodeCJKLexicalAnalyzer()
+        ),
     )
     collection.sync(LocalDirectoryAdapter(CORPUS, source_id="eval-corpus"))
     cases = load_retrieval_evaluation_cases(CASES)

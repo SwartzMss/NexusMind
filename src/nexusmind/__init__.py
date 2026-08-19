@@ -30,12 +30,18 @@ from .knowledge_retrieval import (
     ChunkIndexLimits,
     DocumentReplacementError,
     InMemoryChunkIndex,
+    LexicalAnalysisError,
     SearchHit,
 )
 from .knowledge_store import (
     KnowledgeSnapshotStore,
     KnowledgeSnapshotStoreError,
     SQLiteKnowledgeSnapshotStore,
+)
+from .lexical_analysis import (
+    LexicalAnalyzer,
+    UnicodeCJKLexicalAnalyzer,
+    WhitespaceLexicalAnalyzer,
 )
 from .retrieval_evaluation import (
     RetrievalEvaluationCase,
@@ -119,6 +125,8 @@ __all__ = [
     "LocalDirectoryAdapter",
     "LocalFileAdapter",
     "LocalIngestionLimits",
+    "LexicalAnalyzer",
+    "LexicalAnalysisError",
     "PathEscapeError",
     "RetrievalEvaluationCase",
     "RetrievalEvaluationCaseResult",
@@ -133,7 +141,9 @@ __all__ = [
     "SymlinkSourceError",
     "TotalBytesLimitError",
     "TextChunker",
+    "UnicodeCJKLexicalAnalyzer",
     "UnsupportedFileTypeError",
+    "WhitespaceLexicalAnalyzer",
     "evaluate_retrieval",
     "load_retrieval_evaluation_cases",
     "__version__",

@@ -9,7 +9,8 @@ This directory contains NexusMind's first deterministic offline retrieval baseli
 - Canonical source ID: `eval-corpus`
 - Ingestion: `LocalDirectoryAdapter`
 - Chunker: `TextChunker(chunk_size=240, overlap=40)`
-- Retrieval: default `InMemoryChunkIndex` BM25 (`k1=1.2`, `b=0.75`)
+- Retrieval: `InMemoryChunkIndex` BM25 (`k1=1.2`, `b=0.75`)
+- Current analyzer: explicit `UnicodeCJKLexicalAnalyzer`
 - Evaluation cutoff: `k=5`
 
 ## Semantics
@@ -21,13 +22,31 @@ Relevance identity is the canonical Document pair `(source_id, logical_path)`. R
 - Reciprocal rank is `1 / rank` for the first relevant chunk within the first five, otherwise `0.0`.
 - Aggregate values are arithmetic means of the 15 per-case values.
 
-## Recorded result
+## Recorded results
+
+The original #69 baseline used the then-default whitespace analyzer. Issue #71
+changed the default index analyzer, so both configurations are recorded rather
+than silently carrying the old values forward.
+
+### Previous baseline: `WhitespaceLexicalAnalyzer`
 
 | Metric | Value |
 |---|---:|
 | Hit@5 | 0.933333 |
 | Recall@5 | 0.933333 |
 | MRR@5 | 0.822222 |
+
+### Current baseline: `UnicodeCJKLexicalAnalyzer`
+
+| Metric | Value | Change from whitespace |
+|---|---:|---:|
+| Hit@5 | 0.933333 | 0.000000 |
+| Recall@5 | 0.900000 | -0.033333 |
+| MRR@5 | 0.866667 | +0.044445 |
+
+The higher MRR and lower Recall@5 show that this analyzer change is not a
+uniform quality improvement. These movements are diagnostic data for future
+semantic or hybrid retrieval work, not acceptance thresholds.
 
 ## Reproduce
 
@@ -37,7 +56,14 @@ From the repository root:
 PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_retrieval_evaluation_baseline.py -vv
 ```
 
-The test ingests the checked-in corpus through the real local adapter, synchronizes a `KnowledgeCollection`, rebuilds the BM25 index, resolves canonical provenance, loads the strict JSON labels, and asserts identical repeated reports with bounded metrics. It deliberately does not hard-code the values above as CI quality thresholds. The run requires no network, model, generated labels, or external data.
+The test explicitly configures `UnicodeCJKLexicalAnalyzer`, ingests the
+checked-in corpus through the real local adapter, synchronizes a
+`KnowledgeCollection`, rebuilds the BM25 index, resolves canonical provenance,
+loads the strict JSON labels, and asserts identical repeated reports with
+bounded metrics. It deliberately does not hard-code the values above as CI
+quality thresholds. The run requires no network, model, generated labels, or
+external data. To reproduce the previous row, use the same configuration with
+`WhitespaceLexicalAnalyzer` as the index analyzer.
 
 ## Limitations
 
