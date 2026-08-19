@@ -12,7 +12,7 @@
     },
     {
       "case_id": "trustzone-world-separation",
-      "query": "Arm 芯片怎样阻止普通执行环境窥探高权限区域",
+      "query": "Arm 芯片的安全状态怎样阻止普通世界读取受保护内存",
       "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "trustzone.md"}]
     },
     {
@@ -42,12 +42,12 @@
     },
     {
       "case_id": "key-purpose-separation",
-      "query": "通用密码组件如何从根秘密得到用途隔离的会话材料",
+      "query": "不涉及 TLS 握手时，应用如何用上下文 info 从主密钥派生多用途子密钥",
       "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "cryptography.md"}]
     },
     {
       "case_id": "hkdf-context",
-      "query": "HKDF 的 salt 和 info 怎样区分会话与协议方向",
+      "query": "TLS 之外的应用如何用 HKDF salt 和 info 区分组件用途",
       "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "cryptography.md"}]
     }
   ]

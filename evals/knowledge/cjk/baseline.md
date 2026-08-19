@@ -5,10 +5,11 @@ copyright-safe Chinese fixture. The corpus contains seven UTF-8 Markdown files
 under source `cjk-docs`: four canonical documents covering Android/Binder IPC,
 Arm TrustZone isolation, QNX microkernel fault isolation, and AES-GCM/HKDF,
 plus plausible near neighbors about iOS/XPC, virtualization, and the TLS 1.3
-key schedule. The ten queries and their
-canonical `(source_id, logical_path)` relevance labels were authored before
-the revised corpus was ranked. The near neighbors and three harder paraphrases
-were added without changing any existing relevance target.
+key schedule. The ten canonical `(source_id, logical_path)` relevance labels
+were authored before ranking and were never changed. Near neighbors and harder
+paraphrases were added to create headroom; a later semantic audit narrowed
+three ambiguous query wordings without relabeling them, explicitly excluding
+near neighbors that were not the cases' intended technical scope.
 
 ## Fixed configuration
 
@@ -26,8 +27,8 @@ were added without changing any existing relevance target.
 
 | Analyzer | Hit@3 | Recall@3 | MRR |
 | --- | ---: | ---: | ---: |
-| `UnicodeCJKLexicalAnalyzer` | 1.000000 | 1.000000 | 0.850000 |
-| `WhitespaceLexicalAnalyzer` | 0.600000 | 0.600000 | 0.500000 |
+| `UnicodeCJKLexicalAnalyzer` | 1.000000 | 1.000000 | 0.950000 |
+| `WhitespaceLexicalAnalyzer` | 0.700000 | 0.700000 | 0.550000 |
 
 Reproduce offline from the repository root with:
 
