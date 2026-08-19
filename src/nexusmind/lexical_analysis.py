@@ -1,8 +1,10 @@
 """Dependency-free lexical analysis contracts and implementations.
 
-Results are pinned across supported Python versions: normalization and
-ordinary character categories use Python's frozen UCD 3.2 database, and Han
-recognition uses the explicitly assigned Unicode 14.0 repertoire below.
+Results are pinned to the Unicode 14.0 repertoire across supported Python
+versions. Characters first assigned in Unicode 15.0 or 15.1 are boundaries;
+the remaining text uses current NFKC, category, and case-folding behavior,
+which is stable for already-assigned characters. Han recognition uses the
+explicitly assigned Unicode 14.0 repertoire below.
 Combining marks are intentionally not part of word runs. After NFKC
 normalization, any mark that remains acts as a token boundary.
 """
@@ -60,7 +62,50 @@ _HAN_RANGES: tuple[tuple[int, int], ...] = (
     (0x30000, 0x3134A),
 )
 
-_UNICODE = unicodedata.ucd_3_2_0
+# Audited from Unicode 15.1 DerivedAge.txt entries with Age=15.0 or 15.1:
+# https://www.unicode.org/Public/15.1.0/ucd/DerivedAge.txt
+# Filtering these assignments before normalization keeps the effective
+# repertoire identical on CPython 3.11 (UCD 14), 3.12 (UCD 15), and 3.13
+# (UCD 15.1). Ranges are intentionally vendored: analysis has no network or
+# host-version dependency.
+_POST_UNICODE_14_RANGES: tuple[tuple[int, int], ...] = (
+    (0x0CF3, 0x0CF3),
+    (0x0ECE, 0x0ECE),
+    (0x2FFC, 0x2FFF),
+    (0x31EF, 0x31EF),
+    (0x10EFD, 0x10EFF),
+    (0x1123F, 0x11241),
+    (0x11B00, 0x11B09),
+    (0x11F00, 0x11F10),
+    (0x11F12, 0x11F3A),
+    (0x11F3E, 0x11F59),
+    (0x1342F, 0x1342F),
+    (0x13439, 0x1343F),
+    (0x13440, 0x13455),
+    (0x1B132, 0x1B132),
+    (0x1B155, 0x1B155),
+    (0x1D2C0, 0x1D2D3),
+    (0x1DF25, 0x1DF2A),
+    (0x1E030, 0x1E06D),
+    (0x1E08F, 0x1E08F),
+    (0x1E4D0, 0x1E4F9),
+    (0x1F6DC, 0x1F6DC),
+    (0x1F774, 0x1F776),
+    (0x1F77B, 0x1F77F),
+    (0x1F7D9, 0x1F7D9),
+    (0x1FA75, 0x1FA77),
+    (0x1FA87, 0x1FA88),
+    (0x1FAAD, 0x1FAAF),
+    (0x1FABB, 0x1FABD),
+    (0x1FABF, 0x1FABF),
+    (0x1FACE, 0x1FACF),
+    (0x1FADA, 0x1FADB),
+    (0x1FAE8, 0x1FAE8),
+    (0x1FAF7, 0x1FAF8),
+    (0x2B739, 0x2B739),
+    (0x2EBF0, 0x2EE5D),
+    (0x31350, 0x323AF),
+)
 
 
 def _is_han(character: str) -> bool:
@@ -68,22 +113,29 @@ def _is_han(character: str) -> bool:
     return any(start <= code_point <= end for start, end in _HAN_RANGES)
 
 
+def _is_post_unicode_14(character: str) -> bool:
+    code_point = ord(character)
+    return any(
+        start <= code_point <= end for start, end in _POST_UNICODE_14_RANGES
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class UnicodeCJKLexicalAnalyzer:
     """Extract Unicode letter/number runs and overlapping Han bigrams.
 
-    NFKC normalization is applied first using the frozen UCD 3.2 database.
-    Its Unicode categories starting with ``L`` or ``N`` form ordinary word
-    runs, while punctuation, symbols, whitespace, marks, controls, and
-    unassigned characters are boundaries. Han recognition is pinned to the
-    assigned Unicode 14.0 intervals, independently of the runtime UCD.
+    Characters assigned after Unicode 14 are boundaries before normalization.
+    Each remaining segment receives NFKC normalization. Unicode categories
+    starting with ``L`` or ``N`` form ordinary word runs, while punctuation,
+    symbols, whitespace, marks, controls, and unassigned characters are
+    boundaries. Han recognition is pinned to assigned Unicode 14.0 intervals,
+    independently of the runtime UCD.
     Han ideographs form separate runs and are emitted as overlapping bigrams,
     except that a one-character run is emitted as a singleton.
     """
 
     def analyze(self, text: str) -> tuple[str, ...]:
         _require_plain_str(text)
-        normalized = _UNICODE.normalize("NFKC", text)
         tokens: list[str] = []
         run: list[str] = []
         run_is_han: bool | None = None
@@ -103,18 +155,33 @@ class UnicodeCJKLexicalAnalyzer:
             run = []
             run_is_han = None
 
-        for character in normalized:
-            is_han = _is_han(character)
-            is_word = is_han or _UNICODE.category(character)[0] in {"L", "N"}
-            if not is_word:
-                flush()
-            elif run and is_han != run_is_han:
-                flush()
-                run = [character]
-                run_is_han = is_han
-            else:
-                run.append(character)
-                run_is_han = is_han
+        def consume(segment: list[str]) -> None:
+            nonlocal run, run_is_han
+            normalized = unicodedata.normalize("NFKC", "".join(segment))
+            for character in normalized:
+                is_han = _is_han(character)
+                is_word = is_han or unicodedata.category(character)[0] in {
+                    "L",
+                    "N",
+                }
+                if not is_word:
+                    flush()
+                elif run and is_han != run_is_han:
+                    flush()
+                    run = [character]
+                    run_is_han = is_han
+                else:
+                    run.append(character)
+                    run_is_han = is_han
+            flush()
 
-        flush()
+        segment: list[str] = []
+        for character in text:
+            if _is_post_unicode_14(character):
+                consume(segment)
+                segment = []
+            else:
+                segment.append(character)
+
+        consume(segment)
         return tuple(tokens)

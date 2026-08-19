@@ -100,12 +100,15 @@ def test_combining_marks_are_boundaries_after_nfkc() -> None:
         ("\U00030000\U0003134a", ("\U00030000\U0003134a",)),
         (
             "\uf900\ufa6d",
-            (unicodedata.ucd_3_2_0.normalize("NFKC", "\uf900\ufa6d"),),
+            (unicodedata.normalize("NFKC", "\uf900\ufa6d"),),
         ),
-        ("\ufa70\ufad9", ("\ufa70\ufad9",)),
+        (
+            "\ufa70\ufad9",
+            (unicodedata.normalize("NFKC", "\ufa70\ufad9"),),
+        ),
         (
             "\U0002f800\U0002fa1d",
-            (unicodedata.ucd_3_2_0.normalize("NFKC", "\U0002f800\U0002fa1d"),),
+            (unicodedata.normalize("NFKC", "\U0002f800\U0002fa1d"),),
         ),
     ],
 )
@@ -129,13 +132,20 @@ def test_unassigned_code_points_inside_han_blocks_are_boundaries() -> None:
     assert analyzer.analyze("a\ufa6eb") == ("a", "b")
 
 
-def test_post_unicode_14_han_and_post_ucd_3_2_normalization_are_boundaries() -> None:
+def test_unicode_14_letters_and_modern_nfkc_are_supported() -> None:
     analyzer = UnicodeCJKLexicalAnalyzer()
 
-    # Extension I starts at U+2EBF0 in Unicode 15.1 and is outside our pinned
-    # Unicode 14 Han repertoire. U+1F16A gained an NFKC mapping after UCD 3.2.
+    assert analyzer.analyze("\u1c90") == ("\u10d0",)  # Georgian Mtavruli
+    assert analyzer.analyze("\U0001e900") == ("\U0001e922",)  # Adlam uppercase
+    assert analyzer.analyze("\U0001f16a") == ("mc",)
+
+
+def test_post_unicode_14_assignments_are_boundaries() -> None:
+    analyzer = UnicodeCJKLexicalAnalyzer()
+
+    # Extension I is Unicode 15.1; Nag Mundari is Unicode 15.0.
     assert analyzer.analyze("a\U0002ebf0b") == ("a", "b")
-    assert analyzer.analyze("a\U0001f16ab") == ("a", "b")
+    assert analyzer.analyze("a\U0001e4d0b") == ("a", "b")
 
 
 def test_results_are_stable_tuples_without_empty_tokens() -> None:
