@@ -10,6 +10,7 @@ from .knowledge_chunking import Chunk
 from .knowledge_retrieval import (
     ChunkIdentityConflictError,
     ChunkIndexError,
+    DocumentReplacementError,
     SearchHit,
 )
 
@@ -124,6 +125,118 @@ class InMemorySemanticChunkIndex:
             dimension=dimension,
             total_chars=total_chars,
         )
+
+    def replace_document(self, document_id: str, chunks: tuple[Chunk, ...]) -> None:
+        self._require_document_id(document_id)
+        self._require_chunk_tuple(chunks)
+        replacement: dict[str, Chunk] = {}
+        for chunk in chunks:
+            self._require_chunk(chunk)
+            if chunk.document_id != document_id:
+                raise DocumentReplacementError(
+                    "all replacement chunks must belong to document_id"
+                )
+            if chunk.chunk_id in replacement:
+                raise DocumentReplacementError(
+                    "replacement contains duplicate chunk_id values"
+                )
+            replacement[chunk.chunk_id] = chunk
+
+        old_ids = self._document_chunks.get(document_id, set())
+        for chunk in replacement.values():
+            existing = self._chunks.get(chunk.chunk_id)
+            if existing is not None and existing != chunk:
+                raise ChunkIdentityConflictError(
+                    f"chunk_id conflicts with indexed chunk: {chunk.chunk_id}"
+                )
+            if existing is not None and chunk.chunk_id not in old_ids:
+                raise ChunkIdentityConflictError(
+                    f"chunk_id already belongs to another document: {chunk.chunk_id}"
+                )
+
+        candidate_chunks = self._chunks.copy()
+        candidate_documents = {
+            key: chunk_ids.copy()
+            for key, chunk_ids in self._document_chunks.items()
+        }
+        candidate_vectors = self._vectors.copy()
+        removed_chars = 0
+        for chunk_id in old_ids:
+            removed_chars += len(candidate_chunks[chunk_id].content)
+            del candidate_chunks[chunk_id]
+            del candidate_vectors[chunk_id]
+        if replacement:
+            candidate_chunks.update(replacement)
+            candidate_documents[document_id] = set(replacement)
+        else:
+            candidate_documents.pop(document_id, None)
+        total_chars = self._total_chars - removed_chars + sum(
+            len(chunk.content) for chunk in replacement.values()
+        )
+        self._preflight(candidate_chunks, candidate_documents, total_chars)
+
+        new_chunks = {
+            chunk_id: chunk
+            for chunk_id, chunk in replacement.items()
+            if self._chunks.get(chunk_id) != chunk
+        }
+        if new_chunks:
+            vectors = self._embed_documents(
+                tuple(chunk.content for chunk in new_chunks.values())
+            )
+            candidate_vectors.update(zip(new_chunks, vectors, strict=True))
+        for chunk_id, chunk in replacement.items():
+            if chunk_id not in candidate_vectors:
+                candidate_vectors[chunk_id] = self._vectors[chunk_id]
+
+        dimension = self._validated_dimension(candidate_vectors)
+        self._commit_candidate(
+            chunks=candidate_chunks,
+            document_chunks=candidate_documents,
+            vectors=candidate_vectors,
+            dimension=dimension,
+            total_chars=total_chars,
+        )
+
+    def remove_document(self, document_id: str) -> None:
+        self._require_document_id(document_id)
+        candidate_chunks = self._chunks.copy()
+        candidate_documents = {
+            key: chunk_ids.copy()
+            for key, chunk_ids in self._document_chunks.items()
+        }
+        candidate_vectors = self._vectors.copy()
+        chunk_ids = candidate_documents.pop(document_id, set())
+        removed_chars = 0
+        for chunk_id in chunk_ids:
+            removed_chars += len(candidate_chunks[chunk_id].content)
+            del candidate_chunks[chunk_id]
+            del candidate_vectors[chunk_id]
+        dimension = self._validated_dimension(candidate_vectors)
+        self._commit_candidate(
+            chunks=candidate_chunks,
+            document_chunks=candidate_documents,
+            vectors=candidate_vectors,
+            dimension=dimension,
+            total_chars=self._total_chars - removed_chars,
+        )
+
+    def clone(self) -> "InMemorySemanticChunkIndex":
+        """Copy mutable index state while sharing immutable provider config."""
+
+        clone = InMemorySemanticChunkIndex(
+            embedding_provider=self._provider,
+            limits=self._limits,
+        )
+        clone._chunks = self._chunks.copy()
+        clone._document_chunks = {
+            document_id: chunk_ids.copy()
+            for document_id, chunk_ids in self._document_chunks.items()
+        }
+        clone._vectors = self._vectors.copy()
+        clone._dimension = self._dimension
+        clone._total_chars = self._total_chars
+        return clone
 
     def search(self, query: str, *, limit: int = 10) -> tuple[SearchHit, ...]:
         if type(query) is not str:
@@ -250,6 +363,11 @@ class InMemorySemanticChunkIndex:
     def _require_chunk(chunk: Chunk) -> None:
         if not isinstance(chunk, Chunk):
             raise TypeError("chunks must contain only Chunk values")
+
+    @staticmethod
+    def _require_document_id(document_id: str) -> None:
+        if type(document_id) is not str or not document_id.strip():
+            raise ValueError("document_id must be a non-empty string")
 
 
 __all__ = [
