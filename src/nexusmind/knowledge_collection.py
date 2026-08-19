@@ -33,6 +33,10 @@ class KnowledgeRestoreError(KnowledgeCollectionError):
     """A snapshot cannot be restored into a coherent collection state."""
 
 
+class KnowledgeSearchResolutionError(KnowledgeCollectionError):
+    """A retrieval hit cannot be resolved to committed canonical state."""
+
+
 class DocumentChunker(Protocol):
     """Source-neutral document-to-chunk transformation contract."""
 
@@ -90,6 +94,15 @@ class KnowledgeRestoreResult:
     sources_restored: int
     documents_restored: int
     chunks_indexed: int
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeSearchResult:
+    """One retrieval hit with detached canonical source and document provenance."""
+
+    source: KnowledgeSource
+    document: Document
+    hit: SearchHit
 
 
 class KnowledgeCollection:
@@ -203,8 +216,63 @@ class KnowledgeCollection:
         del self._documents[source_id]
         del self._sources[source_id]
 
-    def search(self, query: str, *, limit: int = 10) -> tuple[SearchHit, ...]:
-        return self._index.search(query, limit=limit)
+    def search(self, query: str, *, limit: int = 10) -> tuple[KnowledgeSearchResult, ...]:
+        hits = self._index.search(query, limit=limit)
+        if type(hits) is not tuple:
+            raise KnowledgeSearchResolutionError("index search result must be a tuple")
+        results: list[KnowledgeSearchResult] = []
+        for hit in hits:
+            if not isinstance(hit, SearchHit):
+                raise KnowledgeSearchResolutionError(
+                    "index search result must contain only SearchHit values"
+                )
+            if not isinstance(hit.chunk, Chunk):
+                raise KnowledgeSearchResolutionError(
+                    "SearchHit must contain a Chunk"
+                )
+            document = next(
+                (
+                    documents[hit.chunk.document_id]
+                    for documents in self._documents.values()
+                    if hit.chunk.document_id in documents
+                ),
+                None,
+            )
+            if document is None:
+                raise KnowledgeSearchResolutionError(
+                    "search hit references an unknown document_id"
+                )
+            chunk = hit.chunk
+            if type(chunk.start_offset) is not int or type(chunk.end_offset) is not int:
+                raise KnowledgeSearchResolutionError(
+                    "search hit chunk has invalid offsets"
+                )
+            if not (
+                0
+                <= chunk.start_offset
+                <= chunk.end_offset
+                <= len(document.content)
+            ):
+                raise KnowledgeSearchResolutionError(
+                    "search hit chunk has invalid offsets outside canonical document"
+                )
+            if chunk.content != document.content[chunk.start_offset : chunk.end_offset]:
+                raise KnowledgeSearchResolutionError(
+                    "search hit chunk is incoherent with canonical document"
+                )
+            source = self._sources.get(document.source_id)
+            if source is None:
+                raise KnowledgeSearchResolutionError(
+                    "search hit references a document with no canonical source"
+                )
+            results.append(
+                KnowledgeSearchResult(
+                    source=deepcopy(source),
+                    document=deepcopy(document),
+                    hit=hit,
+                )
+            )
+        return tuple(results)
 
     def snapshot(self) -> KnowledgeSnapshot:
         """Export only committed canonical state in stable identity order."""
@@ -328,6 +396,8 @@ __all__ = [
     "KnowledgeCollectionLimits",
     "KnowledgeRestoreError",
     "KnowledgeRestoreResult",
+    "KnowledgeSearchResolutionError",
+    "KnowledgeSearchResult",
     "KnowledgeSnapshot",
     "KnowledgeSnapshotError",
     "KnowledgeSyncResult",

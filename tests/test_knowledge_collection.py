@@ -15,9 +15,12 @@ from nexusmind import (
     KnowledgeCollection,
     KnowledgeCollectionLimitError,
     KnowledgeCollectionLimits,
+    KnowledgeSearchResult,
+    KnowledgeSearchResolutionError,
     KnowledgeSnapshotError,
     KnowledgeSource,
     KnowledgeSyncResult,
+    SearchHit,
     TextChunker,
 )
 
@@ -78,6 +81,26 @@ class MutatingMetadataChunker:
         return self._delegate.chunk(document)
 
 
+class HostileIndex:
+    def __init__(self, returned: object) -> None:
+        self.returned = returned
+
+    def add(self, chunks: tuple[Chunk, ...]) -> None:
+        pass
+
+    def replace_document(self, document_id: str, chunks: tuple[Chunk, ...]) -> None:
+        pass
+
+    def remove_document(self, document_id: str) -> None:
+        pass
+
+    def search(self, query: str, *, limit: int = 10) -> object:
+        return self.returned
+
+    def clone(self) -> "HostileIndex":
+        return HostileIndex(self.returned)
+
+
 def test_first_sync_indexes_one_document_and_returns_summary() -> None:
     document = _document("docs", "a.txt", "checkpoint resume")
     collection = KnowledgeCollection()
@@ -85,7 +108,171 @@ def test_first_sync_indexes_one_document_and_returns_summary() -> None:
     result = collection.sync(FakeAdapter("docs", (document,)))
 
     assert result == KnowledgeSyncResult("docs", 1, 0, 0, 0, 1)
-    assert collection.search("checkpoint")[0].chunk.document_id == document.document_id
+    assert collection.search("checkpoint")[0].hit.chunk.document_id == document.document_id
+
+
+def test_search_resolves_ordered_hits_to_canonical_source_and_document() -> None:
+    collection = KnowledgeCollection()
+    one = _document("one", "a.txt", "checkpoint resume")
+    two = _document("two", "b.txt", "checkpoint")
+    collection.sync(FakeAdapter("one", (one,), display_name="Source one"))
+    collection.sync(FakeAdapter("two", (two,), display_name="Source two"))
+
+    results = collection.search("checkpoint resume")
+
+    assert isinstance(results[0], KnowledgeSearchResult)
+    assert [result.source.source_id for result in results] == ["one", "two"]
+    assert results[0].source.display_name == "Source one"
+    assert results[0].document == one
+    assert results[0].document.logical_path == "a.txt"
+    assert results[0].hit.chunk.document_id == one.document_id
+    assert results[0].hit.chunk.content == "checkpoint resume"
+    assert (results[0].hit.chunk.start_offset, results[0].hit.chunk.end_offset) == (
+        0,
+        len(one.content),
+    )
+    assert results[0].hit.score == 2
+    assert results[0].hit.matched_terms == ("checkpoint", "resume")
+
+
+def test_resolved_search_returns_empty_tuple_for_no_hits() -> None:
+    assert KnowledgeCollection().search("missing") == ()
+
+
+def test_resolved_search_metadata_cannot_mutate_canonical_state() -> None:
+    source = KnowledgeSource(
+        source_id="docs",
+        source_type="fake",
+        display_name="Docs",
+        metadata={"owner": "canonical"},
+    )
+    document = Document(
+        source_id="docs",
+        logical_path="a.txt",
+        content="searchable",
+        metadata={"tag": "canonical"},
+    )
+
+    class MetadataAdapter(FakeAdapter):
+        def source(self) -> KnowledgeSource:
+            return source
+
+    collection = KnowledgeCollection()
+    collection.sync(MetadataAdapter("docs", (document,)))
+
+    first = collection.search("searchable")[0]
+    first.source.metadata["owner"] = "caller"
+    first.document.metadata["tag"] = "caller"
+
+    second = collection.search("searchable")[0]
+    assert second.source.metadata == {"owner": "canonical"}
+    assert second.document.metadata == {"tag": "canonical"}
+
+
+@pytest.mark.parametrize(
+    "returned, message",
+    [
+        ([], "tuple"),
+        ((object(),), "SearchHit"),
+        ((SearchHit(chunk=object(), score=1, matched_terms=("term",)),), "Chunk"),
+        (
+            (
+                SearchHit(
+                    chunk=Chunk(
+                        document_id="ghost",
+                        chunk_id="ghost-0",
+                        content="term",
+                        start_offset=0,
+                        end_offset=4,
+                    ),
+                    score=1,
+                    matched_terms=("term",),
+                ),
+            ),
+            "unknown document_id",
+        ),
+    ],
+)
+def test_resolved_search_rejects_malformed_or_ghost_backend_hits(
+    returned: object, message: str
+) -> None:
+    collection = KnowledgeCollection(index_factory=lambda: HostileIndex(returned))  # type: ignore[arg-type]
+
+    with pytest.raises(KnowledgeSearchResolutionError, match=message):
+        collection.search("term")
+
+
+def test_resolved_search_rejects_chunk_with_forged_content() -> None:
+    document = _document("docs", "a.txt", "real canonical content")
+    forged = SearchHit(
+        chunk=Chunk(
+            document_id=document.document_id,
+            chunk_id="forged",
+            content="fabricated content",
+            start_offset=0,
+            end_offset=len("fabricated content"),
+        ),
+        score=999,
+        matched_terms=("whatever",),
+    )
+    collection = KnowledgeCollection(index_factory=lambda: HostileIndex((forged,)))
+    collection.sync(FakeAdapter("docs", (document,)))
+
+    with pytest.raises(KnowledgeSearchResolutionError, match="incoherent"):
+        collection.search("whatever")
+
+
+@pytest.mark.parametrize(
+    "start_offset, end_offset",
+    [
+        (-1, 4),
+        (4, 3),
+        (0, 100),
+        (True, 4),
+        (0, False),
+    ],
+)
+def test_resolved_search_rejects_chunk_with_invalid_offsets(
+    start_offset: object, end_offset: object
+) -> None:
+    document = _document("docs", "a.txt", "real content")
+    malformed = SearchHit(
+        chunk=Chunk(
+            document_id=document.document_id,
+            chunk_id="malformed",
+            content="real",
+            start_offset=start_offset,  # type: ignore[arg-type]
+            end_offset=end_offset,  # type: ignore[arg-type]
+        ),
+        score=1,
+        matched_terms=("real",),
+    )
+    collection = KnowledgeCollection(index_factory=lambda: HostileIndex((malformed,)))
+    collection.sync(FakeAdapter("docs", (document,)))
+
+    with pytest.raises(KnowledgeSearchResolutionError, match="invalid offsets"):
+        collection.search("real")
+
+
+def test_resolved_search_rejects_stale_chunk_after_document_change() -> None:
+    old_document = _document("docs", "a.txt", "old content")
+    old_hit = SearchHit(
+        chunk=Chunk(
+            document_id=old_document.document_id,
+            chunk_id="stale",
+            content=old_document.content,
+            start_offset=0,
+            end_offset=len(old_document.content),
+        ),
+        score=1,
+        matched_terms=("old",),
+    )
+    collection = KnowledgeCollection(index_factory=lambda: HostileIndex((old_hit,)))
+    collection.sync(FakeAdapter("docs", (old_document,)))
+    collection.sync(FakeAdapter("docs", (_document("docs", "a.txt", "new content"),)))
+
+    with pytest.raises(KnowledgeSearchResolutionError, match="incoherent"):
+        collection.search("old")
 
 
 def test_sync_detaches_committed_state_from_adapter_objects() -> None:
@@ -211,8 +398,8 @@ def test_first_multi_document_sync_and_search_ranking() -> None:
     hits = collection.search("checkpoint resume", limit=1)
 
     assert len(hits) == 1
-    assert hits[0].score == 2
-    assert hits[0].chunk.content == "checkpoint resume"
+    assert hits[0].hit.score == 2
+    assert hits[0].hit.chunk.content == "checkpoint resume"
 
 
 def test_identical_sync_is_unchanged_and_does_not_rechunk() -> None:
@@ -242,7 +429,9 @@ def test_refresh_adds_changes_preserves_and_removes_documents() -> None:
     assert result == KnowledgeSyncResult("docs", 1, 1, 1, 1, 2)
     assert collection.search("old") == ()
     assert collection.search("removed") == ()
-    assert collection.search("new")
+    changed_result = collection.search("new")[0]
+    assert changed_result.document == new_changed
+    assert changed_result.hit.chunk.content == "new value"
     assert collection.search("added")
     assert collection.search("same")
 
