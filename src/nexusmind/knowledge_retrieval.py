@@ -1,8 +1,8 @@
 """Source-neutral retrieval contracts and a bounded in-memory BM25 index.
 
-The lexical implementation uses whitespace tokenization, Unicode
-``str.casefold`` normalization, and positive-IDF BM25 scoring. Results are
-ordered by descending score and then by ascending ``chunk_id``.
+The lexical implementation uses a configurable analyzer and positive-IDF
+BM25 scoring. Results are ordered by descending score and then by ascending
+``chunk_id``.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from math import log
 from typing import Protocol
 
 from .knowledge_chunking import Chunk
+from .lexical_analysis import LexicalAnalyzer, UnicodeCJKLexicalAnalyzer
 
 
 _BM25_K1 = 1.2
@@ -86,10 +87,20 @@ class ChunkIndex(Protocol):
 class InMemoryChunkIndex:
     """Dependency-free, process-local lexical chunk retrieval."""
 
-    def __init__(self, *, limits: ChunkIndexLimits | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        limits: ChunkIndexLimits | None = None,
+        analyzer: LexicalAnalyzer | None = None,
+    ) -> None:
         if limits is not None and not isinstance(limits, ChunkIndexLimits):
             raise TypeError("limits must be ChunkIndexLimits")
+        if analyzer is not None and not callable(getattr(analyzer, "analyze", None)):
+            raise TypeError("analyzer must provide a callable analyze method")
         self._limits = limits or ChunkIndexLimits()
+        self._analyzer = (
+            UnicodeCJKLexicalAnalyzer() if analyzer is None else analyzer
+        )
         self._chunks: dict[str, Chunk] = {}
         self._document_chunks: dict[str, set[str]] = {}
         self._total_chars = 0
@@ -128,7 +139,7 @@ class InMemoryChunkIndex:
     def clone(self) -> "InMemoryChunkIndex":
         """Return an independent index with the same limits and state."""
 
-        clone = InMemoryChunkIndex(limits=self._limits)
+        clone = InMemoryChunkIndex(limits=self._limits, analyzer=self._analyzer)
         clone._chunks = self._chunks.copy()
         clone._document_chunks = {
             document_id: chunk_ids.copy()
@@ -215,7 +226,7 @@ class InMemoryChunkIndex:
             raise TypeError("query must be a string")
         if len(query) > self._limits.max_query_chars:
             raise ChunkIndexLimitError("query exceeds max_query_chars")
-        raw_terms = query.split()
+        raw_terms = self._analyzer.analyze(query)
         if len(raw_terms) > self._limits.max_query_terms:
             raise ChunkIndexLimitError("query exceeds max_query_terms")
         if type(limit) is not int:
@@ -225,7 +236,7 @@ class InMemoryChunkIndex:
         if limit > self._limits.max_results:
             raise ChunkIndexLimitError("limit exceeds max_results")
 
-        terms = tuple(dict.fromkeys(term.casefold() for term in raw_terms))
+        terms = tuple(dict.fromkeys(raw_terms))
         if not terms:
             return ()
         chunk_count = len(self._chunks)
@@ -262,8 +273,8 @@ class InMemoryChunkIndex:
         hits.sort(key=lambda hit: (-hit.score, hit.chunk.chunk_id))
         return tuple(hits[:limit])
 
-    @staticmethod
     def _statistics_for(
+        self,
         chunks: dict[str, Chunk],
     ) -> tuple[dict[str, Counter[str]], dict[str, int], Counter[str], int]:
         term_frequencies: dict[str, Counter[str]] = {}
@@ -271,7 +282,7 @@ class InMemoryChunkIndex:
         document_frequencies: Counter[str] = Counter()
         total_tokens = 0
         for chunk_id, chunk in chunks.items():
-            tokens = tuple(token.casefold() for token in chunk.content.split())
+            tokens = self._analyzer.analyze(chunk.content)
             frequencies = Counter(tokens)
             term_frequencies[chunk_id] = frequencies
             token_counts[chunk_id] = len(tokens)

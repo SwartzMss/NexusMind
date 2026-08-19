@@ -12,7 +12,9 @@ from nexusmind import (
     ChunkIndexLimits,
     DocumentReplacementError,
     InMemoryChunkIndex,
+    LexicalAnalyzer,
     SearchHit,
+    WhitespaceLexicalAnalyzer,
 )
 
 
@@ -55,11 +57,60 @@ def test_bm25_single_term_formula_and_score_type() -> None:
     assert hit.score == pytest.approx(math.log(4 / 3))
 
 
-def test_matching_is_whitespace_token_based() -> None:
+def test_matching_does_not_match_substrings() -> None:
     index = InMemoryChunkIndex()
     index.add((_chunk("substring", "concatenate"), _chunk("token", "cat")))
 
     assert [hit.chunk.chunk_id for hit in index.search("cat")] == ["token"]
+
+
+def test_default_analyzer_matches_across_punctuation_and_han_bigrams() -> None:
+    index = InMemoryChunkIndex()
+    index.add((_chunk("mixed", "Android Binder，提供安全检索"),))
+
+    hit = index.search("Binder 安全检索")[0]
+
+    assert hit.chunk.chunk_id == "mixed"
+    assert hit.matched_terms == ("binder", "安全", "全检", "检索")
+
+
+def test_explicit_whitespace_analyzer_preserves_legacy_matching() -> None:
+    index = InMemoryChunkIndex(analyzer=WhitespaceLexicalAnalyzer())
+    index.add((_chunk("punctuated", "alpha,beta"), _chunk("spaced", "alpha beta")))
+
+    assert [hit.chunk.chunk_id for hit in index.search("beta")] == ["spaced"]
+
+
+def test_same_configured_analyzer_is_used_once_per_corpus_text_and_query() -> None:
+    class MappingAnalyzer:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def __bool__(self) -> bool:
+            return False
+
+        def analyze(self, text: str) -> tuple[str, ...]:
+            self.calls.append(text)
+            return {
+                "source one": ("shared", "shared"),
+                "source two": ("other",),
+                "lookup": ("shared", "shared"),
+            }[text]
+
+    analyzer: LexicalAnalyzer = MappingAnalyzer()
+    index = InMemoryChunkIndex(analyzer=analyzer)
+    index.add((_chunk("one", "source one"), _chunk("two", "source two")))
+
+    hit = index.search("lookup")[0]
+
+    assert hit.chunk.chunk_id == "one"
+    assert hit.matched_terms == ("shared",)
+    assert analyzer.calls == ["source one", "source two", "lookup"]
+
+
+def test_explicit_analyzer_requires_callable_analyze() -> None:
+    with pytest.raises(TypeError, match="callable analyze"):
+        InMemoryChunkIndex(analyzer=object())  # type: ignore[arg-type]
 
 
 def test_repeated_term_frequency_increases_score_at_equal_length() -> None:
@@ -288,6 +339,20 @@ def test_query_and_result_limits_are_enforced() -> None:
         index.search("a b c")
     with pytest.raises(ChunkIndexLimitError, match="max_results"):
         index.search("a", limit=2)
+
+
+def test_query_term_limit_counts_analyzed_repetitions_before_deduplication() -> None:
+    index = InMemoryChunkIndex(limits=ChunkIndexLimits(max_query_terms=2))
+
+    with pytest.raises(ChunkIndexLimitError, match="max_query_terms"):
+        index.search("term term term")
+
+
+def test_query_term_limit_counts_default_han_bigram_amplification() -> None:
+    index = InMemoryChunkIndex(limits=ChunkIndexLimits(max_query_terms=2))
+
+    with pytest.raises(ChunkIndexLimitError, match="max_query_terms"):
+        index.search("安全检索")
 
 
 def test_index_count_content_and_per_document_limits_are_atomic() -> None:
