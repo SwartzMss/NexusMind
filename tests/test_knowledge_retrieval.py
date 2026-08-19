@@ -229,6 +229,19 @@ def test_replace_document_removes_stale_chunks_and_empty_replacement_removes_all
     assert index.search("fresh") == ()
 
 
+def test_replace_document_rebuilds_statistics_equivalent_to_fresh_index() -> None:
+    replacement = _chunk("replacement", "other", "doc-1")
+    retained = _chunk("retained", "term", "doc-2")
+    index = InMemoryChunkIndex()
+    index.add((_chunk("old", "term term term term", "doc-1"), retained))
+
+    index.replace_document("doc-1", (replacement,))
+
+    fresh = InMemoryChunkIndex()
+    fresh.add((replacement, retained))
+    assert index.search("term other") == fresh.search("term other")
+
+
 def test_failed_replacement_is_atomic() -> None:
     old = _chunk("old", "old searchable", "doc-1")
     limits = ChunkIndexLimits(max_total_chars=len(old.content), max_chunks=5, max_chunks_per_document=5)
@@ -282,10 +295,12 @@ def test_index_count_content_and_per_document_limits_are_atomic() -> None:
         limits=ChunkIndexLimits(max_chunks=2, max_total_chars=4, max_chunks_per_document=1)
     )
     index.add((_chunk("a", "ab", "doc-1"),))
+    before_failures = index.search("ab")
     with pytest.raises(ChunkIndexLimitError, match="max_chunks_per_document"):
         index.add((_chunk("b", "c", "doc-1"),))
     with pytest.raises(ChunkIndexLimitError, match="max_total_chars"):
         index.add((_chunk("b", "cde", "doc-2"),))
+    assert index.search("ab") == before_failures
     index.add((_chunk("b", "cd", "doc-2"),))
     with pytest.raises(ChunkIndexLimitError, match="max_chunks"):
         index.add((_chunk("c", "", "doc-3"),))

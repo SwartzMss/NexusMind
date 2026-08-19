@@ -1,9 +1,8 @@
-"""Source-neutral retrieval contracts and a bounded in-memory lexical index.
+"""Source-neutral retrieval contracts and a bounded in-memory BM25 index.
 
-The lexical implementation uses Unicode ``str.casefold`` normalization. A
-distinct whitespace-delimited query term scores one point when its normalized
-text occurs in a chunk. Results are ordered by descending score and then by
-ascending ``chunk_id``.
+The lexical implementation uses whitespace tokenization, Unicode
+``str.casefold`` normalization, and positive-IDF BM25 scoring. Results are
+ordered by descending score and then by ascending ``chunk_id``.
 """
 
 from __future__ import annotations
