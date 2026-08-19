@@ -91,12 +91,21 @@ def test_combining_marks_are_boundaries_after_nfkc() -> None:
     ("text", "expected"),
     [
         ("\u3400\u4dbf", ("\u3400\u4dbf",)),
-        ("\u4e00\u9fa5", ("\u4e00\u9fa5",)),
-        ("\U00020000\U0002a6d6", ("\U00020000\U0002a6d6",)),
+        ("\u4e00\u9fff", ("\u4e00\u9fff",)),
+        ("\U00020000\U0002a6df", ("\U00020000\U0002a6df",)),
+        ("\U0002a700\U0002b738", ("\U0002a700\U0002b738",)),
+        ("\U0002b740\U0002b81d", ("\U0002b740\U0002b81d",)),
+        ("\U0002b820\U0002cea1", ("\U0002b820\U0002cea1",)),
+        ("\U0002ceb0\U0002ebe0", ("\U0002ceb0\U0002ebe0",)),
         ("\U00030000\U0003134a", ("\U00030000\U0003134a",)),
         (
             "\uf900\ufa6d",
-            (unicodedata.normalize("NFKC", "\uf900\ufa6d"),),
+            (unicodedata.ucd_3_2_0.normalize("NFKC", "\uf900\ufa6d"),),
+        ),
+        ("\ufa70\ufad9", ("\ufa70\ufad9",)),
+        (
+            "\U0002f800\U0002fa1d",
+            (unicodedata.ucd_3_2_0.normalize("NFKC", "\U0002f800\U0002fa1d"),),
         ),
     ],
 )
@@ -118,6 +127,15 @@ def test_unassigned_code_points_inside_han_blocks_are_boundaries() -> None:
     # U+FA6E is unassigned across the Unicode databases in supported Pythons.
     assert unicodedata.category("\ufa6e") == "Cn"
     assert analyzer.analyze("a\ufa6eb") == ("a", "b")
+
+
+def test_post_unicode_14_han_and_post_ucd_3_2_normalization_are_boundaries() -> None:
+    analyzer = UnicodeCJKLexicalAnalyzer()
+
+    # Extension I starts at U+2EBF0 in Unicode 15.1 and is outside our pinned
+    # Unicode 14 Han repertoire. U+1F16A gained an NFKC mapping after UCD 3.2.
+    assert analyzer.analyze("a\U0002ebf0b") == ("a", "b")
+    assert analyzer.analyze("a\U0001f16ab") == ("a", "b")
 
 
 def test_results_are_stable_tuples_without_empty_tokens() -> None:
