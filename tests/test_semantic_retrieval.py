@@ -323,6 +323,97 @@ def test_failed_later_embedding_batch_keeps_previous_state() -> None:
     assert index.search("q") == before
 
 
+def test_document_dimension_limit_stops_before_later_batches() -> None:
+    provider = _RecordingProvider(
+        {
+            "wide": (1.0, 1.0, 1.0),
+            "unrequested": (1.0,),
+        }
+    )
+    index = InMemorySemanticChunkIndex(
+        embedding_provider=provider,
+        limits=SemanticChunkIndexLimits(
+            max_dimensions=2,
+            max_embedding_batch_size=1,
+        ),
+    )
+
+    with pytest.raises(SemanticChunkIndexLimitError, match="max_dimensions"):
+        index.add(
+            (
+                _chunk("wide", "wide"),
+                _chunk("unrequested", "unrequested"),
+            )
+        )
+
+    assert provider.document_calls == [("wide",)]
+    assert index.search("anything") == ()
+
+
+def test_document_vector_value_limit_uses_retained_candidate_and_stops_early() -> None:
+    provider = _RecordingProvider(
+        {
+            "retained": (1.0, 0.0),
+            "new": (0.0, 1.0),
+            "unrequested": (1.0, 1.0),
+            "q": (1.0, 0.0),
+        }
+    )
+    index = InMemorySemanticChunkIndex(
+        embedding_provider=provider,
+        limits=SemanticChunkIndexLimits(
+            max_total_vector_values=3,
+            max_embedding_batch_size=1,
+        ),
+    )
+    index.add((_chunk("retained", "retained"),))
+    before = index.search("q")
+
+    with pytest.raises(
+        SemanticChunkIndexLimitError,
+        match="max_total_vector_values",
+    ):
+        index.add(
+            (
+                _chunk("new", "new", "doc-2"),
+                _chunk("unrequested", "unrequested", "doc-2"),
+            )
+        )
+
+    assert provider.document_calls == [("retained",), ("new",)]
+    assert index.search("q") == before
+
+
+def test_replace_vector_value_limit_excludes_removed_document_vectors() -> None:
+    provider = _RecordingProvider(
+        {
+            "old": (1.0, 0.0),
+            "retained": (0.0, 1.0),
+            "replacement": (1.0, 1.0),
+        }
+    )
+    index = InMemorySemanticChunkIndex(
+        embedding_provider=provider,
+        limits=SemanticChunkIndexLimits(max_total_vector_values=4),
+    )
+    index.add(
+        (
+            _chunk("old", "old"),
+            _chunk("retained", "retained", "doc-2"),
+        )
+    )
+
+    index.replace_document(
+        "doc-1",
+        (_chunk("replacement", "replacement"),),
+    )
+
+    assert provider.document_calls == [
+        ("old", "retained"),
+        ("replacement",),
+    ]
+
+
 @pytest.mark.parametrize(
     "bad_result",
     [

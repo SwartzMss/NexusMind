@@ -113,7 +113,8 @@ class InMemorySemanticChunkIndex:
         )
         self._preflight(candidate_chunks, candidate_documents, total_chars)
         vectors = self._embed_documents(
-            tuple(chunk.content for chunk in additions.values())
+            tuple(chunk.content for chunk in additions.values()),
+            retained_vectors=self._vectors,
         )
         candidate_vectors = self._vectors.copy()
         candidate_vectors.update(zip(additions, vectors, strict=True))
@@ -182,7 +183,8 @@ class InMemorySemanticChunkIndex:
         }
         if new_chunks:
             vectors = self._embed_documents(
-                tuple(chunk.content for chunk in new_chunks.values())
+                tuple(chunk.content for chunk in new_chunks.values()),
+                retained_vectors=candidate_vectors,
             )
             candidate_vectors.update(zip(new_chunks, vectors, strict=True))
         for chunk_id, chunk in replacement.items():
@@ -270,11 +272,18 @@ class InMemorySemanticChunkIndex:
         return tuple(hits[:limit])
 
     def _embed_documents(
-        self, texts: tuple[str, ...]
+        self,
+        texts: tuple[str, ...],
+        *,
+        retained_vectors: dict[str, EmbeddingVector],
     ) -> tuple[EmbeddingVector, ...]:
         try:
             vectors: list[EmbeddingVector] = []
             batch_size = self._limits.max_embedding_batch_size
+            expected_dimension = self._dimension
+            vector_values = sum(
+                len(vector.values) for vector in retained_vectors.values()
+            )
             for offset in range(0, len(texts), batch_size):
                 batch = texts[offset : offset + batch_size]
                 batch_vectors = self._provider.embed_documents(batch)
@@ -287,6 +296,23 @@ class InMemorySemanticChunkIndex:
                     type(vector) is not EmbeddingVector for vector in batch_vectors
                 ):
                     raise TypeError
+                for vector in batch_vectors:
+                    dimension = len(vector.values)
+                    if dimension > self._limits.max_dimensions:
+                        raise SemanticChunkIndexLimitError(
+                            "embedding exceeds max_dimensions"
+                        )
+                    if expected_dimension is None:
+                        expected_dimension = dimension
+                    elif dimension != expected_dimension:
+                        raise SemanticDimensionError(
+                            "embedding dimension does not match index"
+                        )
+                    vector_values += dimension
+                    if vector_values > self._limits.max_total_vector_values:
+                        raise SemanticChunkIndexLimitError(
+                            "index exceeds max_total_vector_values"
+                        )
                 vectors.extend(batch_vectors)
             return tuple(vectors)
         except SemanticChunkIndexError:

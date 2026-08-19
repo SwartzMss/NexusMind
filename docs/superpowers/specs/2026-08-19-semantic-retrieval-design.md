@@ -97,7 +97,9 @@ chunks in bounded provider-request batches, and constructs a complete candidate
 state from existing vectors plus new vectors. Replacement reuses an existing
 vector only when the exact same chunk already exists; otherwise it embeds
 replacement chunks in the same bounded batches. All batches must succeed before
-the candidate is committed. Unchanged chunks belonging to other documents retain
+the candidate is committed. Each returned batch is validated immediately against
+the dimension and retained-vector-value limits, so an invalid or oversized batch
+stops later provider calls. Unchanged chunks belonging to other documents retain
 their vectors. Removal does not call the provider.
 
 Every provider call and vector/count/dimension/resource validation finishes
