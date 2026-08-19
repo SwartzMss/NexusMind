@@ -22,7 +22,7 @@ For each backend hit, the collection resolves `hit.chunk.document_id` against it
 
 Each result receives deep copies of the canonical source and document. This prevents mutation of nested metadata mappings from changing collection-owned state. The hit remains the backend value because chunks and search-hit fields are immutable and do not contain mutable metadata.
 
-Resolution never trusts a backend-provided source/document association. An unknown document, a missing owning source, a malformed non-`SearchHit` value, or a chunk whose document identity is incoherent with canonical state raises a controlled `KnowledgeSearchResolutionError`, derived from `KnowledgeCollectionError`. No partial result tuple is returned.
+Resolution never trusts a backend-provided source/document association. An unknown document, a missing owning source, a malformed non-`SearchHit` value, invalid chunk offsets, or chunk content that differs from the canonical `Document.content[start_offset:end_offset]` raises a controlled `KnowledgeSearchResolutionError`, derived from `KnowledgeCollectionError`. This catches fabricated and stale chunks without binding the collection to a specific chunker or chunk-ID strategy. No partial result tuple is returned.
 
 Sync, source removal, restore, and SQLite restart need no new state: they already atomically replace canonical documents and rebuild or update the derived index. Search always resolves against the currently committed dictionaries, so stale or changed provenance cannot be fabricated.
 
@@ -40,7 +40,7 @@ Tests will follow the existing offline pytest patterns and cover:
 - deep-copy isolation for source and document metadata;
 - changed and removed documents after sync;
 - snapshot/restore and SQLite save/load/restore provenance;
-- controlled failure for ghost, malformed, and incoherent hits;
+- controlled failure for ghost, malformed, forged, and stale hits;
 - unchanged direct `ChunkIndex.search()` behavior.
 
 Existing collection tests that inspect returned chunks will be updated to traverse `result.hit.chunk`, reflecting the deliberate API boundary change.

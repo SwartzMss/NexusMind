@@ -242,6 +242,24 @@ class KnowledgeCollection:
                 raise KnowledgeSearchResolutionError(
                     "search hit references an unknown document_id"
                 )
+            chunk = hit.chunk
+            if type(chunk.start_offset) is not int or type(chunk.end_offset) is not int:
+                raise KnowledgeSearchResolutionError(
+                    "search hit chunk has invalid offsets"
+                )
+            if not (
+                0
+                <= chunk.start_offset
+                <= chunk.end_offset
+                <= len(document.content)
+            ):
+                raise KnowledgeSearchResolutionError(
+                    "search hit chunk has invalid offsets outside canonical document"
+                )
+            if chunk.content != document.content[chunk.start_offset : chunk.end_offset]:
+                raise KnowledgeSearchResolutionError(
+                    "search hit chunk is incoherent with canonical document"
+                )
             source = self._sources.get(document.source_id)
             if source is None:
                 raise KnowledgeSearchResolutionError(

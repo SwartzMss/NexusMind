@@ -202,6 +202,79 @@ def test_resolved_search_rejects_malformed_or_ghost_backend_hits(
         collection.search("term")
 
 
+def test_resolved_search_rejects_chunk_with_forged_content() -> None:
+    document = _document("docs", "a.txt", "real canonical content")
+    forged = SearchHit(
+        chunk=Chunk(
+            document_id=document.document_id,
+            chunk_id="forged",
+            content="fabricated content",
+            start_offset=0,
+            end_offset=len("fabricated content"),
+        ),
+        score=999,
+        matched_terms=("whatever",),
+    )
+    collection = KnowledgeCollection(index_factory=lambda: HostileIndex((forged,)))
+    collection.sync(FakeAdapter("docs", (document,)))
+
+    with pytest.raises(KnowledgeSearchResolutionError, match="incoherent"):
+        collection.search("whatever")
+
+
+@pytest.mark.parametrize(
+    "start_offset, end_offset",
+    [
+        (-1, 4),
+        (4, 3),
+        (0, 100),
+        (True, 4),
+        (0, False),
+    ],
+)
+def test_resolved_search_rejects_chunk_with_invalid_offsets(
+    start_offset: object, end_offset: object
+) -> None:
+    document = _document("docs", "a.txt", "real content")
+    malformed = SearchHit(
+        chunk=Chunk(
+            document_id=document.document_id,
+            chunk_id="malformed",
+            content="real",
+            start_offset=start_offset,  # type: ignore[arg-type]
+            end_offset=end_offset,  # type: ignore[arg-type]
+        ),
+        score=1,
+        matched_terms=("real",),
+    )
+    collection = KnowledgeCollection(index_factory=lambda: HostileIndex((malformed,)))
+    collection.sync(FakeAdapter("docs", (document,)))
+
+    with pytest.raises(KnowledgeSearchResolutionError, match="invalid offsets"):
+        collection.search("real")
+
+
+def test_resolved_search_rejects_stale_chunk_after_document_change() -> None:
+    old_document = _document("docs", "a.txt", "old content")
+    old_hit = SearchHit(
+        chunk=Chunk(
+            document_id=old_document.document_id,
+            chunk_id="stale",
+            content=old_document.content,
+            start_offset=0,
+            end_offset=len(old_document.content),
+        ),
+        score=1,
+        matched_terms=("old",),
+    )
+    collection = KnowledgeCollection(index_factory=lambda: HostileIndex((old_hit,)))
+    collection.sync(FakeAdapter("docs", (old_document,)))
+    collection.sync(FakeAdapter("docs", (_document("docs", "a.txt", "new content"),)))
+
+    with pytest.raises(KnowledgeSearchResolutionError, match="incoherent"):
+        collection.search("old")
+
+
 def test_sync_detaches_committed_state_from_adapter_objects() -> None:
     source = KnowledgeSource(
         source_id="docs",

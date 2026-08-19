@@ -37,7 +37,7 @@ Knowledge Retrieval 在 chunking 之后提供 source-neutral 的 `ChunkIndex` / 
 
 `KnowledgeCollection` 组合现有 adapter、chunker 和 index，提供显式的 `sync()` / `search()` 工作流。每次同步加载完整 source snapshot，以 `document_id` 和 `content_hash` 确定新增、更新、未变化及删除的 Documents；只有新增/变化的文档会重新分块，删除文档的旧 chunks 会从检索中移除。第一版 collection 依赖独立的 `CloneableChunkIndex` staging capability：所有变更先在克隆的候选 index 上按稳定顺序完成，成功后才交换 collection snapshot 和 index，因此失败不会留下部分状态。可选的 `index_factory=` 必须在每次调用时创建一个全新、空且由 collection 独占的 index，避免 searchable state 脱离 authoritative source/document snapshot；调用方应通过 collection 搜索已提交状态。基础 `ChunkIndex` 仍只定义 add/replace/remove/search，未来事务型持久化 backend 不必支持 clone。同步由调用方显式触发，不包含后台监听或定时刷新。
 
-`ChunkIndex.search()` 返回 retrieval-layer `SearchHit`，只描述匹配 Chunk、分数和命中词。`KnowledgeCollection.search()` 会按 backend 原始顺序把每个 hit 的 `document_id` 解析到当前已提交的 canonical `Document` 和所属 `KnowledgeSource`，返回 `KnowledgeSearchResult(source, document, hit)`；Source 和 Document 是深拷贝，调用方修改嵌套 metadata 不会影响 collection 状态。无法解析的 ghost/malformed hit 会以受控的 `KnowledgeSearchResolutionError` fail closed，不会伪造 provenance 或返回部分结果。
+`ChunkIndex.search()` 返回 retrieval-layer `SearchHit`，只描述匹配 Chunk、分数和命中词。`KnowledgeCollection.search()` 会按 backend 原始顺序把每个 hit 的 `document_id` 解析到当前已提交的 canonical `Document` 和所属 `KnowledgeSource`，并验证 Chunk offsets 合法且内容等于 canonical Document 的对应字符切片，然后返回 `KnowledgeSearchResult(source, document, hit)`；Source 和 Document 是深拷贝，调用方修改嵌套 metadata 不会影响 collection 状态。无法解析的 ghost/malformed/stale hit 会以受控的 `KnowledgeSearchResolutionError` fail closed，不会伪造 provenance 或返回部分结果。
 
 collection 和 index 仍只存在于当前进程；canonical source/document snapshot 可由显式 store 保存并在重启后加载，但 derived Chunk/Index 会重新构建。该实现不是语义搜索，也尚未连接 embedding、向量数据库、持久化 retrieval index 或 RAG/LLM 答案生成。`ChunkIndex` 契约用于允许未来后端替换当前实现。
 

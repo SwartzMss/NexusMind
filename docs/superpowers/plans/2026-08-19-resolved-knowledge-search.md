@@ -100,7 +100,7 @@ git commit -m "feat: resolve knowledge search provenance"
 
 - [ ] **Step 1: Write failing isolation and hostile-index tests**
 
-Add a cloneable fake index that returns configured values. Cover a non-tuple backend return, malformed non-`SearchHit` tuple members, a non-`Chunk` hit payload, and an unknown document ID. Add a metadata test that mutates returned `source.metadata` and `document.metadata`, searches again, and asserts the second result retains original metadata.
+Add a cloneable fake index that returns configured values. Cover a non-tuple backend return, malformed non-`SearchHit` tuple members, a non-`Chunk` hit payload, an unknown document ID, invalid offsets, forged content, and a stale chunk after a canonical document update. Add a metadata test that mutates returned `source.metadata` and `document.metadata`, searches again, and asserts the second result retains original metadata.
 
 ```python
 with pytest.raises(KnowledgeSearchResolutionError, match="unknown document_id"):
@@ -121,7 +121,7 @@ Expected: integrity tests fail because the initial path does not validate the ba
 
 - [ ] **Step 3: Validate the complete hit-to-document relationship**
 
-Require the backend return value to be exactly a tuple. Require each member to be a `SearchHit`, require `hit.chunk` to be a `Chunk`, and require its `document_id` to resolve to one document in `_documents` whose `source_id` resolves in `_sources`. Raise `KnowledgeSearchResolutionError` with stable messages for each failure. Keep resolution read-only and build the full output before returning, so failures expose no partial tuple.
+Require the backend return value to be exactly a tuple. Require each member to be a `SearchHit`, require `hit.chunk` to be a `Chunk`, and require its `document_id` to resolve to one document in `_documents` whose `source_id` resolves in `_sources`. Require plain-integer offsets satisfying `0 <= start_offset <= end_offset <= len(document.content)` and require `chunk.content == document.content[start_offset:end_offset]`. Raise `KnowledgeSearchResolutionError` with stable messages for each failure. Keep resolution read-only and build the full output before returning, so failures expose no partial tuple.
 
 - [ ] **Step 4: Run focused and full collection tests**
 
