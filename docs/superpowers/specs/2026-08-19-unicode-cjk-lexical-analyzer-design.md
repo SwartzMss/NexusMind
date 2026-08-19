@@ -62,9 +62,12 @@ normalization policy, not a mutation of Document content.
 
 ## Index state and atomic mutation
 
-`InMemoryChunkIndex` receives an analyzer as runtime configuration. Analyzer
-instances for this issue are immutable and stateless; `clone()` preserves the
-same analyzer semantics while copying all mutable index state independently.
+`InMemoryChunkIndex` receives an analyzer as runtime configuration. The built-in
+analyzers are immutable and stateless. Public custom analyzers must be
+deterministic, effectively immutable, stateless with respect to `analyze()`
+results, and safe to share between clones. `clone()` shares the analyzer
+instance while copying all mutable index state independently; it does not
+deep-copy analyzers or invoke an analyzer factory.
 
 The index stores derived per-chunk analyzed tokens plus the BM25 TF/DF and
 length statistics needed by the existing scorer. Add and replacement operations

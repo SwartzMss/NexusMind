@@ -46,6 +46,8 @@ legacy_index = InMemoryChunkIndex(analyzer=WhitespaceLexicalAnalyzer())
 
 `WhitespaceLexicalAnalyzer` 会保留标点附着于空白 token 的旧行为。两种 analyzer 都不做词典分词、stemming、stop-word 过滤、同义词或语义理解；Han bigram 可能过度匹配常见相邻字，singleton query 的特异性较弱，兼容归一化也会有意合并某些视觉形式。
 
+Public custom `LexicalAnalyzer` 必须 deterministic、effectively immutable，且 `analyze()` 的结果不能依赖可变调用历史；它还必须能够安全地由多个 index clone 共享。`InMemoryChunkIndex.clone()` 会共享同一个 analyzer instance，只复制 chunks 与 BM25 统计等可变 index state，不会 `deepcopy()` analyzer 或调用 analyzer factory。内置 analyzer 均为 frozen、stateless 实现。
+
 BM25 使用 `k1 = 1.2`、`b = 0.75` 和始终为正的 IDF：
 
 ```text
@@ -59,7 +61,7 @@ score(q, D) = sum over distinct matched query terms:
 
 `SearchHit.score` 是有限非负 float，结果按 score 降序、`chunk_id` 升序稳定排序。Query 的 `max_query_chars` 先于 analysis 检查；`max_query_terms` 和 `max_query_analyzed_chars` 则应用于 analyzer 返回的原始词项流，在按首次出现顺序去重之前分别限制词项数和词项字符总数，因此重复输入和 analyzer 放大都不能绕过上限。候选 corpus 还受 `max_total_analyzed_tokens` 和 `max_total_analyzed_token_chars` 的全局上限约束；默认值分别是 10,000,000 和 200,000,000，后者为默认内容字符上限的 20 倍，为 NFKC/casefold 扩展保留有界余量；查询 analyzed 字符默认上限同样是输入字符上限的 20 倍，即 20,480。Custom analyzer 在返回前的内部分配不受索引控制；返回值经严格类型验证后，会在保留 corpus 统计或进入 query 评分前执行这些上限。Analyzer 选择是未持久化的 runtime configuration；analyzed tokens、TF、chunk frequency、token length 和平均 chunk length 是未持久化的 derived runtime state。Add/replace/remove 会在候选 corpus 上重建统计并原子交换，restore 则从 canonical Documents 重新分块，并使用当前 collection/index 配置的 analyzer 重建 derived state。Snapshot 和 SQLite 都不保存 analyzer、tokens 或 postings。
 
-`retrieval_evaluation` 提供确定性的离线 Hit@K、Recall@K 和 MRR 评估，ground truth 使用 canonical Document `(source_id, logical_path)`，同时保留实际 chunk 排名和重复 document hits 作为诊断信息。首个原创 corpus、15 个显式 labels、固定配置、当前指标及复现命令见 [`evals/knowledge/baseline.md`](evals/knowledge/baseline.md)；该 baseline 通过真实 LocalDirectoryAdapter -> KnowledgeCollection -> BM25 -> provenance 路径运行，不是 release gate 或公共 benchmark。
+`retrieval_evaluation` 提供确定性的离线 Hit@K、Recall@K 和 MRR 评估，ground truth 使用 canonical Document `(source_id, logical_path)`，同时保留实际 chunk 排名和重复 document hits 作为诊断信息。首个原创 corpus、15 个显式 labels、固定配置、previous whitespace 与 current Unicode/CJK 指标及复现命令见 [`evals/knowledge/baseline.md`](evals/knowledge/baseline.md)；当前 baseline 显式配置 `UnicodeCJKLexicalAnalyzer`，不依赖未来可能变化的 index 默认值。该 baseline 通过真实 LocalDirectoryAdapter -> KnowledgeCollection -> BM25 -> provenance 路径运行，不是 release gate 或公共 benchmark。
 
 CJK analyzer 对比评估的语料、labels、固定配置、复现命令和当前 Hit@3 / Recall@3 / MRR 位于 [`evals/knowledge/cjk/`](evals/knowledge/cjk/)。它使用 7 份原创文档（包含刻意加入的近邻文档与排名余量）和 10 个文档相关性 cases，通过真实 ingestion -> collection -> BM25 -> provenance -> evaluator 路径比较两种 analyzer。记录值只是 descriptive、non-gate 指标，测试检查确定性、范围、fixture coverage、定性改进和非饱和 MRR，不将精确指标锁定为 CI 质量门槛。
 

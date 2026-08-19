@@ -100,7 +100,12 @@ class ChunkIndex(Protocol):
 
 
 class InMemoryChunkIndex:
-    """Dependency-free, process-local lexical chunk retrieval."""
+    """Dependency-free, process-local lexical chunk retrieval.
+
+    Custom analyzers must be deterministic, effectively immutable, stateless
+    with respect to analysis results, and safe to share between index clones.
+    ``clone()`` shares the analyzer instance while copying mutable index state.
+    """
 
     def __init__(
         self,
