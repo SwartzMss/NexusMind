@@ -113,6 +113,37 @@ def test_explicit_analyzer_requires_callable_analyze() -> None:
         InMemoryChunkIndex(analyzer=object())  # type: ignore[arg-type]
 
 
+class _StrSubclass(str):
+    pass
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        ["term"],
+        "term",
+        ("",),
+        (1,),
+        (_StrSubclass("term"),),
+    ],
+)
+@pytest.mark.parametrize("path", ["corpus", "query"])
+def test_malformed_analyzer_output_is_rejected_at_each_use_path(
+    malformed: object, path: str
+) -> None:
+    class MalformedAnalyzer:
+        def analyze(self, text: str) -> tuple[str, ...]:
+            return malformed  # type: ignore[return-value]
+
+    index = InMemoryChunkIndex(analyzer=MalformedAnalyzer())
+
+    with pytest.raises(TypeError, match="analyzer must return"):
+        if path == "corpus":
+            index.add((_chunk("one", "source"),))
+        else:
+            index.search("query")
+
+
 def test_repeated_term_frequency_increases_score_at_equal_length() -> None:
     index = InMemoryChunkIndex()
     index.add(

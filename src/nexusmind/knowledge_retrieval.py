@@ -226,7 +226,7 @@ class InMemoryChunkIndex:
             raise TypeError("query must be a string")
         if len(query) > self._limits.max_query_chars:
             raise ChunkIndexLimitError("query exceeds max_query_chars")
-        raw_terms = self._analyzer.analyze(query)
+        raw_terms = self._analyze(query)
         if len(raw_terms) > self._limits.max_query_terms:
             raise ChunkIndexLimitError("query exceeds max_query_terms")
         if type(limit) is not int:
@@ -282,13 +282,21 @@ class InMemoryChunkIndex:
         document_frequencies: Counter[str] = Counter()
         total_tokens = 0
         for chunk_id, chunk in chunks.items():
-            tokens = self._analyzer.analyze(chunk.content)
+            tokens = self._analyze(chunk.content)
             frequencies = Counter(tokens)
             term_frequencies[chunk_id] = frequencies
             token_counts[chunk_id] = len(tokens)
             document_frequencies.update(frequencies.keys())
             total_tokens += len(tokens)
         return term_frequencies, token_counts, document_frequencies, total_tokens
+
+    def _analyze(self, text: str) -> tuple[str, ...]:
+        tokens = self._analyzer.analyze(text)
+        if type(tokens) is not tuple:
+            raise TypeError("analyzer must return an exact tuple")
+        if any(type(token) is not str or token == "" for token in tokens):
+            raise TypeError("analyzer must return non-empty exact str tokens")
+        return tuple(tokens)
 
     def _commit_candidate(
         self,
