@@ -1,0 +1,88 @@
+{
+  "cases": [
+    {
+      "case_id": "trustzone-worlds",
+      "query": "TrustZone secure world normal world",
+      "relevant_documents": [{"source_id": "eval-corpus", "logical_path": "trustzone.md"}]
+    },
+    {
+      "case_id": "trustzone-monitor",
+      "query": "secure monitor trusted firmware",
+      "relevant_documents": [{"source_id": "eval-corpus", "logical_path": "trustzone.md"}]
+    },
+    {
+      "case_id": "qnx-microkernel",
+      "query": "QNX Neutrino microkernel",
+      "relevant_documents": [{"source_id": "eval-corpus", "logical_path": "qnx.md"}]
+    },
+    {
+      "case_id": "qnx-message-passing",
+      "query": "synchronous message passing priority inheritance",
+      "relevant_documents": [{"source_id": "eval-corpus", "logical_path": "qnx.md"}]
+    },
+    {
+      "case_id": "android-binder",
+      "query": "Android Binder IPC transactions",
+      "relevant_documents": [{"source_id": "eval-corpus", "logical_path": "android.md"}]
+    },
+    {
+      "case_id": "android-runtime",
+      "query": "Zygote ART ActivityManager",
+      "relevant_documents": [{"source_id": "eval-corpus", "logical_path": "android.md"}]
+    },
+    {
+      "case_id": "cryptography-aead",
+      "query": "AES GCM authenticated encryption nonce",
+      "relevant_documents": [{"source_id": "eval-corpus", "logical_path": "cryptography.md"}]
+    },
+    {
+      "case_id": "cryptography-derivation-signature",
+      "query": "HKDF key derivation Ed25519 signature",
+      "relevant_documents": [{"source_id": "eval-corpus", "logical_path": "cryptography.md"}]
+    },
+    {
+      "case_id": "bm25-components",
+      "query": "BM25 term frequency inverse document frequency length normalization",
+      "relevant_documents": [{"source_id": "eval-corpus", "logical_path": "retrieval.md"}]
+    },
+    {
+      "case_id": "retrieval-metrics",
+      "query": "Hit Recall reciprocal rank relevance",
+      "relevant_documents": [{"source_id": "eval-corpus", "logical_path": "retrieval.md"}]
+    },
+    {
+      "case_id": "isolation-boundaries",
+      "query": "isolation application sandbox security",
+      "relevant_documents": [
+        {"source_id": "eval-corpus", "logical_path": "trustzone.md"},
+        {"source_id": "eval-corpus", "logical_path": "android.md"}
+      ]
+    },
+    {
+      "case_id": "interprocess-communication",
+      "query": "processes service IPC message",
+      "relevant_documents": [
+        {"source_id": "eval-corpus", "logical_path": "qnx.md"},
+        {"source_id": "eval-corpus", "logical_path": "android.md"}
+      ]
+    },
+    {
+      "case_id": "deterministic-systems",
+      "query": "deterministic scheduling embedded systems",
+      "relevant_documents": [{"source_id": "eval-corpus", "logical_path": "qnx.md"}]
+    },
+    {
+      "case_id": "key-protection",
+      "query": "protect keys authenticated security",
+      "relevant_documents": [
+        {"source_id": "eval-corpus", "logical_path": "trustzone.md"},
+        {"source_id": "eval-corpus", "logical_path": "cryptography.md"}
+      ]
+    },
+    {
+      "case_id": "offline-regression",
+      "query": "offline baseline retrieval regressions",
+      "relevant_documents": [{"source_id": "eval-corpus", "logical_path": "retrieval.md"}]
+    }
+  ]
+}
