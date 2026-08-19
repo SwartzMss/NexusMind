@@ -1,0 +1,54 @@
+{
+  "cases": [
+    {
+      "case_id": "android-cross-process",
+      "query": "安卓应用怎样跨进程请求系统服务",
+      "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "android.md"}]
+    },
+    {
+      "case_id": "android-binder-identity",
+      "query": "Binder IPC 如何传递调用方身份并做权限检查",
+      "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "android.md"}]
+    },
+    {
+      "case_id": "trustzone-world-separation",
+      "query": "普通环境为何不能直接读取可信环境的内存",
+      "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "trustzone.md"}]
+    },
+    {
+      "case_id": "trustzone-shared-buffer",
+      "query": "TrustZone 隔离还需要防范共享缓冲区的边界错误",
+      "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "trustzone.md"}]
+    },
+    {
+      "case_id": "qnx-userspace-services",
+      "query": "微内核为何把驱动和文件系统放在用户态",
+      "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "qnx.md"}]
+    },
+    {
+      "case_id": "qnx-fault-containment",
+      "query": "QNX microkernel 中单个驱动崩溃后如何限制影响",
+      "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "qnx.md"}]
+    },
+    {
+      "case_id": "aes-gcm-nonce",
+      "query": "重复随机数为什么会损害 AES-GCM 的认证安全",
+      "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "cryptography.md"}]
+    },
+    {
+      "case_id": "aead-verification-order",
+      "query": "解密数据应在解析明文之前完成完整性校验",
+      "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "cryptography.md"}]
+    },
+    {
+      "case_id": "key-purpose-separation",
+      "query": "如何从主密钥生成用途互相分离的子密钥",
+      "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "cryptography.md"}]
+    },
+    {
+      "case_id": "hkdf-context",
+      "query": "HKDF 的 salt 和 info 怎样区分会话与协议方向",
+      "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "cryptography.md"}]
+    }
+  ]
+}
