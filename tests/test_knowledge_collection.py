@@ -16,9 +16,11 @@ from nexusmind import (
     KnowledgeCollectionLimitError,
     KnowledgeCollectionLimits,
     KnowledgeSearchResult,
+    KnowledgeSearchResolutionError,
     KnowledgeSnapshotError,
     KnowledgeSource,
     KnowledgeSyncResult,
+    SearchHit,
     TextChunker,
 )
 
@@ -79,6 +81,26 @@ class MutatingMetadataChunker:
         return self._delegate.chunk(document)
 
 
+class HostileIndex:
+    def __init__(self, returned: object) -> None:
+        self.returned = returned
+
+    def add(self, chunks: tuple[Chunk, ...]) -> None:
+        pass
+
+    def replace_document(self, document_id: str, chunks: tuple[Chunk, ...]) -> None:
+        pass
+
+    def remove_document(self, document_id: str) -> None:
+        pass
+
+    def search(self, query: str, *, limit: int = 10) -> object:
+        return self.returned
+
+    def clone(self) -> "HostileIndex":
+        return HostileIndex(self.returned)
+
+
 def test_first_sync_indexes_one_document_and_returns_summary() -> None:
     document = _document("docs", "a.txt", "checkpoint resume")
     collection = KnowledgeCollection()
@@ -115,6 +137,69 @@ def test_search_resolves_ordered_hits_to_canonical_source_and_document() -> None
 
 def test_resolved_search_returns_empty_tuple_for_no_hits() -> None:
     assert KnowledgeCollection().search("missing") == ()
+
+
+def test_resolved_search_metadata_cannot_mutate_canonical_state() -> None:
+    source = KnowledgeSource(
+        source_id="docs",
+        source_type="fake",
+        display_name="Docs",
+        metadata={"owner": "canonical"},
+    )
+    document = Document(
+        source_id="docs",
+        logical_path="a.txt",
+        content="searchable",
+        metadata={"tag": "canonical"},
+    )
+
+    class MetadataAdapter(FakeAdapter):
+        def source(self) -> KnowledgeSource:
+            return source
+
+    collection = KnowledgeCollection()
+    collection.sync(MetadataAdapter("docs", (document,)))
+
+    first = collection.search("searchable")[0]
+    first.source.metadata["owner"] = "caller"
+    first.document.metadata["tag"] = "caller"
+
+    second = collection.search("searchable")[0]
+    assert second.source.metadata == {"owner": "canonical"}
+    assert second.document.metadata == {"tag": "canonical"}
+
+
+@pytest.mark.parametrize(
+    "returned, message",
+    [
+        ([], "tuple"),
+        ((object(),), "SearchHit"),
+        ((SearchHit(chunk=object(), score=1, matched_terms=("term",)),), "Chunk"),
+        (
+            (
+                SearchHit(
+                    chunk=Chunk(
+                        document_id="ghost",
+                        chunk_id="ghost-0",
+                        content="term",
+                        start_offset=0,
+                        end_offset=4,
+                    ),
+                    score=1,
+                    matched_terms=("term",),
+                ),
+            ),
+            "unknown document_id",
+        ),
+    ],
+)
+def test_resolved_search_rejects_malformed_or_ghost_backend_hits(
+    returned: object, message: str
+) -> None:
+    collection = KnowledgeCollection(index_factory=lambda: HostileIndex(returned))  # type: ignore[arg-type]
+
+    with pytest.raises(KnowledgeSearchResolutionError, match=message):
+        collection.search("term")
 
 
 def test_sync_detaches_committed_state_from_adapter_objects() -> None:
@@ -271,7 +356,9 @@ def test_refresh_adds_changes_preserves_and_removes_documents() -> None:
     assert result == KnowledgeSyncResult("docs", 1, 1, 1, 1, 2)
     assert collection.search("old") == ()
     assert collection.search("removed") == ()
-    assert collection.search("new")
+    changed_result = collection.search("new")[0]
+    assert changed_result.document == new_changed
+    assert changed_result.hit.chunk.content == "new value"
     assert collection.search("added")
     assert collection.search("same")
 

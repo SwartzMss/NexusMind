@@ -217,8 +217,19 @@ class KnowledgeCollection:
         del self._sources[source_id]
 
     def search(self, query: str, *, limit: int = 10) -> tuple[KnowledgeSearchResult, ...]:
+        hits = self._index.search(query, limit=limit)
+        if type(hits) is not tuple:
+            raise KnowledgeSearchResolutionError("index search result must be a tuple")
         results: list[KnowledgeSearchResult] = []
-        for hit in self._index.search(query, limit=limit):
+        for hit in hits:
+            if not isinstance(hit, SearchHit):
+                raise KnowledgeSearchResolutionError(
+                    "index search result must contain only SearchHit values"
+                )
+            if not isinstance(hit.chunk, Chunk):
+                raise KnowledgeSearchResolutionError(
+                    "SearchHit must contain a Chunk"
+                )
             document = next(
                 (
                     documents[hit.chunk.document_id]
