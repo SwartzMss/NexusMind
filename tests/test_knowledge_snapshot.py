@@ -10,7 +10,9 @@ from nexusmind import (
     ChunkIndexLimitError,
     ChunkIndexLimits,
     Document,
+    EmbeddingVector,
     InMemoryChunkIndex,
+    InMemorySemanticChunkIndex,
     KnowledgeCollection,
     KnowledgeCollectionLimitError,
     KnowledgeCollectionLimits,
@@ -22,6 +24,19 @@ from nexusmind import (
     TextChunker,
     WhitespaceLexicalAnalyzer,
 )
+
+
+class _SnapshotSemanticProvider:
+    def __init__(self, document_vector: tuple[float, ...]) -> None:
+        self.document_vector = document_vector
+        self.document_calls: list[tuple[str, ...]] = []
+
+    def embed_documents(self, texts: tuple[str, ...]) -> tuple[EmbeddingVector, ...]:
+        self.document_calls.append(texts)
+        return tuple(EmbeddingVector(self.document_vector) for _ in texts)
+
+    def embed_query(self, text: str) -> EmbeddingVector:
+        return EmbeddingVector(self.document_vector)
 
 
 def _document(source_id: str, logical_path: str, content: str) -> Document:
@@ -87,6 +102,25 @@ def test_empty_collection_snapshot_is_stable_and_restorable() -> None:
     assert snapshot == KnowledgeSnapshot(sources=(), documents=())
     assert collection.snapshot() == snapshot
     assert collection.restore(snapshot) == KnowledgeRestoreResult(0, 0, 0)
+
+
+def test_semantic_restore_reembeds_with_current_runtime_provider() -> None:
+    snapshot = KnowledgeSnapshot(
+        sources=(_source("docs"),),
+        documents=(_document("docs", "semantic.md", "canonical semantic content"),),
+    )
+    provider = _SnapshotSemanticProvider((0.0, 1.0))
+    collection = KnowledgeCollection(
+        index_factory=lambda: InMemorySemanticChunkIndex(embedding_provider=provider)
+    )
+
+    result = collection.restore(snapshot)
+
+    assert result == KnowledgeRestoreResult(1, 1, 1)
+    assert provider.document_calls == [("canonical semantic content",)]
+    hit = collection.search("concept")[0]
+    assert hit.document == snapshot.documents[0]
+    assert hit.hit.chunk.content == snapshot.documents[0].content
 
 
 def test_snapshot_exports_multiple_sources_and_documents_in_identity_order() -> None:

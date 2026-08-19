@@ -11,7 +11,9 @@ from nexusmind import (
     ChunkIndexLimitError,
     ChunkIndexLimits,
     Document,
+    EmbeddingVector,
     InMemoryChunkIndex,
+    InMemorySemanticChunkIndex,
     KnowledgeCollection,
     KnowledgeCollectionLimitError,
     KnowledgeCollectionLimits,
@@ -21,8 +23,22 @@ from nexusmind import (
     KnowledgeSource,
     KnowledgeSyncResult,
     SearchHit,
+    SemanticEmbeddingError,
     TextChunker,
 )
+
+
+class _CollectionSemanticProvider:
+    def __init__(self) -> None:
+        self.fail_documents = False
+
+    def embed_documents(self, texts: tuple[str, ...]) -> tuple[EmbeddingVector, ...]:
+        if self.fail_documents:
+            raise RuntimeError("private provider failure")
+        return tuple(EmbeddingVector((1.0, 0.0)) for _ in texts)
+
+    def embed_query(self, text: str) -> EmbeddingVector:
+        return EmbeddingVector((1.0, 0.0))
 
 
 def _document(source_id: str, logical_path: str, content: str) -> Document:
@@ -109,6 +125,27 @@ def test_first_sync_indexes_one_document_and_returns_summary() -> None:
 
     assert result == KnowledgeSyncResult("docs", 1, 0, 0, 0, 1)
     assert collection.search("checkpoint")[0].hit.chunk.document_id == document.document_id
+
+
+def test_semantic_sync_failure_preserves_canonical_and_search_state() -> None:
+    provider = _CollectionSemanticProvider()
+    collection = KnowledgeCollection(
+        index_factory=lambda: InMemorySemanticChunkIndex(embedding_provider=provider)
+    )
+    original = _document("docs", "a.txt", "original semantic content")
+    collection.sync(FakeAdapter("docs", (original,)))
+    snapshot_before = collection.snapshot()
+    results_before = collection.search("concept")
+    provider.fail_documents = True
+
+    with pytest.raises(SemanticEmbeddingError, match="document embedding failed"):
+        collection.sync(
+            FakeAdapter("docs", (_document("docs", "a.txt", "changed content"),))
+        )
+
+    provider.fail_documents = False
+    assert collection.snapshot() == snapshot_before
+    assert collection.search("concept") == results_before
 
 
 def test_search_resolves_ordered_hits_to_canonical_source_and_document() -> None:

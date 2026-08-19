@@ -8,6 +8,8 @@ import pytest
 
 from nexusmind import (
     Document,
+    EmbeddingVector,
+    InMemorySemanticChunkIndex,
     KnowledgeCollection,
     KnowledgeSnapshot,
     KnowledgeSnapshotStore,
@@ -15,6 +17,14 @@ from nexusmind import (
     KnowledgeSource,
     SQLiteKnowledgeSnapshotStore,
 )
+
+
+class _StoreSemanticProvider:
+    def embed_documents(self, texts: tuple[str, ...]) -> tuple[EmbeddingVector, ...]:
+        return tuple(EmbeddingVector((1.0, 0.0)) for _ in texts)
+
+    def embed_query(self, text: str) -> EmbeddingVector:
+        return EmbeddingVector((1.0, 0.0))
 
 
 def _source(source_id: str, *, metadata: dict | None = None) -> KnowledgeSource:
@@ -62,6 +72,25 @@ def test_save_and_load_empty_snapshot(tmp_path) -> None:
     store.save(KnowledgeSnapshot((), ()))
 
     assert store.load() == KnowledgeSnapshot((), ())
+
+
+def test_sqlite_restart_restores_canonical_state_and_rebuilds_embeddings(tmp_path) -> None:
+    path = tmp_path / "semantic.db"
+    snapshot = _snapshot("docs", "semantic restart content")
+    SQLiteKnowledgeSnapshotStore(path).save(snapshot)
+
+    loaded = SQLiteKnowledgeSnapshotStore(path).load()
+    collection = KnowledgeCollection(
+        index_factory=lambda: InMemorySemanticChunkIndex(
+            embedding_provider=_StoreSemanticProvider()
+        )
+    )
+    collection.restore(loaded)
+
+    assert collection.snapshot() == snapshot
+    result = collection.search("meaning")[0]
+    assert result.document == snapshot.documents[0]
+    assert result.hit.chunk.content == snapshot.documents[0].content
 
 
 def test_load_reads_one_committed_point_in_time_during_concurrent_save(tmp_path) -> None:
