@@ -15,6 +15,13 @@ from .knowledge import (
     KnowledgeSourceType,
     compute_content_hash,
 )
+from .hybrid_retrieval import (
+    HybridBackendCoherenceError,
+    HybridChunkIndex,
+    HybridChunkIndexError,
+    HybridChunkIndexLimitError,
+    HybridChunkIndexLimits,
+)
 from .knowledge_chunking import Chunk, ChunkLimitError, TextChunker
 from .knowledge_collection import (
     CloneableChunkIndex,
@@ -115,6 +122,11 @@ __all__ = [
     "EmbeddingVector",
     "OpenAICompatibleEmbeddingProvider",
     "InMemoryChunkIndex",
+    "HybridBackendCoherenceError",
+    "HybridChunkIndex",
+    "HybridChunkIndexError",
+    "HybridChunkIndexLimitError",
+    "HybridChunkIndexLimits",
     "InMemorySemanticChunkIndex",
     "KnowledgeSource",
     "KnowledgeSourceType",
