@@ -28,6 +28,10 @@ class ChunkIndexLimitError(ChunkIndexError):
     """An index mutation or query exceeds a configured resource bound."""
 
 
+class LexicalAnalysisError(ChunkIndexError):
+    """A configured lexical analyzer failed or returned invalid output."""
+
+
 class ChunkIdentityConflictError(ChunkIndexError):
     """A chunk ID was reused for different chunk data."""
 
@@ -137,7 +141,11 @@ class InMemoryChunkIndex:
         )
 
     def clone(self) -> "InMemoryChunkIndex":
-        """Return an independent index with the same limits and state."""
+        """Return an independent index with the same limits and state.
+
+        Analyzer configuration is immutable runtime configuration and is shared
+        between the original and clone. All mutable index data is copied.
+        """
 
         clone = InMemoryChunkIndex(limits=self._limits, analyzer=self._analyzer)
         clone._chunks = self._chunks.copy()
@@ -291,12 +299,15 @@ class InMemoryChunkIndex:
         return term_frequencies, token_counts, document_frequencies, total_tokens
 
     def _analyze(self, text: str) -> tuple[str, ...]:
-        tokens = self._analyzer.analyze(text)
-        if type(tokens) is not tuple:
-            raise TypeError("analyzer must return an exact tuple")
-        if any(type(token) is not str or token == "" for token in tokens):
-            raise TypeError("analyzer must return non-empty exact str tokens")
-        return tuple(tokens)
+        try:
+            tokens = self._analyzer.analyze(text)
+            if type(tokens) is not tuple:
+                raise TypeError("analyzer must return an exact tuple")
+            if any(type(token) is not str or token == "" for token in tokens):
+                raise TypeError("analyzer must return non-empty exact str tokens")
+            return tuple(tokens)
+        except Exception as error:
+            raise LexicalAnalysisError("lexical analysis failed") from error
 
     def _commit_candidate(
         self,
@@ -366,5 +377,6 @@ __all__ = [
     "ChunkIndexLimits",
     "DocumentReplacementError",
     "InMemoryChunkIndex",
+    "LexicalAnalysisError",
     "SearchHit",
 ]

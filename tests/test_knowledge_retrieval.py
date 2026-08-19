@@ -12,6 +12,7 @@ from nexusmind import (
     ChunkIndexLimits,
     DocumentReplacementError,
     InMemoryChunkIndex,
+    LexicalAnalysisError,
     LexicalAnalyzer,
     SearchHit,
     WhitespaceLexicalAnalyzer,
@@ -137,11 +138,74 @@ def test_malformed_analyzer_output_is_rejected_at_each_use_path(
 
     index = InMemoryChunkIndex(analyzer=MalformedAnalyzer())
 
-    with pytest.raises(TypeError, match="analyzer must return"):
+    with pytest.raises(LexicalAnalysisError, match="lexical analysis failed"):
         if path == "corpus":
             index.add((_chunk("one", "source"),))
         else:
             index.search("query")
+
+
+def test_analyzer_exception_is_controlled_for_search() -> None:
+    class FailingAnalyzer:
+        def analyze(self, text: str) -> tuple[str, ...]:
+            raise RuntimeError(f"secret input: {text}")
+
+    index = InMemoryChunkIndex(analyzer=FailingAnalyzer())
+
+    with pytest.raises(LexicalAnalysisError, match="^lexical analysis failed$") as caught:
+        index.search("private query")
+
+    assert isinstance(caught.value.__cause__, RuntimeError)
+    assert "private query" not in str(caught.value)
+
+
+def test_failed_analyzed_add_and_replacement_leave_index_state_unchanged() -> None:
+    class SelectiveAnalyzer:
+        def analyze(self, text: str) -> tuple[str, ...]:
+            if "broken" in text:
+                raise RuntimeError("analyzer internals include broken content")
+            return tuple(text.split())
+
+    old = _chunk("old", "stable term", "doc-1")
+    retained = _chunk("retained", "term filler", "doc-2")
+    index = InMemoryChunkIndex(analyzer=SelectiveAnalyzer())
+    index.add((old, retained))
+    before = index.search("term")
+
+    with pytest.raises(LexicalAnalysisError):
+        index.add((_chunk("broken-add", "broken new", "doc-3"),))
+    assert index.search("term") == before
+    assert index.search("new") == ()
+
+    with pytest.raises(LexicalAnalysisError):
+        index.replace_document("doc-1", (_chunk("replacement", "broken replacement", "doc-1"),))
+    assert index.search("term") == before
+    assert index.search("replacement") == ()
+    assert index.search("stable")[0].chunk == old
+
+
+def test_malformed_analyzer_output_during_add_leaves_index_state_unchanged() -> None:
+    class MutableAnalyzer:
+        malformed = False
+
+        def analyze(self, text: str) -> tuple[str, ...]:
+            if self.malformed:
+                return [text]  # type: ignore[return-value]
+            return tuple(text.split())
+
+    analyzer = MutableAnalyzer()
+    old = _chunk("old", "stable term")
+    index = InMemoryChunkIndex(analyzer=analyzer)
+    index.add((old,))
+    before = index.search("term")
+    analyzer.malformed = True
+
+    with pytest.raises(LexicalAnalysisError):
+        index.add((_chunk("new", "new term", "doc-2"),))
+
+    analyzer.malformed = False
+    assert index.search("term") == before
+    assert index.search("new") == ()
 
 
 def test_repeated_term_frequency_increases_score_at_equal_length() -> None:
@@ -263,7 +327,7 @@ def test_exact_duplicate_add_is_idempotent() -> None:
 
 
 def test_clone_has_independent_mutable_state() -> None:
-    original = InMemoryChunkIndex()
+    original = InMemoryChunkIndex(analyzer=WhitespaceLexicalAnalyzer())
     original.add((_chunk("chunk-1", "original"),))
 
     clone = original.clone()
@@ -274,6 +338,23 @@ def test_clone_has_independent_mutable_state() -> None:
     assert original.search("changed") == ()
     assert clone.search("original") == ()
     assert clone.search("changed")
+
+
+def test_clone_preserves_falsey_configured_analyzer() -> None:
+    class FalseyAnalyzer:
+        def __bool__(self) -> bool:
+            return False
+
+        def analyze(self, text: str) -> tuple[str, ...]:
+            return ("mapped",) if text else ()
+
+    analyzer = FalseyAnalyzer()
+    original = InMemoryChunkIndex(analyzer=analyzer)
+    original.add((_chunk("chunk-1", "source"),))
+
+    clone = original.clone()
+
+    assert clone.search("query") == original.search("query")
 
 
 def test_conflicting_chunk_id_is_rejected_without_mutation() -> None:

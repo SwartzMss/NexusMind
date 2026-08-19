@@ -30,6 +30,7 @@ from .knowledge_retrieval import (
     ChunkIndexLimits,
     DocumentReplacementError,
     InMemoryChunkIndex,
+    LexicalAnalysisError,
     SearchHit,
 )
 from .knowledge_store import (
@@ -125,6 +126,7 @@ __all__ = [
     "LocalFileAdapter",
     "LocalIngestionLimits",
     "LexicalAnalyzer",
+    "LexicalAnalysisError",
     "PathEscapeError",
     "RetrievalEvaluationCase",
     "RetrievalEvaluationCaseResult",
