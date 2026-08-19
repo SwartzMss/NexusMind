@@ -7,7 +7,7 @@
     },
     {
       "case_id": "trustzone-monitor",
-      "query": "secure monitor trusted firmware",
+      "query": "isolating privileged execution from ordinary applications",
       "relevant_documents": [{"source_id": "eval-corpus", "logical_path": "trustzone.md"}]
     },
     {
@@ -17,7 +17,7 @@
     },
     {
       "case_id": "qnx-message-passing",
-      "query": "synchronous message passing priority inheritance",
+      "query": "low latency services exchange requests outside a shared kernel",
       "relevant_documents": [{"source_id": "eval-corpus", "logical_path": "qnx.md"}]
     },
     {
@@ -27,7 +27,7 @@
     },
     {
       "case_id": "android-runtime",
-      "query": "Zygote ART ActivityManager",
+      "query": "how applications communicate across process boundaries",
       "relevant_documents": [{"source_id": "eval-corpus", "logical_path": "android.md"}]
     },
     {
@@ -37,7 +37,7 @@
     },
     {
       "case_id": "cryptography-derivation-signature",
-      "query": "HKDF key derivation Ed25519 signature",
+      "query": "derive independent cryptographic keys from existing key material",
       "relevant_documents": [{"source_id": "eval-corpus", "logical_path": "cryptography.md"}]
     },
     {
@@ -47,12 +47,12 @@
     },
     {
       "case_id": "retrieval-metrics",
-      "query": "Hit Recall reciprocal rank relevance",
+      "query": "measure whether search finds all useful sources early",
       "relevant_documents": [{"source_id": "eval-corpus", "logical_path": "retrieval.md"}]
     },
     {
       "case_id": "isolation-boundaries",
-      "query": "isolation application sandbox security",
+      "query": "separating privileged execution from normal applications",
       "relevant_documents": [
         {"source_id": "eval-corpus", "logical_path": "trustzone.md"},
         {"source_id": "eval-corpus", "logical_path": "android.md"}
@@ -60,7 +60,7 @@
     },
     {
       "case_id": "interprocess-communication",
-      "query": "processes service IPC message",
+      "query": "secure communication between isolated processes",
       "relevant_documents": [
         {"source_id": "eval-corpus", "logical_path": "qnx.md"},
         {"source_id": "eval-corpus", "logical_path": "android.md"}
@@ -73,7 +73,7 @@
     },
     {
       "case_id": "key-protection",
-      "query": "protect keys authenticated security",
+      "query": "safeguarding secrets inside privileged environments",
       "relevant_documents": [
         {"source_id": "eval-corpus", "logical_path": "trustzone.md"},
         {"source_id": "eval-corpus", "logical_path": "cryptography.md"}
@@ -81,7 +81,7 @@
     },
     {
       "case_id": "offline-regression",
-      "query": "offline baseline retrieval regressions",
+      "query": "compare search quality changes without online services",
       "relevant_documents": [{"source_id": "eval-corpus", "logical_path": "retrieval.md"}]
     }
   ]

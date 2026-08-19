@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from .knowledge_collection import KnowledgeCollection
+from .knowledge_retrieval import ChunkIndexLimitError
 
 
 class RetrievalEvaluationError(Exception):
@@ -183,7 +184,12 @@ def evaluate_retrieval(
 
     case_results: list[RetrievalEvaluationCaseResult] = []
     for case in cases:
-        search_results = collection.search(case.query, limit=k)
+        try:
+            search_results = collection.search(case.query, limit=k)
+        except ChunkIndexLimitError as exc:
+            raise RetrievalEvaluationError(
+                "k exceeds retrieval backend result limit"
+            ) from exc
         returned_targets = tuple(
             RetrievalTarget(result.source.source_id, result.document.logical_path)
             for result in search_results

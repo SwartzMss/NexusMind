@@ -25,9 +25,9 @@ Relevance identity is the canonical Document pair `(source_id, logical_path)`. R
 
 | Metric | Value |
 |---|---:|
-| Hit@5 | 1.000000 |
-| Recall@5 | 1.000000 |
-| MRR@5 | 1.000000 |
+| Hit@5 | 0.933333 |
+| Recall@5 | 0.933333 |
+| MRR@5 | 0.822222 |
 
 ## Reproduce
 
@@ -37,8 +37,8 @@ From the repository root:
 PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_retrieval_evaluation_baseline.py -vv
 ```
 
-The test ingests the checked-in corpus through the real local adapter, synchronizes a `KnowledgeCollection`, rebuilds the BM25 index, resolves canonical provenance, loads the strict JSON labels, evaluates twice, and asserts identical reports and the metrics above. It requires no network, model, generated labels, or external data.
+The test ingests the checked-in corpus through the real local adapter, synchronizes a `KnowledgeCollection`, rebuilds the BM25 index, resolves canonical provenance, loads the strict JSON labels, and asserts identical repeated reports with bounded metrics. It deliberately does not hard-code the values above as CI quality thresholds. The run requires no network, model, generated labels, or external data.
 
 ## Limitations
 
-The corpus is intentionally small and technical, the relevance judgments are authored for regression coverage, and `k=5` is the only recorded cutoff. Perfect initial scores do not imply general retrieval quality. Future retrieval changes should first report movement against this baseline; BM25 parameters, analyzer behavior, chunking, and labels must not be silently tuned merely to preserve or improve these numbers.
+The corpus is intentionally small and technical, the relevance judgments are authored for regression coverage, and `k=5` is the only recorded cutoff. Several paraphrase and distractor-overlap cases intentionally expose lexical misses and later-ranked relevant chunks, leaving room to measure future retrieval improvements. Future changes should report movement against this baseline; a separate policy must define any eventual quality gate. BM25 parameters, analyzer behavior, chunking, and labels must not be silently tuned merely to preserve or improve these numbers.

@@ -143,13 +143,13 @@ def test_checked_in_retrieval_baseline_is_deterministic() -> None:
     assert len(first.case_results) == len(cases)
 ```
 
-Also assert every label resolves and returned metrics equal constants recorded after the first measured run.
+Also assert every label resolves, all metrics are within `[0.0, 1.0]`, and every case produces diagnostics. Record measured values only in `baseline.md`, not as CI thresholds.
 
 - [ ] **Step 3: Run baseline to obtain deterministic metrics**
 
 Run: `PYTHONPATH=src /home/swartz/WorkSpace/NexusMind/.venv/bin/python -m pytest -q tests/test_retrieval_evaluation_baseline.py -vv`
 
-Expected: initial failure only at deliberately impossible sentinel metric expectations (`-1.0`); capture the report values without changing retrieval/chunker behavior, then replace the sentinels with those exact measured values using `pytest.approx()`.
+Expected: the integration path passes deterministically. Print or inspect the report once to capture its aggregate values without changing retrieval/chunker behavior, then record those values in `baseline.md` only.
 
 - [ ] **Step 4: Re-run baseline and focused evaluation tests**
 

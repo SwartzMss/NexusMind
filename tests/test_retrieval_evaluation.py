@@ -6,6 +6,7 @@ import pytest
 
 from nexusmind import (
     Chunk,
+    ChunkIndexLimitError,
     Document,
     KnowledgeSearchResult,
     KnowledgeSnapshot,
@@ -186,3 +187,20 @@ def test_same_input_produces_equal_reports() -> None:
     assert evaluate_retrieval(collection, (case,)) == evaluate_retrieval(  # type: ignore[arg-type]
         collection, (case,)
     )
+
+
+def test_backend_result_limit_is_reported_as_evaluation_error() -> None:
+    document = _document("source", "doc.md")
+    target = RetrievalTarget("source", "doc.md")
+    case = RetrievalEvaluationCase("case", "query", (target,))
+
+    class LimitedCollection(FakeCollection):
+        def search(self, query: str, *, limit: int = 10):
+            raise ChunkIndexLimitError("limit exceeds max_results")
+
+    collection = LimitedCollection((document,), {})
+
+    with pytest.raises(
+        RetrievalEvaluationError, match="k exceeds retrieval backend result limit"
+    ):
+        evaluate_retrieval(collection, (case,), k=101)  # type: ignore[arg-type]

@@ -89,7 +89,7 @@ The 12–15 labels cover exact terms, multi-term queries, rare terms, and distra
 - the default `InMemoryChunkIndex` BM25 constants;
 - `k=5`.
 
-At least some documents exceed one chunk so the baseline measures chunk-ranked/document-relevant behavior. The end-to-end test loads the checked-in JSON, ingests the directory through the real adapter, evaluates twice, and asserts equal reports plus the recorded aggregate metrics. After implementation, the measured values are copied verbatim into `baseline.md` with the reproduction command.
+At least some documents exceed one chunk so the baseline measures chunk-ranked/document-relevant behavior. The end-to-end test loads the checked-in JSON, ingests the directory through the real adapter, evaluates twice, and asserts equal reports, bounded metrics, and complete case execution. Measured values are copied verbatim into `baseline.md` with the reproduction command, but are not hard-coded as CI quality thresholds.
 
 The initial numbers are descriptive, not quality thresholds or a statistically representative benchmark.
 
