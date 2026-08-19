@@ -61,6 +61,33 @@ score(q, D) = sum over distinct matched query terms:
 
 `SearchHit.score` 是有限非负 float，结果按 score 降序、`chunk_id` 升序稳定排序。Query 的 `max_query_chars` 先于 analysis 检查；`max_query_terms` 和 `max_query_analyzed_chars` 则应用于 analyzer 返回的原始词项流，在按首次出现顺序去重之前分别限制词项数和词项字符总数，因此重复输入和 analyzer 放大都不能绕过上限。候选 corpus 还受 `max_total_analyzed_tokens` 和 `max_total_analyzed_token_chars` 的全局上限约束；默认值分别是 10,000,000 和 200,000,000，后者为默认内容字符上限的 20 倍，为 NFKC/casefold 扩展保留有界余量；查询 analyzed 字符默认上限同样是输入字符上限的 20 倍，即 20,480。Custom analyzer 在返回前的内部分配不受索引控制；返回值经严格类型验证后，会在保留 corpus 统计或进入 query 评分前执行这些上限。Analyzer 选择是未持久化的 runtime configuration；analyzed tokens、TF、chunk frequency、token length 和平均 chunk length 是未持久化的 derived runtime state。Add/replace/remove 会在候选 corpus 上重建统计并原子交换，restore 则从 canonical Documents 重新分块，并使用当前 collection/index 配置的 analyzer 重建 derived state。Snapshot 和 SQLite 都不保存 analyzer、tokens 或 postings。
 
+同一 `ChunkIndex` 契约现在也可由 `InMemorySemanticChunkIndex` 实现。语义路径通过同步、provider-neutral 的 `EmbeddingProvider` 明确区分批量 `embed_documents()` 与单条 `embed_query()`；`EmbeddingVector` 是经过校验的不可变 finite、non-zero float tuple。内置 `OpenAICompatibleEmbeddingProvider` 调用同步 `/v1/embeddings` HTTP 接口，支持注入 transport 以便离线测试。同步调用意味着 `sync()` / `restore()` 会承担文档 embedding 的网络延迟和费用，`search()` 会承担 query embedding 的延迟和费用。
+
+```python
+from nexusmind import (
+    InMemorySemanticChunkIndex,
+    KnowledgeCollection,
+    OpenAICompatibleEmbeddingProvider,
+)
+
+provider = OpenAICompatibleEmbeddingProvider(
+    base_url="https://api.example.com/v1",
+    api_key="...",
+    model="text-embedding-model",
+)
+collection = KnowledgeCollection(
+    index_factory=lambda: InMemorySemanticChunkIndex(
+        embedding_provider=provider,
+    )
+)
+```
+
+语义 index 在进程内对全部 chunks 做有界 brute-force cosine 排序，score 范围为 `[-1.0, 1.0]`，按 score 降序、`chunk_id` 升序稳定返回；负分和零分候选不会被静默丢弃，`matched_terms` 固定为空。Cosine 与 BM25 是 backend-specific 分数，不能直接跨 backend 比较。首个非空 commit 固定 vector dimension；显式移除到空状态后才允许建立新维度。Chunk 数、内容字符、batch、dimension、保留的 vector values、query 字符和结果数均有显式上限。Add/replace 在 provider 调用和完整候选校验成功后才交换状态，remove 不调用 provider。
+
+Custom `EmbeddingProvider` 必须可安全地在 index clones 之间共享；`InMemorySemanticChunkIndex.clone()` 共享同一个 provider instance 和不可变 limits，只复制 chunks、vectors、ownership 与 accounting 等可变状态。Provider 配置属于未持久化的 runtime configuration，vectors 属于未持久化的 derived state。Snapshot / SQLite 不保存 provider 或 embedding；restore/restart 会使用当前 provider 重新 embedding，因此可能产生远程费用、延迟以及模型版本漂移。持久化 embedding/cache、ANN、hybrid fusion、reranking 和 RAG 不在当前范围内。
+
+离线语义 fixture、固定配置、复现命令和描述性 Hit@3 / Recall@3 / MRR 位于 [`evals/knowledge/semantic/`](evals/knowledge/semantic/)。它通过真实 ingestion -> collection -> semantic index -> provenance -> evaluator 路径运行，使用固定概念向量验证接线，而不是评估外部 embedding 模型质量，也不是 release gate。
+
 `retrieval_evaluation` 提供确定性的离线 Hit@K、Recall@K 和 MRR 评估，ground truth 使用 canonical Document `(source_id, logical_path)`，同时保留实际 chunk 排名和重复 document hits 作为诊断信息。首个原创 corpus、15 个显式 labels、固定配置、previous whitespace 与 current Unicode/CJK 指标及复现命令见 [`evals/knowledge/baseline.md`](evals/knowledge/baseline.md)；当前 baseline 显式配置 `UnicodeCJKLexicalAnalyzer`，不依赖未来可能变化的 index 默认值。该 baseline 通过真实 LocalDirectoryAdapter -> KnowledgeCollection -> BM25 -> provenance 路径运行，不是 release gate 或公共 benchmark。
 
 CJK analyzer 对比评估的语料、labels、固定配置、复现命令和当前 Hit@3 / Recall@3 / MRR 位于 [`evals/knowledge/cjk/`](evals/knowledge/cjk/)。它使用 7 份原创文档（包含刻意加入的近邻文档与排名余量）和 10 个文档相关性 cases，通过真实 ingestion -> collection -> BM25 -> provenance -> evaluator 路径比较两种 analyzer。记录值只是 descriptive、non-gate 指标，测试检查确定性、范围、fixture coverage、定性改进和非饱和 MRR，不将精确指标锁定为 CI 质量门槛。
@@ -69,7 +96,7 @@ CJK analyzer 对比评估的语料、labels、固定配置、复现命令和当�
 
 `ChunkIndex.search()` 返回 retrieval-layer `SearchHit`，只描述匹配 Chunk、分数和命中词。`KnowledgeCollection.search()` 会按 backend 原始顺序把每个 hit 的 `document_id` 解析到当前已提交的 canonical `Document` 和所属 `KnowledgeSource`，并验证 Chunk offsets 合法且内容等于 canonical Document 的对应字符切片，然后返回 `KnowledgeSearchResult(source, document, hit)`；Source 和 Document 是深拷贝，调用方修改嵌套 metadata 不会影响 collection 状态。无法解析的 ghost/malformed/stale hit 会以受控的 `KnowledgeSearchResolutionError` fail closed，不会伪造 provenance 或返回部分结果。
 
-collection 和 index 仍只存在于当前进程；canonical source/document snapshot 可由显式 store 保存并在重启后加载，但 derived Chunk/Index 会重新构建。该实现不是语义搜索，也尚未连接 embedding、向量数据库、持久化 retrieval index 或 RAG/LLM 答案生成。`ChunkIndex` 契约用于允许未来后端替换当前实现。
+collection 和 index 仍只存在于当前进程；canonical source/document snapshot 可由显式 store 保存并在重启后加载，但 derived Chunk/Index（包括语义 vectors）会重新构建。当前没有向量数据库、持久化 retrieval index、hybrid retrieval 或 RAG/LLM 答案生成。
 
 `KnowledgeCollection.snapshot()` 可按稳定 identity 顺序导出 frozen container 形式的 `KnowledgeSnapshot`，其中包含与 collection 内部状态脱离的 canonical `KnowledgeSource` / `Document` 副本；嵌套 metadata 仍是普通可变 mapping，因此它不是递归 deep-immutable 对象。`restore()` 把 snapshot 视为完整 authoritative replacement，先验证 source/document 图和 collection limits，再使用当前 chunker 与 `index_factory` 创建的全新空 index 重建所有 derived `Chunk` / retrieval state，全部成功后才原子交换 collection 状态。Snapshot 不包含 Chunk、Index 或 SearchHit；使用不同 chunker 或 retrieval backend 恢复同一 canonical snapshot 时，可以得到不同的 derived state。
 
@@ -86,7 +113,7 @@ KnowledgeSnapshot
     -> KnowledgeSearchResult[]
 ```
 
-`KnowledgeSnapshot` 本身是进程内导出/恢复契约，不是 JSON、文件或数据库 schema；只有通过 snapshot store 显式保存后才能跨进程保留。文件序列化、schema migration、semantic retrieval、embedding 和 RAG 仍属于未来工作。
+`KnowledgeSnapshot` 本身是进程内导出/恢复契约，不是 JSON、文件或数据库 schema；只有通过 snapshot store 显式保存后才能跨进程保留。Embedding 配置和 vectors 不属于 snapshot；持久化 semantic index 和 RAG 仍属于未来工作。
 
 `KnowledgeSnapshotStore` 是 snapshot 与持久化 backend 之间的 source-neutral 边界。首个 `SQLiteKnowledgeSnapshotStore` 使用显式 `save()` / `load()` 保存一个完整 authoritative snapshot；save 在 SQLite transaction 中全量替换旧 Source/Document rows，失败会回滚到先前 snapshot。V1 schema 只保存 canonical `KnowledgeSource` / `Document` 字段、严格 JSON-compatible metadata 和最小 schema version，不保存 Chunk、Index、SearchHit、FTS postings 或 embedding。加载后仍必须调用 `KnowledgeCollection.restore()`，使用当前 chunker 和 fresh index 重建 derived retrieval state。
 
@@ -106,7 +133,7 @@ SQLite
     -> search
 ```
 
-保存由调用方显式触发；当前没有 autosave、watcher、增量持久化或多进程 writer orchestration。SQLite 是第一个可替换 backend，不属于核心 Knowledge model；FTS、semantic retrieval、embedding、vector database 和 RAG 仍是未来工作。
+保存由调用方显式触发；当前没有 autosave、watcher、增量持久化或多进程 writer orchestration。SQLite 是第一个可替换 backend，不属于核心 Knowledge model；FTS、持久化 embedding、vector database、hybrid retrieval 和 RAG 仍是未来工作。
 
 ```text
 External Source
@@ -122,14 +149,14 @@ External Source
 ```text
 Knowledge Ingestion -> KnowledgeSource -> Document
 Knowledge Chunking                           -> Chunk
-Knowledge Index / Retrieval                  -> Lexical Index -> SearchHit[]
+Knowledge Index / Retrieval                  -> Lexical / Semantic Index -> SearchHit[]
 Knowledge Collection                                         -> KnowledgeSearchResult[]
 future                                       -> Persistent Chunk / Index
-                                             -> Semantic Retrieval
+                                             -> Persistent / ANN Retrieval
                                              -> RAG
 ```
 
-这里仅新增 canonical provenance 解析，不增加第二层排序。当前不包含 citation 编号/格式化、token-based / semantic chunking、Embedding、Semantic Retrieval、持久化 Index、query rewriting、reranking、答案生成或 RAG 编排等能力。
+这里不增加第二层排序。当前不包含 citation 编号/格式化、token-based / semantic chunking、持久化 Index、hybrid fusion、query rewriting、reranking、答案生成或 RAG 编排等能力。
 
 执行关系可以概括为：
 
