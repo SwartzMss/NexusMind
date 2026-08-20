@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 from nexusmind.retrieval_benchmark import (
@@ -28,3 +29,28 @@ def test_checked_in_report_matches_generated_output_byte_for_byte() -> None:
     expected = REPORT.read_text(encoding="utf-8")
     actual = render_retrieval_comparison(run_retrieval_benchmark(), DEFAULT_RENDER_CONFIG)
     assert actual == expected
+
+
+def test_diagnostics_include_failures_from_non_first_backend() -> None:
+    report = run_retrieval_benchmark()
+    case_id = report.backend_reports[0].reports_by_k[0].case_results[0].case_id
+    backend_reports = []
+    for backend_index, backend in enumerate(report.backend_reports):
+        reports_by_k = list(backend.reports_by_k)
+        small = reports_by_k[0]
+        case_results = tuple(
+            replace(
+                result,
+                recall_at_k=(0.0 if backend_index == 1 and result.case_id == case_id else 1.0),
+            )
+            for result in small.case_results
+        )
+        reports_by_k[0] = replace(small, case_results=case_results)
+        backend_reports.append(replace(backend, reports_by_k=tuple(reports_by_k)))
+    comparison = replace(report, backend_reports=tuple(backend_reports))
+
+    rendered = render_retrieval_comparison(
+        comparison, replace(DEFAULT_RENDER_CONFIG, max_diagnostics=1)
+    )
+
+    assert f"### case: {case_id}" in rendered

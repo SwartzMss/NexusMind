@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from .knowledge_collection import KnowledgeCollection
-from .knowledge_retrieval import ChunkIndexLimitError
+from .knowledge_retrieval import ChunkIndexError, ChunkIndexLimitError
 
 
 class RetrievalEvaluationError(Exception):
@@ -381,6 +381,10 @@ def evaluate_retrieval_multi_k(
         except ChunkIndexLimitError as exc:
             raise RetrievalEvaluationError(
                 "k exceeds retrieval backend result limit"
+            ) from exc
+        except ChunkIndexError as exc:
+            raise RetrievalEvaluationError(
+                "retrieval backend failed during evaluation"
             ) from exc
         if type(search_results) is not tuple:
             raise RetrievalEvaluationError("retrieval backend must return a tuple")

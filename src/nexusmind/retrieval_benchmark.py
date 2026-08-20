@@ -190,8 +190,11 @@ def render_retrieval_comparison(
     small_results = first_backend.reports_by_k[0].case_results
     selected_ids = [
         result.case_id
-        for result in small_results
-        if result.recall_at_k < 1.0
+        for case_index, result in enumerate(small_results)
+        if any(
+            backend.reports_by_k[0].case_results[case_index].recall_at_k < 1.0
+            for backend in report.backend_reports
+        )
     ][: config.max_diagnostics]
     for case_id in selected_ids:
         reference = next(

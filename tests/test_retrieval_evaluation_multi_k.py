@@ -6,6 +6,7 @@ import pytest
 
 from nexusmind import (
     Chunk,
+    ChunkIndexError,
     Document,
     KnowledgeSearchResult,
     KnowledgeSnapshot,
@@ -115,3 +116,25 @@ def test_multi_k_rejects_invalid_or_unbounded_cutoffs(ks, message: str) -> None:
     )
     with pytest.raises(RetrievalEvaluationError, match=message):
         evaluate_retrieval_multi_k(collection, (case,), ks=ks)
+
+
+def test_multi_k_wraps_source_neutral_backend_errors() -> None:
+    document = _document("a.md")
+    private = ChunkIndexError("private backend detail")
+
+    class _FailingCollection(_Collection):
+        def search(self, query: str, *, limit: int = 10):
+            raise private
+
+    collection = _FailingCollection((document,), ())
+    case = RetrievalEvaluationCase(
+        "case", RetrievalCategory.EXACT_TERM, "query", (RetrievalTarget("source", "a.md"),)
+    )
+
+    with pytest.raises(
+        RetrievalEvaluationError, match="retrieval backend failed during evaluation"
+    ) as caught:
+        evaluate_retrieval_multi_k(collection, (case,), ks=(1, 10))
+
+    assert "private backend detail" not in str(caught.value)
+    assert caught.value.__cause__ is private
