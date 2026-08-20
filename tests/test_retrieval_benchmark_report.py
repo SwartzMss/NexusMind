@@ -3,6 +3,7 @@ from pathlib import Path
 
 from nexusmind.retrieval_benchmark import (
     DEFAULT_RENDER_CONFIG,
+    main,
     render_retrieval_comparison,
     run_retrieval_benchmark,
 )
@@ -26,9 +27,27 @@ def test_renderer_is_stable_and_contains_required_diagnostics() -> None:
 
 
 def test_checked_in_report_matches_generated_output_byte_for_byte() -> None:
-    expected = REPORT.read_text(encoding="utf-8")
-    actual = render_retrieval_comparison(run_retrieval_benchmark(), DEFAULT_RENDER_CONFIG)
+    expected = REPORT.read_bytes()
+    actual = render_retrieval_comparison(
+        run_retrieval_benchmark(), DEFAULT_RENDER_CONFIG
+    ).encode("utf-8")
     assert actual == expected
+
+
+def test_cli_writes_exact_utf8_bytes_without_text_newline_conversion(
+    tmp_path, monkeypatch
+) -> None:
+    output = tmp_path / "benchmark.md"
+
+    def reject_text_write(*args, **kwargs):
+        raise AssertionError("benchmark writer must not use text mode")
+
+    monkeypatch.setattr(Path, "write_text", reject_text_write)
+
+    assert main(("--write", str(output))) == 0
+    assert output.read_bytes() == render_retrieval_comparison(
+        run_retrieval_benchmark(), DEFAULT_RENDER_CONFIG
+    ).encode("utf-8")
 
 
 def test_diagnostics_include_failures_from_non_first_backend() -> None:

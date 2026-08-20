@@ -247,7 +247,7 @@ def main(argv: tuple[str, ...] | None = None) -> int:
     parser.add_argument("--write", type=Path, required=True)
     args = parser.parse_args(argv)
     rendered = render_retrieval_comparison(run_retrieval_benchmark(), DEFAULT_RENDER_CONFIG)
-    args.write.write_text(rendered, encoding="utf-8")
+    args.write.write_bytes(rendered.encode("utf-8"))
     return 0
 
 
