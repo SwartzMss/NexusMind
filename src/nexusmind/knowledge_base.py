@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import closing
 from dataclasses import dataclass
+import errno
 import os
 from pathlib import Path
 import sqlite3
@@ -40,6 +41,17 @@ from .lexical_analysis import UnicodeCJKLexicalAnalyzer
 _MANIFEST_NAME = "manifest.json"
 _DATABASE_NAME = "knowledge.db"
 _SQLITE_HEADER = b"SQLite format 3\x00"
+_UNSUPPORTED_LINK_ERRNOS = frozenset(
+    value
+    for value in (
+        getattr(errno, "ENOSYS", None),
+        getattr(errno, "ENOTSUP", None),
+        getattr(errno, "EOPNOTSUPP", None),
+        getattr(errno, "EPERM", None),
+    )
+    if value is not None
+)
+_WINDOWS_ERROR_NOT_SUPPORTED = 50
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,12 +395,16 @@ class KnowledgeBase:
                 raise KnowledgeBasePersistenceError(
                     "knowledge-base layout ownership changed"
                 )
-            os.link(temporary, final)
-            final_identity = cls._file_identity(final)
-            if final_identity != temporary_identity:
-                raise KnowledgeBasePersistenceError(
-                    "knowledge-base layout ownership changed"
-                )
+            try:
+                os.link(temporary, final)
+            except OSError as exc:
+                if not cls._link_is_unsupported(exc):
+                    raise
+                final_identity = cls._copy_database_no_clobber(temporary, final)
+            else:
+                published[final] = temporary_identity
+                cls._require_identity(final, temporary_identity)
+                final_identity = temporary_identity
             published[final] = final_identity
             cls._rollback_owned_files({temporary: temporary_identity})
             return final_identity
@@ -408,6 +424,49 @@ class KnowledgeBase:
             raise KnowledgeBasePersistenceError(
                 "unable to create canonical knowledge state"
             ) from exc
+
+    @staticmethod
+    def _link_is_unsupported(exc: OSError) -> bool:
+        return (
+            exc.errno in _UNSUPPORTED_LINK_ERRNOS
+            or getattr(exc, "winerror", None) == _WINDOWS_ERROR_NOT_SUPPORTED
+        )
+
+    @classmethod
+    def _copy_database_no_clobber(
+        cls, source: Path, final: Path
+    ) -> tuple[int, int]:
+        descriptor, identity = cls._open_exclusive(final)
+        try:
+            with source.open("rb") as input_stream, os.fdopen(
+                descriptor, "wb"
+            ) as output_stream:
+                descriptor = -1
+                while True:
+                    chunk = input_stream.read(64 * 1024)
+                    if not chunk:
+                        break
+                    view = memoryview(chunk)
+                    while view:
+                        written = output_stream.write(view)
+                        if written is None or written <= 0:
+                            raise OSError("incomplete database write")
+                        view = view[written:]
+                output_stream.flush()
+                os.fsync(output_stream.fileno())
+            cls._require_identity(final, identity)
+            return identity
+        except KnowledgeBasePersistenceError:
+            cls._rollback_owned_files({final: identity})
+            raise
+        except OSError as exc:
+            cls._rollback_owned_files({final: identity})
+            raise KnowledgeBasePersistenceError(
+                "unable to publish canonical knowledge state"
+            ) from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
 
     @classmethod
     def _rollback_owned_files(cls, owned: dict[Path, tuple[int, int]]) -> None:

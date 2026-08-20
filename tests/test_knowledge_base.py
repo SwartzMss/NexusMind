@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+import errno
 import os
 from pathlib import Path
 import sqlite3
@@ -324,6 +325,81 @@ def test_create_does_not_initialize_or_delete_substituted_database(
     monkeypatch.setattr(
         knowledge_base_module, "SQLiteKnowledgeSnapshotStore", SubstitutingStore
     )
+
+    with pytest.raises(KnowledgeBasePersistenceError):
+        KnowledgeBase.create(str(root), knowledge_base_id="kb")
+
+    assert database_path.read_bytes() == private_bytes
+
+
+def test_create_rolls_back_published_database_when_post_link_stat_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "post-link-stat"
+    root.mkdir()
+    database_path = root / "knowledge.db"
+    original_identity = KnowledgeBase._file_identity
+    failed = False
+
+    def failing_identity(path: Path) -> tuple[int, int]:
+        nonlocal failed
+        if path == database_path and database_path.exists() and not failed:
+            failed = True
+            raise OSError("private post-link stat failure")
+        return original_identity(path)
+
+    monkeypatch.setattr(KnowledgeBase, "_file_identity", staticmethod(failing_identity))
+
+    with pytest.raises(KnowledgeBasePersistenceError) as caught:
+        KnowledgeBase.create(str(root), knowledge_base_id="kb")
+
+    assert not database_path.exists()
+    assert "private post-link stat failure" not in str(caught.value)
+    assert str(root) not in str(caught.value)
+
+
+def test_create_falls_back_to_no_clobber_copy_when_hard_links_are_unsupported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "unsupported-link"
+
+    def unsupported_link(source: Path, destination: Path) -> None:
+        raise OSError(errno.ENOTSUP, "private unsupported-link detail")
+
+    monkeypatch.setattr(knowledge_base_module.os, "link", unsupported_link)
+
+    kb = KnowledgeBase.create(str(root), knowledge_base_id="kb")
+
+    assert kb.status().knowledge_base_id == "kb"
+    assert set(item.name for item in root.iterdir()) == {"manifest.json", "knowledge.db"}
+    assert KnowledgeBase.open(str(root)).status().knowledge_base_id == "kb"
+
+
+def test_unsupported_link_fallback_preserves_substituted_final_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "unsupported-link-substitution"
+    root.mkdir()
+    database_path = root / "knowledge.db"
+    private_bytes = b"private fallback database"
+    original_open = knowledge_base_module.os.open
+
+    def unsupported_link(source: Path, destination: Path) -> None:
+        raise OSError(errno.ENOTSUP, "unsupported")
+
+    injected = False
+
+    def substituting_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal injected
+        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if Path(path) == database_path and flags & os.O_EXCL and not injected:
+            injected = True
+            database_path.unlink()
+            database_path.write_bytes(private_bytes)
+        return descriptor
+
+    monkeypatch.setattr(knowledge_base_module.os, "link", unsupported_link)
+    monkeypatch.setattr(knowledge_base_module.os, "open", substituting_open)
 
     with pytest.raises(KnowledgeBasePersistenceError):
         KnowledgeBase.create(str(root), knowledge_base_id="kb")
