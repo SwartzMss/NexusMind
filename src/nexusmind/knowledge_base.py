@@ -601,6 +601,69 @@ class KnowledgeBase:
             self._refresh_collection()
             self._unregister_source(source_id)
 
+    def remove_source(self, source_id: str) -> None:
+        """Atomically remove a registration and all of its canonical content."""
+        self._require_open()
+        if type(source_id) is not str or not source_id.strip():
+            raise KnowledgeBaseConfigError("source_id must be non-empty text")
+        with self._mutation_guard():
+            self._refresh_manifest()
+            self._refresh_collection()
+            self._remove_source(source_id)
+
+    def _remove_source(self, source_id: str) -> None:
+        registration = next(
+            (item for item in self._manifest.sources if item.source_id == source_id), None
+        )
+        if registration is None:
+            raise KnowledgeBaseSourceError("source_id is not registered")
+
+        old_snapshot = self._collection.snapshot()
+        try:
+            staging = self._new_collection(self._index_factory, self._limits)
+            staging.restore(old_snapshot)
+            staging.remove_source(source_id)
+            candidate = KnowledgeBaseManifest(
+                knowledge_base_id=self._manifest.knowledge_base_id,
+                display_name=self._manifest.display_name,
+                sources=tuple(
+                    item for item in self._manifest.sources if item.source_id != source_id
+                ),
+                limits=self._limits,
+            )
+            encode_manifest(candidate, self._limits)
+        except KnowledgeBaseConfigError:
+            raise
+        except Exception as exc:
+            raise KnowledgeBasePersistenceError(
+                "unable to prepare knowledge-source removal"
+            ) from exc
+
+        try:
+            store = SQLiteKnowledgeSnapshotStore(self._root / _DATABASE_NAME)
+            store.save(staging.snapshot())
+        except Exception as exc:
+            raise KnowledgeBasePersistenceError(
+                "unable to persist canonical knowledge state"
+            ) from exc
+
+        try:
+            self._persist_manifest(candidate)
+        except Exception as manifest_error:
+            try:
+                store.save(old_snapshot)
+            except Exception as recovery_error:
+                self._closed = True
+                raise KnowledgeBasePersistenceError(
+                    "knowledge-source removal recovery failed; knowledge base is unusable"
+                ) from recovery_error
+            raise KnowledgeBasePersistenceError(
+                "unable to persist knowledge-source removal"
+            ) from manifest_error
+
+        self._collection = staging
+        self._manifest = candidate
+
     def _unregister_source(self, source_id: str) -> None:
         if type(source_id) is not str or not source_id:
             raise KnowledgeBaseConfigError("source_id must be non-empty text")
