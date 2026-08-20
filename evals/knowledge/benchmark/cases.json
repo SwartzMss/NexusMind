@@ -1,0 +1,43 @@
+{
+  "cases": [
+    {"case_id":"exact-search-api","category":"exact_term","query":"KnowledgeCollection.search","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"api.md"}]},
+    {"case_id":"exact-snapshot-api","category":"exact_term","query":"snapshot() canonical documents","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"api.md"}]},
+    {"case_id":"exact-binder","category":"exact_term","query":"Android Binder structured calls","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"ipc.md"}]},
+    {"case_id":"exact-aes-gcm","category":"exact_term","query":"AES-GCM authenticated encryption nonce","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"cryptography.md"}]},
+
+    {"case_id":"id-zxq","category":"identifier","query":"ZXQ-417","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"identifiers.md"}]},
+    {"case_id":"id-alm","category":"identifier","query":"ALM_XDC","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"identifiers.md"}]},
+    {"case_id":"id-lp","category":"identifier","query":"LP-ICHS isolated channel","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"identifiers.md"}]},
+    {"case_id":"id-api-token","category":"identifier","query":"KnowledgeCollection.search snapshot()","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"api.md"}]},
+
+    {"case_id":"cjk-binder","category":"cjk","query":"安卓 Binder 跨进程通信","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"cjk.md"}]},
+    {"case_id":"cjk-microkernel","category":"cjk","query":"微内核 用户态 驱动 崩溃","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"cjk.md"}]},
+    {"case_id":"cjk-trusted","category":"cjk","query":"可信执行环境 安全世界 普通世界","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"cjk.md"}]},
+    {"case_id":"cjk-checkpoint","category":"cjk","query":"工作流 状态 进程重启 恢复执行","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"mixed-language.md"}]},
+
+    {"case_id":"para-remote-service","category":"paraphrase","query":"How can a mobile app call a service in another process?","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"ipc.md"}]},
+    {"case_id":"para-key-children","category":"paraphrase","query":"produce independent purpose keys from one master secret","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"cryptography.md"}]},
+    {"case_id":"para-resume","category":"paraphrase","query":"continue a workflow after the process starts again","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"mixed-language.md"}]},
+    {"case_id":"para-ranking","category":"paraphrase","query":"tell whether useful evidence is present but ordered too late","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"retrieval.md"}]},
+
+    {"case_id":"cross-binder-cn","category":"cross_language","query":"mobile remote procedure 跨进程 调用方身份","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"cjk.md"},{"source_id":"benchmark-docs","logical_path":"ipc.md"}]},
+    {"case_id":"cross-checkpoint-en","category":"cross_language","query":"durable checkpoint 恢复工作流","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"mixed-language.md"}]},
+    {"case_id":"cross-hybrid","category":"cross_language","query":"混合检索 reciprocal rank fusion","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"mixed-language.md"}]},
+    {"case_id":"cross-trustzone","category":"cross_language","query":"Arm 安全世界 isolation ordinary OS","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"security.md"},{"source_id":"benchmark-docs","logical_path":"cjk.md"}]},
+
+    {"case_id":"multi-ipc","category":"multi_document","query":"isolated services communicate across process boundaries","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"ipc.md"},{"source_id":"benchmark-docs","logical_path":"cjk.md"}]},
+    {"case_id":"multi-security","category":"multi_document","query":"separate protected execution from ordinary applications","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"security.md"},{"source_id":"benchmark-docs","logical_path":"cjk.md"}]},
+    {"case_id":"multi-ranking","category":"multi_document","query":"ranking metrics and reciprocal fusion","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"retrieval.md"},{"source_id":"benchmark-docs","logical_path":"mixed-language.md"}]},
+    {"case_id":"multi-runtime","category":"multi_document","query":"canonical runtime state and durable workflow state","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"api.md"},{"source_id":"benchmark-docs","logical_path":"mixed-language.md"}]},
+
+    {"case_id":"distractor-hit","category":"distractor_heavy","query":"retrieval hit relevant document ranking","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"retrieval.md"}]},
+    {"case_id":"distractor-recall","category":"distractor_heavy","query":"recall useful evidence sources","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"retrieval.md"}]},
+    {"case_id":"distractor-secure","category":"distractor_heavy","query":"secure authentication secrets protected services","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"security.md"}]},
+    {"case_id":"distractor-resume","category":"distractor_heavy","query":"resume durable workflow checkpoint","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"mixed-language.md"}]},
+
+    {"case_id":"mixed-rrf","category":"mixed_signal","query":"Hybrid retrieval reciprocal rank fusion lexical semantic","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"mixed-language.md"}]},
+    {"case_id":"mixed-ipc","category":"mixed_signal","query":"Binder isolated user-space message passing","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"ipc.md"}]},
+    {"case_id":"mixed-crypto","category":"mixed_signal","query":"HKDF 子密钥 purpose-separated key material","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"cryptography.md"}]},
+    {"case_id":"mixed-eval","category":"mixed_signal","query":"large K recall 小 K MRR ranking failure","relevant_documents":[{"source_id":"benchmark-docs","logical_path":"retrieval.md"}]}
+  ]
+}

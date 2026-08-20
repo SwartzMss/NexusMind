@@ -428,6 +428,37 @@ SQLite 租约的 `clock` 是测试注入点。生产环境应让所有访问同�
 
 工具定义的默认风险级别是 `UNSPECIFIED`，默认策略会要求审批；确认只读工具时应显式设置 `ToolRiskLevel.READ_ONLY`。
 
+## 分类检索评估与后端比较
+
+`evals/knowledge/benchmark/` 是离线、UTF-8、人工标注的检索基准，比较
+BM25-only、Semantic-only 与 Hybrid-RRF。每个 case 必须显式使用一个严格类别：
+`exact_term`、`identifier`、`cjk`、`paraphrase`、`cross_language`、
+`multi_document`、`distractor_heavy` 或 `mixed_signal`；未知类别、重复 case ID
+与重复相关文档都会 fail closed，类别不会从 ID 推断。
+
+评估同时生成 K=1、3、5、10 的 Hit@K、Recall@K 与 MRR。每个 backend/query
+只执行一次 `max(K)` 搜索，较小 K 严格来自同一排名的前缀，不会重新搜索、去重
+或改变 relevance label。Hit 表示前 K 中是否至少存在一个相关文档，Recall 按不同
+相关文档的覆盖率计算，MRR 使用首个相关 chunk 的真实排名。较大 K 的 Recall 仍低
+通常表示候选召回问题；较大 K Recall 高而较小 K Hit/MRR 低则表示排序问题。
+
+比较开始前，所有 backend 的完整 canonical `KnowledgeSnapshot`（包括来源、文档、
+内容、metadata 与顺序）必须完全相等。确定性 semantic fixture 只验证架构和诊断，
+不代表真实 embedding model 的质量；人工 relevance label 独立于后端输出，不为使
+Hybrid 获胜而调整。生成的 [比较报告](evals/knowledge/benchmark.md) 是
+descriptive/non-gate，不设置任意质量阈值。
+
+重新生成报告：
+
+```bash
+PYTHONPATH=src python -m nexusmind.retrieval_benchmark --write evals/knowledge/benchmark.md
+```
+
+renderer 是结构化 report 与固定显示配置之间的纯函数，不读取 collection、文件系统、
+环境变量、时钟或随机数。测试要求重新生成的 Markdown 与 checked-in baseline
+逐字节相同。结果可用于决定后续研究召回、reranking、embedding persistence 或索引
+策略，但本评估不会自动实现或选择这些功能。
+
 ## 开发验证
 
 ```bash
