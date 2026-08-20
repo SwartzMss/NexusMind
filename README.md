@@ -69,7 +69,7 @@ Chunk、embedding、lexical/semantic/hybrid index 和 reranker 状态都不持�
 nexusmind-kb
 ```
 
-界面支持创建或打开一个明确的 KnowledgeBase、通过系统选择器注册本地文件或目录、查看来源和状态、显式同步全部或单个来源、删除来源，以及按有限结果数搜索并查看 `source_id`、逻辑路径、score、chunk ID 和原文片段。注册来源不会自动同步；同步 mutation 在后台线程运行，其间相关控件会禁用，避免同一窗口发起重复 mutation。
+界面支持创建或打开一个明确的 KnowledgeBase、通过系统选择器注册本地文件或目录、查看来源和状态、显式同步全部或单个来源、删除来源，以及按有限结果数搜索并查看 `source_id`、逻辑路径、score、chunk ID 和原文片段。注册来源不会自动同步；所有 KnowledgeBase 操作统一在后台 worker 运行，其间相关控件会禁用。若此时请求关闭窗口，界面会等待当前操作完成，再关闭 handle 和窗口。
 
 该界面使用 Python 标准库 `tkinter`，不需要本地服务器、外部服务或账号。窗口层只处理控件、选择器和后台调度；可 headless 测试的 controller 仅调用公开 `KnowledgeBase` API。它不读取 manifest/SQLite，不构造 ingestion adapter，也不依赖 `KnowledgeCollection` 或索引实现。错误只映射为有限的产品级提示，不回显底层异常文本、路径、查询或文档内容。
 

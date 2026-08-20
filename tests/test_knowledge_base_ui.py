@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from threading import Event, get_ident
 
 import pytest
 
@@ -19,6 +20,8 @@ from nexusmind import (
 from nexusmind.knowledge_base_ui import (
     MAX_SEARCH_LIMIT,
     KnowledgeBaseUIController,
+    KnowledgeBaseUIView,
+    KnowledgeBaseTkApp,
 )
 
 
@@ -243,3 +246,182 @@ def test_duplicate_local_mutation_is_rejected_while_sync_is_active() -> None:
     assert "sync" in fake.calls
     assert ("remove_source", "one") not in fake.calls
     assert controller.view.mutation_active is False
+
+
+class FakeVariable:
+    def __init__(self, value: str = "") -> None:
+        self.value = value
+
+    def get(self) -> str:
+        return self.value
+
+    def set(self, value: str) -> None:
+        self.value = value
+
+
+class FakeWidget:
+    instances: list["FakeWidget"] = []
+
+    def __init__(self, parent: object = None, **kwargs: object) -> None:
+        self.parent = parent
+        self.kwargs = dict(kwargs)
+        self.layout: tuple[str, dict[str, object]] | None = None
+        self.state = kwargs.get("state", "normal")
+        self.items: list[str] = []
+        self.selection: tuple[int, ...] = ()
+        FakeWidget.instances.append(self)
+
+    def grid(self, **kwargs: object) -> "FakeWidget":
+        self.layout = ("grid", dict(kwargs))
+        return self
+
+    def pack(self, **kwargs: object) -> "FakeWidget":
+        self.layout = ("pack", dict(kwargs))
+        return self
+
+    def configure(self, **kwargs: object) -> None:
+        self.kwargs.update(kwargs)
+        if "state" in kwargs:
+            self.state = kwargs["state"]
+
+    def columnconfigure(self, column: int, weight: int) -> None:
+        pass
+
+    def delete(self, start: object, end: object = None) -> None:
+        self.items.clear()
+
+    def insert(self, index: object, value: str) -> None:
+        self.items.append(value)
+
+    def curselection(self) -> tuple[int, ...]:
+        return self.selection
+
+
+class FakeRoot(FakeWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.after_calls: list[tuple[int, object]] = []
+        self.destroyed = False
+        self.protocols: dict[str, object] = {}
+
+    def title(self, value: str) -> None:
+        pass
+
+    def geometry(self, value: str) -> None:
+        pass
+
+    def protocol(self, name: str, callback: object) -> None:
+        self.protocols[name] = callback
+
+    def after(self, delay: int, callback: object) -> None:
+        self.after_calls.append((delay, callback))
+
+    def destroy(self) -> None:
+        self.destroyed = True
+
+    def mainloop(self) -> None:
+        pass
+
+
+class FakeTk:
+    END = "end"
+    StringVar = FakeVariable
+    Listbox = FakeWidget
+    Text = FakeWidget
+
+
+class FakeTtk:
+    Frame = FakeWidget
+    LabelFrame = FakeWidget
+    Label = FakeWidget
+    Entry = FakeWidget
+    Button = FakeWidget
+    Spinbox = FakeWidget
+
+
+class FakeFileDialog:
+    def askdirectory(self) -> str:
+        return ""
+
+    def askopenfilename(self, **kwargs: object) -> str:
+        return ""
+
+
+def _window(controller: object) -> tuple[KnowledgeBaseTkApp, FakeRoot]:
+    FakeWidget.instances.clear()
+    root = FakeRoot()
+    app = KnowledgeBaseTkApp(
+        controller,  # type: ignore[arg-type]
+        _tk=FakeTk(),
+        _ttk=FakeTtk(),
+        _filedialog=FakeFileDialog(),
+        _root=root,
+    )
+    return app, root
+
+
+def test_create_form_has_labeled_non_overlapping_id_and_display_name_rows() -> None:
+    app, _ = _window(KnowledgeBaseUIController())
+    entries = {
+        item.kwargs.get("textvariable"): item
+        for item in FakeWidget.instances
+        if "textvariable" in item.kwargs
+    }
+    labels = {item.kwargs.get("text") for item in FakeWidget.instances}
+
+    assert {"Destination:", "ID:", "Display name:"} <= labels
+    assert entries[app.kb_id].layout == (
+        "grid",
+        {"row": 1, "column": 1, "sticky": "ew"},
+    )
+    assert entries[app.display_name].layout == (
+        "grid",
+        {"row": 2, "column": 1, "sticky": "ew"},
+    )
+
+
+def test_search_uses_busy_worker_and_close_waits_for_completion() -> None:
+    started = Event()
+    release = Event()
+    main_thread = get_ident()
+
+    class BlockingController:
+        view = KnowledgeBaseUIView()
+
+        def __init__(self) -> None:
+            self.search_thread: int | None = None
+            self.closed = False
+
+        def search(self, query: str, limit: int) -> None:
+            self.search_thread = get_ident()
+            started.set()
+            assert release.wait(timeout=5)
+
+        def close(self) -> None:
+            self.closed = True
+
+    controller = BlockingController()
+    app, root = _window(controller)
+    app.search_query.set("needle")
+    app.search_limit.set("3")
+
+    app._start_search()
+    assert started.wait(timeout=5)
+    assert app._busy is True
+    assert app._worker is not None and app._worker.daemon is False
+    assert controller.search_thread != main_thread
+    assert all(button.state == "disabled" for button in app._operation_buttons)
+
+    app._close()
+    assert app._close_requested is True
+    assert controller.closed is False
+    assert root.destroyed is False
+    assert app.message.get() == "Finishing current operation before closing…"
+
+    release.set()
+    assert app._worker is not None
+    app._worker.join(timeout=5)
+    app._poll_worker()
+
+    assert controller.closed is True
+    assert root.destroyed is True

@@ -334,71 +334,104 @@ class KnowledgeBaseUIController:
 class KnowledgeBaseTkApp:
     """Small Tk window; business operations stay in the injected controller."""
 
-    def __init__(self, controller: KnowledgeBaseUIController | None = None) -> None:
-        import tkinter as tk
-        from tkinter import filedialog, ttk
+    def __init__(
+        self,
+        controller: KnowledgeBaseUIController | None = None,
+        *,
+        _tk: object | None = None,
+        _ttk: object | None = None,
+        _filedialog: object | None = None,
+        _root: object | None = None,
+    ) -> None:
+        if _tk is None or _ttk is None or _filedialog is None:
+            import tkinter as tk
+            from tkinter import filedialog, ttk
 
-        self._tk = tk
-        self._filedialog = filedialog
+            _tk = tk
+            _ttk = ttk
+            _filedialog = filedialog
+
+        self._tk = _tk
+        self._ttk = _ttk
+        self._filedialog = _filedialog
         self._controller = controller or KnowledgeBaseUIController()
-        self.root = tk.Tk()
+        self.root = _tk.Tk() if _root is None else _root
         self.root.title("NexusMind KnowledgeBase")
         self.root.geometry("1000x720")
         self._busy = False
+        self._close_requested = False
+        self._worker: Thread | None = None
+        self._operation_buttons: list[object] = []
 
-        shell = ttk.Frame(self.root, padding=12)
+        shell = _ttk.Frame(self.root, padding=12)
         shell.pack(fill="both", expand=True)
-        lifecycle = ttk.LabelFrame(shell, text="KnowledgeBase", padding=8)
+        lifecycle = _ttk.LabelFrame(shell, text="KnowledgeBase", padding=8)
         lifecycle.pack(fill="x")
-        self.root_path = tk.StringVar()
-        self.kb_id = tk.StringVar()
-        self.display_name = tk.StringVar()
-        self.source_id = tk.StringVar()
-        self.search_query = tk.StringVar()
-        self.search_limit = tk.StringVar(value=str(DEFAULT_SEARCH_LIMIT))
-        self.message = tk.StringVar(value="Create or open a KnowledgeBase.")
-        self.status_text = tk.StringVar(value="No KnowledgeBase open")
+        self.root_path = _tk.StringVar()
+        self.kb_id = _tk.StringVar()
+        self.display_name = _tk.StringVar()
+        self.source_id = _tk.StringVar()
+        self.search_query = _tk.StringVar()
+        self.search_limit = _tk.StringVar(value=str(DEFAULT_SEARCH_LIMIT))
+        self.message = _tk.StringVar(value="Create or open a KnowledgeBase.")
+        self.status_text = _tk.StringVar(value="No KnowledgeBase open")
 
-        ttk.Entry(lifecycle, textvariable=self.root_path, width=55).grid(row=0, column=0, sticky="ew")
-        ttk.Button(lifecycle, text="Choose directory", command=self._choose_root).grid(row=0, column=1)
-        ttk.Entry(lifecycle, textvariable=self.kb_id, width=20).grid(row=1, column=0, sticky="w")
-        ttk.Entry(lifecycle, textvariable=self.display_name, width=25).grid(row=1, column=0)
-        self._mutation_buttons: list[object] = []
-        self._button(lifecycle, "Create", lambda: self._background(self._create)).grid(row=1, column=1)
-        self._button(lifecycle, "Open", lambda: self._background(self._open)).grid(row=1, column=2)
-        ttk.Label(shell, textvariable=self.status_text).pack(fill="x", pady=(8, 0))
-        ttk.Label(shell, textvariable=self.message, foreground="#8b1a1a").pack(fill="x")
+        _ttk.Label(lifecycle, text="Destination:").grid(row=0, column=0, sticky="w")
+        _ttk.Entry(lifecycle, textvariable=self.root_path, width=55).grid(
+            row=0, column=1, sticky="ew"
+        )
+        _ttk.Button(
+            lifecycle, text="Choose directory", command=self._choose_root
+        ).grid(row=0, column=2)
+        _ttk.Label(lifecycle, text="ID:").grid(row=1, column=0, sticky="w")
+        _ttk.Entry(lifecycle, textvariable=self.kb_id, width=30).grid(
+            row=1, column=1, sticky="ew"
+        )
+        _ttk.Label(lifecycle, text="Display name:").grid(
+            row=2, column=0, sticky="w"
+        )
+        _ttk.Entry(lifecycle, textvariable=self.display_name, width=30).grid(
+            row=2, column=1, sticky="ew"
+        )
+        self._button(lifecycle, "Create", self._start_create).grid(row=3, column=1, sticky="e")
+        self._button(lifecycle, "Open", self._start_open).grid(row=3, column=2)
+        _ttk.Label(shell, textvariable=self.status_text).pack(fill="x", pady=(8, 0))
+        _ttk.Label(shell, textvariable=self.message, foreground="#8b1a1a").pack(fill="x")
 
-        sources = ttk.LabelFrame(shell, text="Sources", padding=8)
+        sources = _ttk.LabelFrame(shell, text="Sources", padding=8)
         sources.pack(fill="both", expand=True, pady=8)
-        controls = ttk.Frame(sources)
+        controls = _ttk.Frame(sources)
         controls.pack(fill="x")
-        ttk.Entry(controls, textvariable=self.source_id, width=24).pack(side="left")
+        _ttk.Entry(controls, textvariable=self.source_id, width=24).pack(side="left")
         self._button(controls, "Add file", lambda: self._pick_source(False)).pack(side="left")
         self._button(controls, "Add directory", lambda: self._pick_source(True)).pack(side="left")
         self._button(controls, "Sync all", lambda: self._background(self._controller.sync_all)).pack(side="left")
         self._button(controls, "Sync selected", lambda: self._selected_action(self._controller.sync_source)).pack(side="left")
         self._button(controls, "Remove selected", lambda: self._selected_action(self._controller.remove_source)).pack(side="left")
-        self.source_list = tk.Listbox(sources, height=8)
+        self.source_list = _tk.Listbox(sources, height=8)
         self.source_list.pack(fill="both", expand=True)
-        self.sync_text = tk.Text(sources, height=4, state="disabled")
+        self.sync_text = _tk.Text(sources, height=4, state="disabled")
         self.sync_text.pack(fill="x")
 
-        search = ttk.LabelFrame(shell, text="Search", padding=8)
+        search = _ttk.LabelFrame(shell, text="Search", padding=8)
         search.pack(fill="both", expand=True)
-        ttk.Entry(search, textvariable=self.search_query).pack(side="top", fill="x")
-        ttk.Spinbox(search, from_=1, to=MAX_SEARCH_LIMIT, textvariable=self.search_limit, width=6).pack(anchor="w")
-        ttk.Button(search, text="Search", command=self._search).pack(anchor="w")
-        self.results = tk.Text(search, height=12, state="disabled", wrap="word")
+        _ttk.Entry(search, textvariable=self.search_query).pack(side="top", fill="x")
+        _ttk.Spinbox(
+            search,
+            from_=1,
+            to=MAX_SEARCH_LIMIT,
+            textvariable=self.search_limit,
+            width=6,
+        ).pack(anchor="w")
+        self._button(search, "Search", self._start_search).pack(anchor="w")
+        self.results = _tk.Text(search, height=12, state="disabled", wrap="word")
         self.results.pack(fill="both", expand=True)
-        lifecycle.columnconfigure(0, weight=1)
+        lifecycle.columnconfigure(1, weight=1)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
 
     def _button(self, parent: object, text: str, command: Callable[[], None]):
-        from tkinter import ttk
-
-        button = ttk.Button(parent, text=text, command=command)
-        self._mutation_buttons.append(button)
+        button = self._ttk.Button(parent, text=text, command=command)
+        self._operation_buttons.append(button)
         return button
 
     def _choose_root(self) -> None:
@@ -406,13 +439,17 @@ class KnowledgeBaseTkApp:
         if selected:
             self.root_path.set(selected)
 
-    def _create(self) -> None:
-        self._controller.create(
-            self.root_path.get(), self.kb_id.get(), self.display_name.get()
+    def _start_create(self) -> None:
+        root = self.root_path.get()
+        knowledge_base_id = self.kb_id.get()
+        display_name = self.display_name.get()
+        self._background(
+            lambda: self._controller.create(root, knowledge_base_id, display_name)
         )
 
-    def _open(self) -> None:
-        self._controller.open(self.root_path.get())
+    def _start_open(self) -> None:
+        root = self.root_path.get()
+        self._background(lambda: self._controller.open(root))
 
     def _pick_source(self, directory: bool) -> None:
         selected = (
@@ -424,8 +461,9 @@ class KnowledgeBaseTkApp:
         )
         if not selected:
             return
+        source_id = self.source_id.get()
         operation = self._controller.add_directory if directory else self._controller.add_file
-        self._background(lambda: operation(self.source_id.get(), selected))
+        self._background(lambda: operation(source_id, selected))
 
     def _selected_action(self, operation: Callable[[str], None]) -> None:
         selection = self.source_list.curselection()
@@ -435,36 +473,44 @@ class KnowledgeBaseTkApp:
         source_id = self._controller.view.sources[selection[0]].source_id
         self._background(lambda: operation(source_id))
 
-    def _search(self) -> None:
+    def _start_search(self) -> None:
         try:
             limit = int(self.search_limit.get())
         except ValueError:
             limit = 0
-        self._controller.search(self.search_query.get(), limit)
-        self._render()
+        query = self.search_query.get()
+        self._background(lambda: self._controller.search(query, limit))
 
     def _background(self, operation: Callable[[], None]) -> None:
         if self._busy:
-            self.message.set("A local mutation is already active.")
+            self.message.set("Another KnowledgeBase operation is already active.")
             return
         self._busy = True
-        self._set_mutations_enabled(False)
+        self._set_operations_enabled(False)
         self.message.set("Working…")
 
         def run() -> None:
             operation()
-            self.root.after(0, finish)
 
-        def finish() -> None:
-            self._busy = False
-            self._set_mutations_enabled(True)
-            self._render()
+        self._worker = Thread(target=run)
+        self._worker.start()
+        self.root.after(25, self._poll_worker)
 
-        Thread(target=run, daemon=True).start()
+    def _poll_worker(self) -> None:
+        if self._worker is not None and self._worker.is_alive():
+            self.root.after(25, self._poll_worker)
+            return
+        self._worker = None
+        self._busy = False
+        if self._close_requested:
+            self._finish_close()
+            return
+        self._set_operations_enabled(True)
+        self._render()
 
-    def _set_mutations_enabled(self, enabled: bool) -> None:
+    def _set_operations_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
-        for button in self._mutation_buttons:
+        for button in self._operation_buttons:
             button.configure(state=state)
 
     def _render(self) -> None:
@@ -506,6 +552,14 @@ class KnowledgeBaseTkApp:
         widget.configure(state="disabled")
 
     def _close(self) -> None:
+        if self._busy:
+            self._close_requested = True
+            self._set_operations_enabled(False)
+            self.message.set("Finishing current operation before closing…")
+            return
+        self._finish_close()
+
+    def _finish_close(self) -> None:
         self._controller.close()
         self.root.destroy()
 
