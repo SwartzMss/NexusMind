@@ -1,10 +1,11 @@
 from pathlib import Path
 
-from nexusmind import RetrievalCategory, load_retrieval_evaluation_cases
+from nexusmind import Chunk, RetrievalCategory, SearchHit, load_retrieval_evaluation_cases
 from nexusmind.retrieval_benchmark import (
     BENCHMARK_CASES,
     BENCHMARK_CORPUS,
     BENCHMARK_KS,
+    BenchmarkReranker,
     run_retrieval_benchmark,
 )
 
@@ -19,7 +20,7 @@ def test_authored_benchmark_is_bounded_and_covers_every_category() -> None:
     assert any(len(case.relevant_documents) > 1 for case in cases)
 
 
-def test_benchmark_compares_three_backends_offline_and_deterministically() -> None:
+def test_benchmark_compares_four_backends_offline_and_deterministically() -> None:
     first = run_retrieval_benchmark()
     second = run_retrieval_benchmark()
     assert first == second
@@ -28,4 +29,16 @@ def test_benchmark_compares_three_backends_offline_and_deterministically() -> No
         "BM25-only",
         "Semantic-only",
         "Hybrid-RRF",
+        "Hybrid-RRF + Rerank",
     )
+
+
+def test_benchmark_reranker_is_content_driven_and_preserves_candidates() -> None:
+    relevant = Chunk("doc-a", "a", "Binder provides Android IPC", 0, 27)
+    distractor = Chunk("doc-b", "b", "unrelated checkpoint notes", 0, 26)
+    candidates = (SearchHit(distractor, 2.0), SearchHit(relevant, 1.0))
+
+    result = BenchmarkReranker().rerank("cross process IPC", candidates, limit=2)
+
+    assert [hit.chunk.chunk_id for hit in result] == ["a", "b"]
+    assert {hit.chunk for hit in result} == {relevant, distractor}

@@ -13,6 +13,8 @@ from .knowledge_collection import KnowledgeCollection
 from .knowledge_ingestion import LocalDirectoryAdapter
 from .knowledge_retrieval import InMemoryChunkIndex
 from .lexical_analysis import UnicodeCJKLexicalAnalyzer
+from .knowledge_retrieval import SearchHit
+from .reranking import RerankedChunkIndex
 from .retrieval_evaluation import (
     RetrievalBackend,
     RetrievalCategory,
@@ -83,6 +85,44 @@ class BenchmarkEmbeddingProvider:
         return self._vector(text)
 
 
+class BenchmarkReranker:
+    """Offline content-driven scoring fixture; not a model-quality claim."""
+
+    _concepts = BenchmarkEmbeddingProvider._concepts
+
+    def __init__(self) -> None:
+        self._analyzer = UnicodeCJKLexicalAnalyzer()
+
+    def rerank(
+        self,
+        query: str,
+        candidates: tuple[SearchHit, ...],
+        *,
+        limit: int,
+    ) -> tuple[SearchHit, ...]:
+        query_folded = query.casefold()
+        query_terms = set(self._analyzer.analyze(query))
+        scored: list[tuple[SearchHit, int]] = []
+        for rank, hit in enumerate(candidates):
+            content_folded = hit.chunk.content.casefold()
+            content_terms = set(self._analyzer.analyze(hit.chunk.content))
+            concept_matches = sum(
+                1
+                for terms in self._concepts
+                if any(term in query_folded for term in terms)
+                and any(term in content_folded for term in terms)
+            )
+            exact_matches = len(query_terms & content_terms)
+            score = float(concept_matches * 10 + exact_matches)
+            scored.append(
+                (SearchHit(hit.chunk, score, hit.matched_terms), rank)
+            )
+        scored.sort(
+            key=lambda item: (-item[0].score, item[1], item[0].chunk.chunk_id)
+        )
+        return tuple(hit for hit, _ in scored[:limit])
+
+
 def _lexical_factory():
     return InMemoryChunkIndex(analyzer=UnicodeCJKLexicalAnalyzer())
 
@@ -93,13 +133,21 @@ def _build_collection(mode: str) -> KnowledgeCollection:
         index_factory = _lexical_factory
     elif mode == "semantic":
         index_factory = lambda: InMemorySemanticChunkIndex(embedding_provider=provider)
-    elif mode == "hybrid":
-        index_factory = lambda: HybridChunkIndex(
+    elif mode in ("hybrid", "reranked"):
+        hybrid_factory = lambda: HybridChunkIndex(
             lexical_index_factory=_lexical_factory,
             semantic_index_factory=lambda: InMemorySemanticChunkIndex(
                 embedding_provider=provider
             ),
         )
+        if mode == "hybrid":
+            index_factory = hybrid_factory
+        else:
+            index_factory = lambda: RerankedChunkIndex(
+                base_index_factory=hybrid_factory,
+                reranker=BenchmarkReranker(),
+                candidate_depth=100,
+            )
     else:
         raise ValueError("unknown benchmark backend")
     collection = KnowledgeCollection(
@@ -118,6 +166,9 @@ def run_retrieval_benchmark() -> RetrievalComparisonReport:
         RetrievalBackend("BM25-only", lambda: _build_collection("lexical")),
         RetrievalBackend("Semantic-only", lambda: _build_collection("semantic")),
         RetrievalBackend("Hybrid-RRF", lambda: _build_collection("hybrid")),
+        RetrievalBackend(
+            "Hybrid-RRF + Rerank", lambda: _build_collection("reranked")
+        ),
     )
     return compare_retrieval_backends(backends, cases, ks=BENCHMARK_KS)
 
