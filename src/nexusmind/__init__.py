@@ -64,6 +64,10 @@ from .retrieval_evaluation import (
     MAX_EVALUATION_K_VALUES,
     RetrievalCategory,
     RetrievalCategoryReport,
+    RetrievalBackend,
+    RetrievalBackendReport,
+    RetrievalComparisonError,
+    RetrievalComparisonReport,
     RetrievalEvaluationCase,
     RetrievalEvaluationCaseResult,
     RetrievalEvaluationDatasetError,
@@ -74,6 +78,7 @@ from .retrieval_evaluation import (
     evaluate_retrieval,
     evaluate_retrieval_multi_k,
     classify_retrieval_failure,
+    compare_retrieval_backends,
     load_retrieval_evaluation_cases,
 )
 from .semantic_retrieval import (
@@ -174,6 +179,10 @@ __all__ = [
     "RetrievalEvaluationCase",
     "RetrievalCategory",
     "RetrievalCategoryReport",
+    "RetrievalBackend",
+    "RetrievalBackendReport",
+    "RetrievalComparisonError",
+    "RetrievalComparisonReport",
     "RetrievalEvaluationCaseResult",
     "RetrievalEvaluationDatasetError",
     "RetrievalEvaluationError",
@@ -200,6 +209,7 @@ __all__ = [
     "evaluate_retrieval",
     "evaluate_retrieval_multi_k",
     "classify_retrieval_failure",
+    "compare_retrieval_backends",
     "load_retrieval_evaluation_cases",
     "__version__",
 ]

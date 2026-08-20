@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 import json
 from pathlib import Path
+from typing import Callable
 
 from .knowledge_collection import KnowledgeCollection
 from .knowledge_retrieval import ChunkIndexLimitError
@@ -17,6 +18,10 @@ class RetrievalEvaluationError(Exception):
 
 class RetrievalEvaluationDatasetError(RetrievalEvaluationError):
     """A retrieval evaluation dataset is malformed or unreadable."""
+
+
+class RetrievalComparisonError(RetrievalEvaluationError):
+    """A named backend comparison configuration or execution failed."""
 
 
 class RetrievalCategory(str, Enum):
@@ -109,6 +114,29 @@ class RetrievalEvaluationReport:
     hit_at_k: float
     recall_at_k: float
     mrr: float
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalBackend:
+    name: str
+    factory: Callable[[], KnowledgeCollection]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _require_text(self.name, "backend name"))
+        if not callable(self.factory):
+            raise TypeError("backend factory must be callable")
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalBackendReport:
+    backend_name: str
+    reports_by_k: tuple[RetrievalEvaluationReport, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalComparisonReport:
+    ks: tuple[int, ...]
+    backend_reports: tuple[RetrievalBackendReport, ...]
 
 
 MAX_EVALUATION_K_VALUES = 8
@@ -228,6 +256,11 @@ def _snapshot_and_validate_relevance(
     ):
         raise RetrievalEvaluationError("collection must implement snapshot() and search()")
     snapshot = collection.snapshot()
+    _validate_relevance_against_snapshot(cases, snapshot)
+    return snapshot
+
+
+def _validate_relevance_against_snapshot(cases, snapshot) -> None:
     canonical_targets = {
         RetrievalTarget(document.source_id, document.logical_path)
         for document in snapshot.documents
@@ -239,7 +272,6 @@ def _snapshot_and_validate_relevance(
                     f"unknown relevance target in case {case.case_id}: "
                     f"{target.source_id}/{target.logical_path}"
                 )
-    return snapshot
 
 
 def _report_from_rankings(
@@ -359,6 +391,74 @@ def evaluate_retrieval_multi_k(
     )
 
 
+def compare_retrieval_backends(
+    backends: tuple[RetrievalBackend, ...],
+    cases: tuple[RetrievalEvaluationCase, ...],
+    *,
+    ks: tuple[int, ...] = (1, 3, 5, 10),
+) -> RetrievalComparisonReport:
+    if type(backends) is not tuple or not backends:
+        raise RetrievalComparisonError("backends must be a non-empty tuple")
+    if any(not isinstance(backend, RetrievalBackend) for backend in backends):
+        raise RetrievalComparisonError("backends must contain RetrievalBackend values")
+    names = tuple(backend.name for backend in backends)
+    if len(set(names)) != len(names):
+        raise RetrievalComparisonError("duplicate backend names are not allowed")
+    _validate_cases(cases)
+    ordered_ks = _validate_ks(ks)
+
+    collections: list[KnowledgeCollection] = []
+    snapshots: list[object] = []
+    for backend in backends:
+        try:
+            collection = backend.factory()
+        except Exception as exc:
+            raise RetrievalComparisonError("backend factory failed") from exc
+        if not callable(getattr(collection, "snapshot", None)) or not callable(
+            getattr(collection, "search", None)
+        ):
+            raise RetrievalComparisonError("backend factory returned an invalid collection")
+        try:
+            snapshot = collection.snapshot()
+        except Exception as exc:
+            raise RetrievalComparisonError("backend snapshot failed") from exc
+        collections.append(collection)
+        snapshots.append(snapshot)
+
+    reference = snapshots[0]
+    if any(snapshot != reference for snapshot in snapshots[1:]):
+        raise RetrievalComparisonError("backend canonical snapshots differ")
+    try:
+        _validate_relevance_against_snapshot(cases, reference)
+    except RetrievalEvaluationError as exc:
+        raise RetrievalComparisonError("comparison relevance validation failed") from exc
+
+    backend_reports: list[RetrievalBackendReport] = []
+    max_k = max(ordered_ks)
+    for backend, collection in zip(backends, collections):
+        rankings: list[tuple[object, ...]] = []
+        for case in cases:
+            try:
+                ranking = collection.search(case.query, limit=max_k)
+            except ChunkIndexLimitError as exc:
+                raise RetrievalComparisonError("backend retrieval limit is incompatible") from exc
+            except Exception as exc:
+                raise RetrievalComparisonError("backend retrieval failed") from exc
+            if type(ranking) is not tuple:
+                raise RetrievalComparisonError("backend retrieval returned an invalid result")
+            rankings.append(ranking)
+        frozen = tuple(rankings)
+        backend_reports.append(
+            RetrievalBackendReport(
+                backend_name=backend.name,
+                reports_by_k=tuple(
+                    _report_from_rankings(cases, frozen, k=k) for k in ordered_ks
+                ),
+            )
+        )
+    return RetrievalComparisonReport(ordered_ks, tuple(backend_reports))
+
+
 def evaluate_retrieval(
     collection: KnowledgeCollection,
     cases: tuple[RetrievalEvaluationCase, ...],
@@ -373,6 +473,10 @@ def evaluate_retrieval(
 __all__ = [
     "RetrievalCategory",
     "RetrievalCategoryReport",
+    "RetrievalBackend",
+    "RetrievalBackendReport",
+    "RetrievalComparisonError",
+    "RetrievalComparisonReport",
     "RetrievalEvaluationCase",
     "RetrievalEvaluationCaseResult",
     "RetrievalEvaluationDatasetError",
@@ -385,5 +489,6 @@ __all__ = [
     "evaluate_retrieval",
     "evaluate_retrieval_multi_k",
     "classify_retrieval_failure",
+    "compare_retrieval_backends",
     "load_retrieval_evaluation_cases",
 ]
