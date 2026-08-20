@@ -5,6 +5,7 @@ import json
 import pytest
 
 from nexusmind import (
+    RetrievalCategory,
     RetrievalEvaluationCase,
     RetrievalEvaluationDatasetError,
     RetrievalTarget,
@@ -17,6 +18,7 @@ def _valid_data() -> dict:
         "cases": [
             {
                 "case_id": "case-1",
+                "category": "exact_term",
                 "query": "secure world",
                 "relevant_documents": [
                     {"source_id": "eval-corpus", "logical_path": "trustzone.md"}
@@ -33,6 +35,7 @@ def test_loader_reads_valid_utf8_dataset(tmp_path) -> None:
     assert load_retrieval_evaluation_cases(path) == (
         RetrievalEvaluationCase(
             case_id="case-1",
+            category=RetrievalCategory.EXACT_TERM,
             query="secure world",
             relevant_documents=(RetrievalTarget("eval-corpus", "trustzone.md"),),
         ),
@@ -70,6 +73,7 @@ def test_loader_reads_valid_utf8_dataset(tmp_path) -> None:
                 "cases": [
                     {
                         "case_id": "case",
+                        "category": "exact_term",
                         "query": "q",
                         "relevant_documents": "bad",
                     }
@@ -82,6 +86,7 @@ def test_loader_reads_valid_utf8_dataset(tmp_path) -> None:
                 "cases": [
                     {
                         "case_id": "case",
+                        "category": "exact_term",
                         "query": "q",
                         "relevant_documents": ["bad"],
                     }
@@ -94,6 +99,7 @@ def test_loader_reads_valid_utf8_dataset(tmp_path) -> None:
                 "cases": [
                     {
                         "case_id": "case",
+                        "category": "exact_term",
                         "query": "q",
                         "relevant_documents": [
                             {"source_id": "source", "logical_path": "a.md", "extra": 1}
@@ -121,6 +127,22 @@ def test_loader_rejects_invalid_json_and_missing_file(tmp_path) -> None:
         load_retrieval_evaluation_cases(invalid)
     with pytest.raises(RetrievalEvaluationDatasetError, match="read dataset"):
         load_retrieval_evaluation_cases(tmp_path / "missing.json")
+
+
+def test_loader_rejects_unknown_or_missing_category(tmp_path) -> None:
+    unknown = _valid_data()
+    unknown["cases"][0]["category"] = "not-real"
+    path = tmp_path / "unknown-category.json"
+    path.write_text(json.dumps(unknown), encoding="utf-8")
+    with pytest.raises(RetrievalEvaluationDatasetError, match="unknown category"):
+        load_retrieval_evaluation_cases(path)
+
+    missing = _valid_data()
+    del missing["cases"][0]["category"]
+    path = tmp_path / "missing-category.json"
+    path.write_text(json.dumps(missing), encoding="utf-8")
+    with pytest.raises(RetrievalEvaluationDatasetError, match="case fields"):
+        load_retrieval_evaluation_cases(path)
 
 
 def test_loader_rejects_duplicate_case_ids_and_targets(tmp_path) -> None:
