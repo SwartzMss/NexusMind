@@ -539,7 +539,7 @@ class KnowledgeBase:
             sources=self._manifest.sources + (config,),
             limits=self._limits,
         )
-        write_manifest(self._root / _MANIFEST_NAME, candidate, self._limits)
+        self._persist_manifest(candidate)
         self._manifest = candidate
 
     def unregister_source(self, source_id: str) -> None:
@@ -562,8 +562,18 @@ class KnowledgeBase:
             ),
             limits=self._limits,
         )
-        write_manifest(self._root / _MANIFEST_NAME, candidate, self._limits)
+        self._persist_manifest(candidate)
         self._manifest = candidate
+
+    def _persist_manifest(self, candidate: KnowledgeBaseManifest) -> None:
+        try:
+            write_manifest(self._root / _MANIFEST_NAME, candidate, self._limits)
+        except KnowledgeBaseConfigError:
+            raise
+        except Exception as exc:
+            raise KnowledgeBasePersistenceError(
+                "unable to persist knowledge-base manifest"
+            ) from exc
 
     def sync(self) -> tuple[KnowledgeSyncResult, ...]:
         """Atomically synchronize every registered source in identifier order."""
