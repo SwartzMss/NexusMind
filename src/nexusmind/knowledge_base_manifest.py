@@ -133,6 +133,7 @@ class KnowledgeBaseManifest:
 
 _ROOT_KEYS = frozenset({"format_version", "knowledge_base_id", "display_name", "sources"})
 _SOURCE_KEYS = frozenset({"config_version", "source_id", "type", "path"})
+_READ_CHUNK_BYTES = 64 * 1024
 
 
 def _manifest_mapping(manifest: KnowledgeBaseManifest) -> dict[str, object]:
@@ -265,7 +266,15 @@ def read_manifest(path: str | os.PathLike[str], limits: KnowledgeBaseLimits) -> 
         raise KnowledgeBaseConfigError("limits must be KnowledgeBaseLimits")
     try:
         with Path(path).open("rb") as stream:
-            data = stream.read(limits.max_manifest_bytes + 1)
+            remaining = limits.max_manifest_bytes + 1
+            chunks: list[bytes] = []
+            while remaining:
+                chunk = stream.read(min(remaining, _READ_CHUNK_BYTES))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            data = b"".join(chunks)
     except (OSError, TypeError, ValueError) as exc:
         raise KnowledgeBasePersistenceError("unable to read knowledge-base manifest") from exc
     return decode_manifest(data, limits)

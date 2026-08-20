@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import io
 import os
+import sys
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -322,6 +323,16 @@ def test_read_manifest_reads_at_most_limit_plus_one_byte(monkeypatch: pytest.Mon
     with pytest.raises(KnowledgeBaseConfigError, match="size"):
         read_manifest("ignored", KnowledgeBaseLimits(max_manifest_bytes=10))
     assert requested == [11]
+
+
+def test_read_manifest_handles_very_large_valid_byte_limit(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.json"
+    value = manifest()
+    path.write_bytes(encode_manifest(value, KnowledgeBaseLimits()))
+
+    assert read_manifest(
+        path, KnowledgeBaseLimits(max_manifest_bytes=sys.maxsize)
+    ) == value
 
 
 class _RecordingBinaryFile(io.BytesIO):
