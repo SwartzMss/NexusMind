@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 import errno
@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import sqlite3
 import stat
+from threading import RLock
 from typing import Callable
 from uuid import uuid4
 
@@ -17,6 +18,7 @@ from .knowledge import Document, KnowledgeSourceType
 from .knowledge_base_manifest import (
     KnowledgeBaseClosedError,
     KnowledgeBaseConfigError,
+    KnowledgeBaseError,
     KnowledgeBaseLimits,
     KnowledgeBaseManifest,
     KnowledgeBasePersistenceError,
@@ -45,6 +47,7 @@ from .lexical_analysis import UnicodeCJKLexicalAnalyzer
 
 _MANIFEST_NAME = "manifest.json"
 _DATABASE_NAME = "knowledge.db"
+_MUTATION_LOCK_NAME = ".mutation.lock"
 _SQLITE_HEADER = b"SQLite format 3\x00"
 _UNSUPPORTED_LINK_ERRNOS = frozenset(
     value
@@ -157,6 +160,7 @@ class KnowledgeBase:
         self._index_factory = index_factory
         self._limits = limits
         self._closed = False
+        self._mutation_mutex = RLock()
 
     @classmethod
     def create(
@@ -524,11 +528,27 @@ class KnowledgeBase:
         self, query: str, *, limit: int = 10
     ) -> tuple[KnowledgeSearchResult, ...]:
         self._require_open()
-        return self._collection.search(query, limit=limit)
+        if type(query) is not str:
+            raise TypeError("query must be a string")
+        if type(limit) is not int:
+            raise TypeError("limit must be an integer")
+        if limit <= 0:
+            raise ValueError("limit must be greater than zero")
+        try:
+            return self._collection.search(query, limit=limit)
+        except KnowledgeBaseError:
+            raise
+        except Exception as exc:
+            raise KnowledgeBaseSourceError("unable to search knowledge base") from exc
 
     def add_source(self, config: RegisteredSourceConfig) -> None:
         """Persist a source registration without touching the source itself."""
         self._require_open()
+        with self._mutation_guard():
+            self._refresh_manifest()
+            self._add_source(config)
+
+    def _add_source(self, config: RegisteredSourceConfig) -> None:
         if type(config) not in (LocalFileSourceConfig, LocalDirectorySourceConfig):
             raise KnowledgeBaseConfigError("source config type is unsupported")
         if any(item.source_id == config.source_id for item in self._manifest.sources):
@@ -545,6 +565,12 @@ class KnowledgeBase:
     def unregister_source(self, source_id: str) -> None:
         """Remove an unused registration while preserving canonical content."""
         self._require_open()
+        with self._mutation_guard():
+            self._refresh_manifest()
+            self._refresh_collection()
+            self._unregister_source(source_id)
+
+    def _unregister_source(self, source_id: str) -> None:
         if type(source_id) is not str or not source_id:
             raise KnowledgeBaseConfigError("source_id must be non-empty text")
         registration = next(
@@ -578,19 +604,77 @@ class KnowledgeBase:
     def sync(self) -> tuple[KnowledgeSyncResult, ...]:
         """Atomically synchronize every registered source in identifier order."""
         self._require_open()
-        if not self._manifest.sources:
-            return ()
-        return self._sync_configs(self._manifest.sources)
+        with self._mutation_guard():
+            self._refresh_manifest()
+            if not self._manifest.sources:
+                return ()
+            self._refresh_collection()
+            return self._sync_configs(self._manifest.sources)
 
     def sync_source(self, source_id: str) -> KnowledgeSyncResult:
         """Atomically synchronize exactly one registered source."""
         self._require_open()
-        config = next(
-            (item for item in self._manifest.sources if item.source_id == source_id), None
-        )
-        if config is None:
-            raise KnowledgeBaseSourceError("source_id is not registered")
-        return self._sync_configs((config,))[0]
+        if type(source_id) is not str or not source_id:
+            raise KnowledgeBaseConfigError("source_id must be non-empty text")
+        with self._mutation_guard():
+            self._refresh_manifest()
+            config = next(
+                (item for item in self._manifest.sources if item.source_id == source_id),
+                None,
+            )
+            if config is None:
+                raise KnowledgeBaseSourceError("source_id is not registered")
+            self._refresh_collection()
+            return self._sync_configs((config,))[0]
+
+    def _refresh_manifest(self) -> None:
+        self._manifest = read_manifest(self._root / _MANIFEST_NAME, self._limits)
+
+    def _refresh_collection(self) -> None:
+        try:
+            snapshot = SQLiteKnowledgeSnapshotStore(
+                self._root / _DATABASE_NAME
+            ).load()
+            self._validate_coherence(self._manifest, snapshot)
+            candidate = self._new_collection(self._index_factory, self._limits)
+            candidate.restore(snapshot)
+        except KnowledgeBasePersistenceError:
+            raise
+        except Exception as exc:
+            raise KnowledgeBasePersistenceError(
+                "unable to refresh canonical knowledge state"
+            ) from exc
+        self._collection = candidate
+
+    @contextmanager
+    def _mutation_guard(self):
+        """Serialize mutations locally and fail closed across open handles."""
+        with self._mutation_mutex:
+            lock_path = self._root / _MUTATION_LOCK_NAME
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            flags |= getattr(os, "O_BINARY", 0)
+            descriptor = -1
+            try:
+                descriptor = os.open(lock_path, flags, 0o600)
+                info = os.fstat(descriptor)
+                identity = (info.st_dev, info.st_ino)
+            except OSError as exc:
+                if descriptor >= 0:
+                    os.close(descriptor)
+                raise KnowledgeBasePersistenceError(
+                    "another knowledge-base mutation is active"
+                ) from exc
+            try:
+                yield
+            finally:
+                try:
+                    os.close(descriptor)
+                finally:
+                    try:
+                        if self._file_identity(lock_path) == identity:
+                            lock_path.unlink()
+                    except OSError:
+                        pass
 
     def _sync_configs(
         self, configs: tuple[RegisteredSourceConfig, ...]

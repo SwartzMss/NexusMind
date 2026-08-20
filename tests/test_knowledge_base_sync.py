@@ -1,5 +1,6 @@
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
 
@@ -379,3 +380,159 @@ def test_list_sources_is_sorted_tuple_of_frozen_configs(tmp_path: Path) -> None:
     assert tuple(item.source_id for item in sources) == ("a", "z")
     with pytest.raises(FrozenInstanceError):
         sources[0].path = "mutated"  # type: ignore[misc]
+
+
+def test_all_mutations_fail_closed_while_cross_handle_lock_is_held(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "kb"
+    path = tmp_path / "one.txt"
+    path.write_text("one", encoding="utf-8")
+    first = KnowledgeBase.create(str(root), knowledge_base_id="kb")
+    first.add_source(LocalFileSourceConfig(source_id="one", path=str(path)))
+    contender = KnowledgeBase.open(str(root))
+    manifest_before = root.joinpath("manifest.json").read_bytes()
+    snapshot_before = SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load()
+    lock_path = root / ".mutation.lock"
+    lock_path.write_bytes(b"held by another process")
+
+    operations = (
+        lambda: contender.add_source(
+            LocalFileSourceConfig(source_id="two", path="two.txt")
+        ),
+        lambda: contender.unregister_source("one"),
+        contender.sync,
+        lambda: contender.sync_source("one"),
+    )
+    for operation in operations:
+        with pytest.raises(KnowledgeBasePersistenceError) as caught:
+            operation()
+        assert str(root) not in str(caught.value)
+
+    assert lock_path.read_bytes() == b"held by another process"
+    assert contender.list_sources() == first.list_sources()
+    assert root.joinpath("manifest.json").read_bytes() == manifest_before
+    assert SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load() == snapshot_before
+
+
+def test_instance_mutations_are_serialized_without_lost_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kb = KnowledgeBase.create(str(tmp_path / "kb"), knowledge_base_id="kb")
+    first_entered = Event()
+    release_first = Event()
+    real_write = module.write_manifest
+    calls = 0
+
+    def blocking_write(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_entered.set()
+            assert release_first.wait(timeout=5)
+        return real_write(*args, **kwargs)
+
+    monkeypatch.setattr(module, "write_manifest", blocking_write)
+    errors: list[BaseException] = []
+
+    def register(source_id: str) -> None:
+        try:
+            kb.add_source(LocalFileSourceConfig(source_id=source_id, path=f"{source_id}.txt"))
+        except BaseException as exc:
+            errors.append(exc)
+
+    first = Thread(target=register, args=("a",))
+    second = Thread(target=register, args=("b",))
+    first.start()
+    assert first_entered.wait(timeout=5)
+    second.start()
+    assert calls == 1
+    release_first.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert errors == []
+    assert calls == 2
+    assert tuple(item.source_id for item in kb.list_sources()) == ("a", "b")
+
+
+def test_serialized_stale_handles_refresh_manifest_before_mutation(tmp_path: Path) -> None:
+    root = tmp_path / "kb"
+    first = KnowledgeBase.create(str(root), knowledge_base_id="kb")
+    second = KnowledgeBase.open(str(root))
+
+    first.add_source(LocalFileSourceConfig(source_id="a", path="a.txt"))
+    second.add_source(LocalFileSourceConfig(source_id="b", path="b.txt"))
+
+    reopened = KnowledgeBase.open(str(root))
+    assert tuple(item.source_id for item in reopened.list_sources()) == ("a", "b")
+
+
+def test_search_wraps_private_runtime_failure_but_preserves_input_validation(
+    tmp_path: Path,
+) -> None:
+    controlled = KnowledgeBaseSourceError("controlled search failure")
+
+    class ExplodingIndex(InMemoryChunkIndex):
+        def search(self, query: str, *, limit: int = 10):
+            if type(query) is not str:
+                return super().search(query, limit=limit)
+            if query == "controlled":
+                raise controlled
+            raise RuntimeError(f"provider-secret for query {query}")
+
+    kb = KnowledgeBase.create(
+        str(tmp_path / "kb"), knowledge_base_id="kb", index_factory=ExplodingIndex
+    )
+
+    with pytest.raises(TypeError):
+        kb.search(42)  # type: ignore[arg-type]
+    with pytest.raises(KnowledgeBaseSourceError) as preserved:
+        kb.search("controlled")
+    assert preserved.value is controlled
+    with pytest.raises(KnowledgeBaseSourceError) as caught:
+        kb.search("secret-query")
+    assert "provider-secret" not in str(caught.value)
+    assert "secret-query" not in str(caught.value)
+    assert isinstance(caught.value.__cause__, RuntimeError)
+
+
+def test_sync_and_reopen_reuse_injected_cloneable_index_factory(tmp_path: Path) -> None:
+    instances: list[InMemoryChunkIndex] = []
+
+    class AlternativeIndex(InMemoryChunkIndex):
+        pass
+
+    def factory() -> AlternativeIndex:
+        index = AlternativeIndex()
+        instances.append(index)
+        return index
+
+    source = tmp_path / "source.txt"
+    source.write_text("alternative runtime searchable", encoding="utf-8")
+    root = tmp_path / "kb"
+    kb = KnowledgeBase.create(
+        str(root), knowledge_base_id="kb", index_factory=factory
+    )
+    kb.add_source(LocalFileSourceConfig(source_id="source", path=str(source)))
+    calls_before_sync = len(instances)
+
+    kb.sync()
+
+    assert len(instances) > calls_before_sync
+    assert kb.search("searchable")
+    kb.close()
+    calls_before_open = len(instances)
+    reopened = KnowledgeBase.open(str(root), index_factory=factory)
+    assert len(instances) > calls_before_open
+    assert reopened.search("searchable")
+
+
+@pytest.mark.parametrize("source_id", [None, 1, ""])
+def test_sync_source_rejects_malformed_source_id(
+    tmp_path: Path, source_id: object
+) -> None:
+    kb = KnowledgeBase.create(str(tmp_path / f"kb-{source_id}"), knowledge_base_id="kb")
+    with pytest.raises(KnowledgeBaseConfigError):
+        kb.sync_source(source_id)  # type: ignore[arg-type]
