@@ -82,7 +82,10 @@ RegisteredSourceConfig: TypeAlias = LocalFileSourceConfig | LocalDirectorySource
 
 
 def _normalized_path(path: str) -> str:
-    return str(Path(path).resolve(strict=False))
+    try:
+        return str(Path(path).resolve(strict=False))
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise KnowledgeBaseConfigError("source path cannot be normalized") from exc
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -258,8 +261,11 @@ def decode_manifest(data: bytes, limits: KnowledgeBaseLimits) -> KnowledgeBaseMa
 
 def read_manifest(path: str | os.PathLike[str], limits: KnowledgeBaseLimits) -> KnowledgeBaseManifest:
     """Read and strictly decode a manifest file."""
+    if not isinstance(limits, KnowledgeBaseLimits):
+        raise KnowledgeBaseConfigError("limits must be KnowledgeBaseLimits")
     try:
-        data = Path(path).read_bytes()
+        with Path(path).open("rb") as stream:
+            data = stream.read(limits.max_manifest_bytes + 1)
     except (OSError, TypeError, ValueError) as exc:
         raise KnowledgeBasePersistenceError("unable to read knowledge-base manifest") from exc
     return decode_manifest(data, limits)
