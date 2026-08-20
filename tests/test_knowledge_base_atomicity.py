@@ -228,22 +228,105 @@ def test_manifest_failure_compensates_exact_old_canonical_snapshot(
         calls.append(snapshot)
         return real_save(self, snapshot)
 
-    def fail_manifest(*args, **kwargs):
-        calls.append("manifest")
-        raise RuntimeError("private manifest detail")
+    real_write = module.write_manifest
+    writes = 0
+
+    def commit_candidate_then_restore_old(*args, **kwargs):
+        nonlocal writes
+        writes += 1
+        calls.append(("manifest", args[1]))
+        real_write(*args, **kwargs)
+        if writes == 1:
+            raise RuntimeError("private manifest detail")
 
     monkeypatch.setattr(module.SQLiteKnowledgeSnapshotStore, "save", recording_save)
-    monkeypatch.setattr(module, "write_manifest", fail_manifest)
+    monkeypatch.setattr(module, "write_manifest", commit_candidate_then_restore_old)
 
     with pytest.raises(KnowledgeBasePersistenceError) as caught:
         kb.remove_source("first")
 
-    assert calls[1] == "manifest"
-    assert calls[2] == snapshot_before
+    assert tuple(item.source_id for item in calls[0].sources) == ("second",)
+    assert calls[1][0] == "manifest"
+    assert tuple(item.source_id for item in calls[1][1].sources) == ("second",)
+    assert calls[2][0] == "manifest"
+    assert tuple(item.source_id for item in calls[2][1].sources) == ("first", "second")
+    assert calls[3] == snapshot_before
     assert "private" not in str(caught.value)
     assert root.joinpath("manifest.json").read_bytes() == manifest_before
     assert SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load() == snapshot_before
     assert tuple(item.source_id for item in kb.list_sources()) == ("first", "second")
+    assert KnowledgeBase.open(str(root)).status() == kb.status()
+
+
+def test_manifest_recovery_failure_poisons_even_when_database_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kb, root = _synced_pair(tmp_path)
+    real_write = module.write_manifest
+    real_save = module.SQLiteKnowledgeSnapshotStore.save
+    calls: list[str] = []
+    writes = 0
+
+    def fail_manifest_recovery(*args, **kwargs):
+        nonlocal writes
+        writes += 1
+        calls.append(f"manifest-{writes}")
+        real_write(*args, **kwargs)
+        if writes == 1:
+            raise RuntimeError("private candidate detail")
+        raise RuntimeError("private recovery detail")
+
+    def recording_save(self, snapshot):
+        calls.append("database")
+        return real_save(self, snapshot)
+
+    monkeypatch.setattr(module, "write_manifest", fail_manifest_recovery)
+    monkeypatch.setattr(module.SQLiteKnowledgeSnapshotStore, "save", recording_save)
+    with pytest.raises(KnowledgeBasePersistenceError, match="recovery") as caught:
+        kb.remove_source("first")
+
+    assert calls == ["database", "manifest-1", "manifest-2", "database"]
+    assert "private" not in str(caught.value)
+    with pytest.raises(KnowledgeBaseClosedError):
+        kb.status()
+    KnowledgeBase.open(str(root))
+
+
+def test_database_recovery_failure_still_attempts_manifest_recovery_and_poisons(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kb, _ = _synced_pair(tmp_path)
+    real_write = module.write_manifest
+    real_save = module.SQLiteKnowledgeSnapshotStore.save
+    calls: list[str] = []
+    saves = 0
+    writes = 0
+
+    def candidate_commit_then_fail(*args, **kwargs):
+        nonlocal writes
+        writes += 1
+        calls.append(f"manifest-{writes}")
+        real_write(*args, **kwargs)
+        if writes == 1:
+            raise RuntimeError("private candidate detail")
+
+    def fail_database_recovery(self, snapshot):
+        nonlocal saves
+        saves += 1
+        calls.append(f"database-{saves}")
+        if saves == 2:
+            raise RuntimeError("private database recovery")
+        return real_save(self, snapshot)
+
+    monkeypatch.setattr(module, "write_manifest", candidate_commit_then_fail)
+    monkeypatch.setattr(module.SQLiteKnowledgeSnapshotStore, "save", fail_database_recovery)
+    with pytest.raises(KnowledgeBasePersistenceError, match="recovery") as caught:
+        kb.remove_source("first")
+
+    assert calls == ["database-1", "manifest-1", "manifest-2", "database-2"]
+    assert "private" not in str(caught.value)
+    with pytest.raises(KnowledgeBaseClosedError):
+        kb.list_sources()
 
 
 def test_failed_compensation_poisons_handle_and_reports_recovery_failure(

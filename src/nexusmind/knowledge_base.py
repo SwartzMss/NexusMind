@@ -618,6 +618,7 @@ class KnowledgeBase:
         if registration is None:
             raise KnowledgeBaseSourceError("source_id is not registered")
 
+        old_manifest = self._manifest
         old_snapshot = self._collection.snapshot()
         try:
             staging = self._new_collection(self._index_factory, self._limits)
@@ -663,13 +664,20 @@ class KnowledgeBase:
         try:
             self._persist_manifest(candidate)
         except Exception as manifest_error:
+            recovery_failed = False
+            try:
+                self._persist_manifest(old_manifest)
+            except Exception:
+                recovery_failed = True
             try:
                 store.save(old_snapshot)
-            except Exception as recovery_error:
+            except Exception:
+                recovery_failed = True
+            if recovery_failed:
                 self._closed = True
                 raise KnowledgeBasePersistenceError(
                     "knowledge-source removal recovery failed; knowledge base is unusable"
-                ) from recovery_error
+                ) from manifest_error
             raise KnowledgeBasePersistenceError(
                 "unable to persist knowledge-source removal"
             ) from manifest_error
