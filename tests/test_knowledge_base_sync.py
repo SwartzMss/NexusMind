@@ -715,13 +715,22 @@ def test_sync_and_reopen_reuse_injected_cloneable_index_factory(tmp_path: Path) 
     assert reopened.search("searchable")
 
 
-@pytest.mark.parametrize("source_id", [None, 1, ""])
+@pytest.mark.parametrize("source_id", [None, 1, "", " ", "\t", "\r\n"])
 def test_sync_source_rejects_malformed_source_id(
     tmp_path: Path, source_id: object
 ) -> None:
-    kb = KnowledgeBase.create(str(tmp_path / f"kb-{source_id}"), knowledge_base_id="kb")
+    kb = KnowledgeBase.create(str(tmp_path / "kb"), knowledge_base_id="kb")
     with pytest.raises(KnowledgeBaseConfigError):
         kb.sync_source(source_id)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("source_id", [None, 1, "", " ", "\t", "\r\n"])
+def test_unregister_source_rejects_malformed_source_id(
+    tmp_path: Path, source_id: object
+) -> None:
+    kb = KnowledgeBase.create(str(tmp_path / "kb"), knowledge_base_id="kb")
+    with pytest.raises(KnowledgeBaseConfigError):
+        kb.unregister_source(source_id)  # type: ignore[arg-type]
 
 
 def test_create_relative_root_remains_stable_after_working_directory_change(

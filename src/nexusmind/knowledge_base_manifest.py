@@ -47,7 +47,7 @@ class KnowledgeBaseLimits:
 
 
 def _require_non_empty_text(value: object, field: str) -> str:
-    if type(value) is not str or not value:
+    if type(value) is not str or not value.strip():
         raise KnowledgeBaseConfigError(f"{field} must be non-empty text")
     return value
 
@@ -119,10 +119,12 @@ class KnowledgeBaseManifest:
         for item in self.sources:
             if type(item) not in (LocalFileSourceConfig, LocalDirectorySourceConfig):
                 raise KnowledgeBaseConfigError("sources contain an unsupported member")
-            if item.source_id in seen:
+            source_id = _require_non_empty_text(item.source_id, "source_id")
+            _require_non_empty_text(item.path, "path")
+            if source_id in seen:
                 raise KnowledgeBaseConfigError("source identifiers must be unique")
-            seen.add(item.source_id)
-            if len(item.source_id) > active_limits.max_source_id_chars:
+            seen.add(source_id)
+            if len(source_id) > active_limits.max_source_id_chars:
                 raise KnowledgeBaseConfigError("source_id exceeds configured limit")
             path = _normalized_path(item.path)
             if len(path) > active_limits.max_path_chars:

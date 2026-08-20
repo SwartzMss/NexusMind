@@ -703,7 +703,7 @@ class KnowledgeBase:
         self._manifest = candidate
 
     def _unregister_source(self, source_id: str) -> None:
-        if type(source_id) is not str or not source_id:
+        if type(source_id) is not str or not source_id.strip():
             raise KnowledgeBaseConfigError("source_id must be non-empty text")
         registration = next(
             (item for item in self._manifest.sources if item.source_id == source_id), None
@@ -746,7 +746,7 @@ class KnowledgeBase:
     def sync_source(self, source_id: str) -> KnowledgeSyncResult:
         """Atomically synchronize exactly one registered source."""
         self._require_open()
-        if type(source_id) is not str or not source_id:
+        if type(source_id) is not str or not source_id.strip():
             raise KnowledgeBaseConfigError("source_id must be non-empty text")
         with self._mutation_guard():
             self._refresh_manifest()

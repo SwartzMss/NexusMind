@@ -91,26 +91,26 @@ def test_source_contracts_are_frozen_and_own_fixed_discriminators(source_type: t
         source_type(source_id="docs", path="/tmp", type="wrong")
 
 
-@pytest.mark.parametrize("source_id", ["", 1, None])
+@pytest.mark.parametrize("source_id", ["", " ", "\t", "\r\n", 1, None])
 def test_source_id_must_be_non_empty_text(source_id: object) -> None:
     with pytest.raises(KnowledgeBaseConfigError):
         LocalFileSourceConfig(source_id=source_id, path="/tmp")  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("source_type", [LocalFileSourceConfig, LocalDirectorySourceConfig])
-@pytest.mark.parametrize("path", ["", 1, None, b"/tmp"])
+@pytest.mark.parametrize("path", ["", " ", "\t", "\r\n", 1, None, b"/tmp"])
 def test_source_path_must_be_non_empty_text(source_type: type, path: object) -> None:
     with pytest.raises(KnowledgeBaseConfigError):
         source_type(source_id="docs", path=path)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("knowledge_base_id", ["", 1, None])
+@pytest.mark.parametrize("knowledge_base_id", ["", " ", "\t", "\r\n", 1, None])
 def test_manifest_id_must_be_non_empty_text(knowledge_base_id: object) -> None:
     with pytest.raises(KnowledgeBaseConfigError):
         manifest(knowledge_base_id=knowledge_base_id)
 
 
-@pytest.mark.parametrize("display_name", ["", 1, False])
+@pytest.mark.parametrize("display_name", ["", " ", "\t", "\r\n", 1, False])
 def test_display_name_must_be_none_or_non_empty_text(display_name: object) -> None:
     with pytest.raises(KnowledgeBaseConfigError):
         manifest(display_name=display_name)
@@ -181,6 +181,32 @@ def test_codec_is_exact_utf8_deterministic_and_order_independent() -> None:
     ).encode("utf-8")
     assert encode_manifest(first, limits) == exact_two_source_json
     assert decode_manifest(encode_manifest(first, limits), limits) == first
+
+
+@pytest.mark.parametrize("source_id", [" ", "\t", "\r\n"])
+def test_codec_rejects_blank_source_ids(source_id: str) -> None:
+    limits = KnowledgeBaseLimits()
+    invalid_source = source()
+    object.__setattr__(invalid_source, "source_id", source_id)
+    invalid_manifest = manifest()
+    object.__setattr__(invalid_manifest, "sources", (invalid_source,))
+    with pytest.raises(KnowledgeBaseConfigError):
+        encode_manifest(invalid_manifest, limits)
+
+    item = {
+        "config_version": "1",
+        "source_id": source_id,
+        "type": "local_file",
+        "path": str(ABSOLUTE_BASE / "docs"),
+    }
+    root = {
+        "format_version": "1",
+        "knowledge_base_id": "kb",
+        "display_name": None,
+        "sources": [item],
+    }
+    with pytest.raises(KnowledgeBaseConfigError):
+        decode_manifest(encoded(root), limits)
 
 
 @pytest.mark.parametrize(
