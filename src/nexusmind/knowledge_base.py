@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import sqlite3
 import stat
 from typing import Callable
 
@@ -88,6 +90,34 @@ def _require_sqlite_header(path: Path) -> None:
         ) from exc
     if header != _SQLITE_HEADER:
         raise KnowledgeBasePersistenceError("canonical knowledge state is invalid")
+
+
+def _require_store_sentinel(path: Path) -> None:
+    try:
+        uri = f"{path.resolve(strict=True).as_uri()}?mode=ro&immutable=1"
+        with closing(sqlite3.connect(uri, uri=True)) as database:
+            table = database.execute(
+                "SELECT type FROM sqlite_master "
+                "WHERE name = 'knowledge_store_metadata'"
+            ).fetchone()
+            if table != ("table",):
+                raise KnowledgeBasePersistenceError(
+                    "canonical knowledge state is invalid"
+                )
+            version = database.execute(
+                "SELECT value FROM knowledge_store_metadata "
+                "WHERE key = 'schema_version'"
+            ).fetchone()
+            if version != ("1",):
+                raise KnowledgeBasePersistenceError(
+                    "canonical knowledge state is invalid"
+                )
+    except KnowledgeBasePersistenceError:
+        raise
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        raise KnowledgeBasePersistenceError(
+            "unable to read canonical knowledge state"
+        ) from exc
 
 
 class KnowledgeBase:
@@ -201,6 +231,7 @@ class KnowledgeBase:
 
         manifest = read_manifest(manifest_path, active_limits)
         _require_sqlite_header(database_path)
+        _require_store_sentinel(database_path)
         try:
             snapshot = SQLiteKnowledgeSnapshotStore(database_path).load()
         except KnowledgeSnapshotStoreError as exc:

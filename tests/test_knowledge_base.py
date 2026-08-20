@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+import sqlite3
 
 import pytest
 import nexusmind.knowledge_base as knowledge_base_module
@@ -145,6 +146,53 @@ def test_open_rejects_invalid_database_without_mutating_it(
     assert database.read_bytes() == payload
     assert "private-token" not in str(caught.value)
     assert str(root) not in str(caught.value)
+
+
+@pytest.mark.parametrize("sentinel", ["missing", "wrong-version", "wrong-table"])
+def test_open_rejects_sqlite_without_valid_store_sentinel_without_mutation(
+    tmp_path: Path, sentinel: str
+) -> None:
+    root = tmp_path / f"private-sentinel-{sentinel}"
+    root.mkdir()
+    write_manifest(
+        root / "manifest.json",
+        KnowledgeBaseManifest(knowledge_base_id="kb"),
+        KnowledgeBaseLimits(),
+    )
+    database = root / "knowledge.db"
+    with sqlite3.connect(database) as db:
+        if sentinel == "wrong-version":
+            db.execute(
+                "CREATE TABLE knowledge_store_metadata "
+                "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            )
+            db.execute(
+                "INSERT INTO knowledge_store_metadata (key, value) VALUES (?, ?)",
+                ("schema_version", "private-version"),
+            )
+        elif sentinel == "wrong-table":
+            db.execute("CREATE TABLE private_table (value TEXT)")
+            db.execute("INSERT INTO private_table VALUES ('private-row')")
+        else:
+            db.execute("PRAGMA user_version = 7")
+    before = database.read_bytes()
+    with sqlite3.connect(database) as db:
+        schema_before = db.execute(
+            "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
+        ).fetchall()
+
+    with pytest.raises(KnowledgeBasePersistenceError) as caught:
+        KnowledgeBase.open(str(root))
+
+    assert database.read_bytes() == before
+    with sqlite3.connect(database) as db:
+        assert db.execute(
+            "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
+        ).fetchall() == schema_before
+    message = str(caught.value)
+    assert "private-version" not in message
+    assert "private-row" not in message
+    assert str(root) not in message
 
 
 def test_create_failure_cleans_only_owned_artifacts_and_preserves_user_directory(
