@@ -106,13 +106,6 @@ def _default_index_factory() -> InMemoryChunkIndex:
     return InMemoryChunkIndex(analyzer=UnicodeCJKLexicalAnalyzer())
 
 
-def _prepare_coordination_file(descriptor: int) -> None:
-    if os.fstat(descriptor).st_size == 0:
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        os.write(descriptor, b"\0")
-        os.fsync(descriptor)
-
-
 def _acquire_advisory_lock(descriptor: int) -> None:
     if os.name == "nt":
         os.lseek(descriptor, 0, os.SEEK_SET)
@@ -270,9 +263,20 @@ class KnowledgeBase:
                 raise KnowledgeBasePersistenceError("knowledge-base root must be a real directory")
             manifest_path = root / _MANIFEST_NAME
             database_path = root / _DATABASE_NAME
-            if not manifest_path.is_file() or not database_path.is_file():
+            lock_path = root / _MUTATION_LOCK_NAME
+            if (
+                not manifest_path.is_file()
+                or not database_path.is_file()
+                or not lock_path.is_file()
+            ):
                 raise KnowledgeBasePersistenceError("knowledge-base layout is incomplete")
-            if _is_reparse_or_symlink(manifest_path) or _is_reparse_or_symlink(database_path):
+            if (
+                _is_reparse_or_symlink(manifest_path)
+                or _is_reparse_or_symlink(database_path)
+                or _is_reparse_or_symlink(lock_path)
+                or not stat.S_ISREG(lock_path.stat(follow_symlinks=False).st_mode)
+                or lock_path.stat(follow_symlinks=False).st_size < 1
+            ):
                 raise KnowledgeBasePersistenceError("knowledge-base layout is invalid")
         except KnowledgeBasePersistenceError:
             raise
@@ -678,13 +682,37 @@ class KnowledgeBase:
         """Serialize mutations locally and fail closed across open handles."""
         with self._mutation_mutex:
             lock_path = self._root / _MUTATION_LOCK_NAME
-            flags = os.O_RDWR | os.O_CREAT
+            flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
             flags |= getattr(os, "O_BINARY", 0)
             descriptor = -1
             try:
+                if _is_reparse_or_symlink(lock_path):
+                    raise KnowledgeBasePersistenceError(
+                        "knowledge-base coordination state is invalid"
+                    )
                 descriptor = os.open(lock_path, flags, 0o600)
-                _prepare_coordination_file(descriptor)
+                info = os.fstat(descriptor)
+                identity = (info.st_dev, info.st_ino)
+                if not stat.S_ISREG(info.st_mode) or info.st_size < 1:
+                    raise KnowledgeBasePersistenceError(
+                        "knowledge-base coordination state is invalid"
+                    )
+                if self._file_identity(lock_path) != identity:
+                    raise KnowledgeBasePersistenceError(
+                        "knowledge-base coordination state changed"
+                    )
                 _acquire_advisory_lock(descriptor)
+                if (
+                    _is_reparse_or_symlink(lock_path)
+                    or self._file_identity(lock_path) != identity
+                ):
+                    raise KnowledgeBasePersistenceError(
+                        "knowledge-base coordination state changed"
+                    )
+            except KnowledgeBasePersistenceError:
+                if descriptor >= 0:
+                    os.close(descriptor)
+                raise
             except OSError as exc:
                 if descriptor >= 0:
                     os.close(descriptor)

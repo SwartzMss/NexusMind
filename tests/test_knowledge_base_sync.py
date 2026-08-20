@@ -449,6 +449,62 @@ def test_advisory_lock_is_released_when_holder_closes_descriptor(tmp_path: Path)
     assert tuple(item.source_id for item in kb.list_sources()) == ("one",)
 
 
+def test_open_requires_real_coordination_file(tmp_path: Path) -> None:
+    missing_root = tmp_path / "missing-lock"
+    KnowledgeBase.create(str(missing_root), knowledge_base_id="kb").close()
+    missing_root.joinpath(".knowledge-base.lock").unlink()
+    with pytest.raises(KnowledgeBasePersistenceError):
+        KnowledgeBase.open(str(missing_root))
+
+    symlink_root = tmp_path / "symlink-lock"
+    KnowledgeBase.create(str(symlink_root), knowledge_base_id="kb").close()
+    lock_path = symlink_root / ".knowledge-base.lock"
+    lock_path.unlink()
+    lock_path.symlink_to(symlink_root / "manifest.json")
+    with pytest.raises(KnowledgeBasePersistenceError):
+        KnowledgeBase.open(str(symlink_root))
+
+
+def test_mutation_does_not_recreate_missing_coordination_file(tmp_path: Path) -> None:
+    root = tmp_path / "kb"
+    kb = KnowledgeBase.create(str(root), knowledge_base_id="kb")
+    manifest_before = root.joinpath("manifest.json").read_bytes()
+    snapshot_before = SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load()
+    root.joinpath(".knowledge-base.lock").unlink()
+
+    with pytest.raises(KnowledgeBasePersistenceError):
+        kb.add_source(LocalFileSourceConfig(source_id="one", path="one.txt"))
+
+    assert not root.joinpath(".knowledge-base.lock").exists()
+    assert root.joinpath("manifest.json").read_bytes() == manifest_before
+    assert SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load() == snapshot_before
+
+
+def test_coordination_file_replacement_during_acquisition_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "kb"
+    kb = KnowledgeBase.create(str(root), knowledge_base_id="kb")
+    lock_path = root / ".knowledge-base.lock"
+    displaced = root / ".displaced-lock"
+    manifest_before = root.joinpath("manifest.json").read_bytes()
+    snapshot_before = SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load()
+    real_acquire = module._acquire_advisory_lock
+
+    def replace_after_acquire(descriptor: int) -> None:
+        real_acquire(descriptor)
+        lock_path.replace(displaced)
+        lock_path.write_bytes(b"replacement")
+
+    monkeypatch.setattr(module, "_acquire_advisory_lock", replace_after_acquire)
+    with pytest.raises(KnowledgeBasePersistenceError) as caught:
+        kb.add_source(LocalFileSourceConfig(source_id="one", path="one.txt"))
+
+    assert str(root) not in str(caught.value)
+    assert root.joinpath("manifest.json").read_bytes() == manifest_before
+    assert SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load() == snapshot_before
+
+
 def test_instance_mutations_are_serialized_without_lost_registration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -29,6 +29,10 @@ from nexusmind import (
 from nexusmind.knowledge_base_manifest import KnowledgeBaseManifest, write_manifest
 
 
+def _write_coordination_file(root: Path) -> None:
+    root.joinpath(".knowledge-base.lock").write_bytes(b"\0")
+
+
 def _write_fixture(
     root: Path,
     *,
@@ -37,6 +41,7 @@ def _write_fixture(
     content: str = "知识图谱支持语义检索",
 ) -> None:
     root.mkdir()
+    _write_coordination_file(root)
     write_manifest(
         root / "manifest.json",
         KnowledgeBaseManifest(
@@ -125,6 +130,7 @@ def test_open_reopens_identity_and_rejects_missing_or_corrupt_layout(tmp_path: P
 
     corrupt = tmp_path / "corrupt"
     corrupt.mkdir()
+    _write_coordination_file(corrupt)
     corrupt.joinpath("manifest.json").write_bytes(b"private document text")
     corrupt.joinpath("knowledge.db").write_bytes(b"private database bytes")
     with pytest.raises(KnowledgeBaseConfigError) as caught:
@@ -473,6 +479,7 @@ def test_open_restores_default_unicode_cjk_index_offline(tmp_path: Path) -> None
 def test_open_accepts_unsynchronized_registration(tmp_path: Path) -> None:
     root = tmp_path / "unsynchronized"
     root.mkdir()
+    _write_coordination_file(root)
     write_manifest(
         root / "manifest.json",
         KnowledgeBaseManifest(
@@ -493,6 +500,7 @@ def test_open_accepts_unsynchronized_registration(tmp_path: Path) -> None:
 def test_open_restores_more_than_collection_default_source_limit(tmp_path: Path) -> None:
     root = tmp_path / "many-sources"
     root.mkdir()
+    _write_coordination_file(root)
     registrations = tuple(
         LocalFileSourceConfig(source_id=f"source-{number:03}", path=str(tmp_path / f"{number}.txt"))
         for number in range(101)
