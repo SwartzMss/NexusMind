@@ -13,10 +13,11 @@ One knowledge base is one directory:
 ```text
 knowledge-base/
 ├── manifest.json
-└── knowledge.db
+├── knowledge.db
+└── .knowledge-base.lock
 ```
 
-`manifest.json` stores product configuration: stable KnowledgeBase identity, optional display name, registered source configurations, and schema version. `knowledge.db` remains an unmodified `SQLiteKnowledgeSnapshotStore` containing only canonical `KnowledgeSource` and `Document` values. Chunks, lexical state, embeddings, hybrid fusion state, reranker state, factories, and provider configuration remain derived runtime state and are rebuilt on open.
+`manifest.json` stores product configuration: stable KnowledgeBase identity, optional display name, registered source configurations, and schema version. `knowledge.db` remains an unmodified `SQLiteKnowledgeSnapshotStore` containing only canonical `KnowledgeSource` and `Document` values. `.knowledge-base.lock` is a persistent internal coordination artifact only; it is neither product configuration nor canonical knowledge state. Chunks, lexical state, embeddings, hybrid fusion state, reranker state, factories, and provider configuration remain derived runtime state and are rebuilt on open. Thus the approved two-file product-state split remains unchanged, while the physical directory contains a third internal file required for safe cross-handle mutation coordination.
 
 The KnowledgeBase root must be a text filesystem path. `create()` rejects a non-directory target, symlink/reparse-point root, or non-empty existing directory. It may use an existing empty directory. `open()` requires a real, non-symlink directory containing a valid manifest; a missing canonical database is a controlled persistence error rather than silently creating an empty replacement.
 
@@ -121,6 +122,8 @@ Calling `sync()` with no registrations is a successful no-op returning an empty 
 
 Registration-only manifest changes use atomic file replacement: encode and bound the complete next manifest, write a same-directory temporary file with explicit UTF-8 bytes, flush and fsync it, `os.replace` it over `manifest.json`, and fsync the containing directory where supported. Temporary files are cleaned up after controlled failures.
 
+All mutations are serialized by a per-instance `RLock` and a cross-handle/process, no-wait OS advisory lock acquired on the persistent `.knowledge-base.lock` file. The OS releases an acquired advisory lock when its descriptor/process exits, including after a crash; stale file contents are therefore harmless and are not treated as ownership state. The coordination file remains in place and is never unlinked during normal mutation or close. Open and mutation fail closed if it is missing, is a symlink/reparse point, is not a regular non-empty file, or its filesystem identity is replaced while being acquired. Cooperating processes must not delete or replace this file. The advisory lock coordinates cooperating callers; it is not manifest data, canonical state, or a substitute for the two-store commit/compensation protocol.
+
 `remove_source()` stages both next manifest and next collection. It saves the new canonical snapshot first, then atomically replaces the manifest, then swaps memory. If manifest replacement fails after the SQLite commit, it immediately saves the old canonical snapshot as compensation. When compensation succeeds, the in-memory object and both persistent stores remain at the old state and the operation raises a controlled persistence error. If compensation also fails, the object is poisoned/closed and raises an explicit recovery failure; callers must reopen after repairing persistent state. This is a narrow two-store recovery contract, not a general distributed transaction system.
 
 ## Controlled Errors
@@ -159,6 +162,6 @@ Tests cover:
 
 ## Documentation and Non-Goals
 
-README documentation includes a create → register → sync → search → reopen example and explains product configuration versus canonical knowledge, registration versus synchronization, both removal operations, the two-file persistence invariant, deterministic offline default, runtime factory injection, and synchronous/manual-sync limitations.
+README documentation includes a create → register → sync → search → reopen example and explains product configuration versus canonical knowledge, registration versus synchronization, both removal operations, the two-file product-state split plus internal coordination file, deterministic offline default, runtime factory injection, and synchronous/manual-sync limitations.
 
 This issue does not add CLI commands, UI, Office/PDF ingestion, Git/Web/MCP sources, RAG or citations, LLM judging, query rewriting, new retrieval algorithms, benchmark tuning, persistent embeddings/indexes, watchers, background synchronization, permissions, cloud sync, or Agent Runtime integration. A thin `nexusmind kb` CLI is the intended follow-up after this API stabilizes.

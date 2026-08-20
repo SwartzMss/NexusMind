@@ -18,6 +18,49 @@ NexusMind 的主要能力层如下：
 - 声明式 Skills、工具白名单、收紧后的执行限制和多 MCP Server 解析。
 - 可选的 SQLite Run History、Harness Checkpoints、受支持状态的 Resume，以及 Run Lease ownership controls。
 
+### KnowledgeBase 产品 API
+
+`KnowledgeBase` 是面向库调用者的持久化知识库 API，不是 Agent Runtime 的 `Workspace`。它将本地来源注册、显式同步、canonical 状态、搜索和重启恢复收敛到一个对象中：
+
+```python
+from nexusmind import KnowledgeBase, LocalDirectorySourceConfig
+
+kb = KnowledgeBase.create(
+    "./security-kb",
+    knowledge_base_id="security",
+    display_name="Security Notes",
+)
+kb.add_source(
+    LocalDirectorySourceConfig(source_id="docs", path="./security-notes")
+)
+sync_results = kb.sync()
+results = kb.search("密钥轮换", limit=5)
+kb.close()
+
+kb = KnowledgeBase.open("./security-kb")
+results_after_restart = kb.search("密钥轮换", limit=5)
+kb.close()
+```
+
+`LocalDirectorySourceConfig` 是已注册的产品配置：它说明下次去哪里加载。Canonical `KnowledgeSource` 则是上次成功同步后已提交内容的 provenance，两者不是同一份状态。`add_source()` 只原子持久化注册；它不构造 adapter、不读取文件，也不调用 embedding 或 reranking provider。`sync()` 和 `sync_source()` 都是调用者显式发起的同步操作；`sync()` 按 `source_id` 排序处理全部注册，整批成功才提交，任一来源失败都不会留下部分新状态。
+
+`unregister_source()` 只删除从未同步、因而没有 canonical `KnowledgeSource` 的注册。`remove_source()` 同时删除注册和该来源的 canonical documents：它先提交 SQLite，再原子替换 manifest；后一步失败时会补偿恢复旧 snapshot，补偿也失败则将当前对象 poison/close，后续调用 fail closed。
+
+每个知识库目录有两个产品状态文件和一个内部协调文件：
+
+```text
+security-kb/
+├── manifest.json          # 仅产品配置与已注册来源
+├── knowledge.db           # 仅 canonical KnowledgeSource / Document
+└── .knowledge-base.lock   # 仅跨 handle/process 协调
+```
+
+Chunk、embedding、lexical/semantic/hybrid index 和 reranker 状态都不持久化，重启时从 canonical documents 重建。默认检索是完全离线、确定性的 Unicode/CJK BM25；高级调用者可在 `create()` 和每次 `open()` 时注入未持久化的 `index_factory`。Benchmark fixture reranker 不是默认值，默认路径不需要 API key。
+
+`create()` 只接受不存在或已存在但为空的真实目录，并以 no-clobber 方式创建完整布局；manifest 更新使用同目录临时文件和原子替换。`open()` 严格要求三个 artifact 存在、类型和身份有效，不会将缺失状态补成空库。同一实例的 mutation 由进程内锁串行化；不同 handle/process 通过 `.knowledge-base.lock` 的 no-wait OS advisory lock 协调。进程崩溃会由 OS 释放锁，文件中的旧内容无害。协作进程不得删除、替换或链接该文件；缺失、symlink/reparse point 或 identity 替换都会 fail closed，运行时也不会 unlink 它。
+
+`status()` 只返回 ID、display name、注册数、canonical source 数和 document 数，不扫描文件系统 dirty state，也不虚构 last-sync 状态。`list_sources()` 按 `source_id` 返回 frozen config；`list_documents()` 返回与内部状态脱离的 canonical documents；`search()` 保留 retrieval backend 顺序和 canonical provenance。当前没有 CLI、UI、watcher、后台同步、自动持久化 index 或 RAG 编排；下一步是在该 API 稳定后增加薄封装的 `nexusmind kb` CLI。
+
 NexusMind 开始引入独立的 Knowledge Runtime / Knowledge Layer，与现有 Agent Runtime 解耦。`KnowledgeSource` 表示知识来源，`source_id` 由 Host 或 Source adapter 提供；`Document` 表示来源下由逻辑标识定位的一份文本内容。Document 的 `document_id` 由 `source_id + logical_path` 派生，并使用 UTF-8 SHA-256 `content_hash` 检测同一逻辑文档的内容变化。`Chunk` 是由 Document 派生的 source-neutral 原文切片，使用 Python 字符偏移记录半开区间 `[start_offset, end_offset)`，并保证 `chunk.content == document.content[start_offset:end_offset]`。本地文件/目录只是可以映射到 Knowledge Runtime 的一个来源示例，后续可由 Agent、Skill 或其他消费者使用。
 
 本地知识 ingestion 位于独立的 Knowledge Ingestion 层。`LocalFileAdapter` 和 `LocalDirectoryAdapter` 负责受限的文件发现、严格 UTF-8 读取以及来源相对路径映射；文件扩展名、扫描上限和文件系统安全策略都属于 adapter 实现，不会进入 provider-neutral Knowledge Core：
