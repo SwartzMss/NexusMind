@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import closing
+from copy import deepcopy
 from dataclasses import dataclass
 import errno
 import os
@@ -19,11 +20,13 @@ from .knowledge_base_manifest import (
     KnowledgeBaseLimits,
     KnowledgeBaseManifest,
     KnowledgeBasePersistenceError,
+    KnowledgeBaseSourceError,
     LocalDirectorySourceConfig,
     LocalFileSourceConfig,
     RegisteredSourceConfig,
     encode_manifest,
     read_manifest,
+    write_manifest,
 )
 from .knowledge_chunking import TextChunker
 from .knowledge_collection import (
@@ -32,8 +35,10 @@ from .knowledge_collection import (
     KnowledgeCollectionLimits,
     KnowledgeSearchResult,
     KnowledgeSnapshot,
+    KnowledgeSyncResult,
 )
 from .knowledge_retrieval import InMemoryChunkIndex
+from .knowledge_ingestion import LocalDirectoryAdapter, LocalFileAdapter
 from .knowledge_store import KnowledgeSnapshotStoreError, SQLiteKnowledgeSnapshotStore
 from .lexical_analysis import UnicodeCJKLexicalAnalyzer
 
@@ -513,13 +518,98 @@ class KnowledgeBase:
 
     def list_documents(self) -> tuple[Document, ...]:
         self._require_open()
-        return self._collection.snapshot().documents
+        return tuple(deepcopy(item) for item in self._collection.snapshot().documents)
 
     def search(
         self, query: str, *, limit: int = 10
     ) -> tuple[KnowledgeSearchResult, ...]:
         self._require_open()
         return self._collection.search(query, limit=limit)
+
+    def add_source(self, config: RegisteredSourceConfig) -> None:
+        """Persist a source registration without touching the source itself."""
+        self._require_open()
+        if type(config) not in (LocalFileSourceConfig, LocalDirectorySourceConfig):
+            raise KnowledgeBaseConfigError("source config type is unsupported")
+        if any(item.source_id == config.source_id for item in self._manifest.sources):
+            raise KnowledgeBaseSourceError("source_id is already registered")
+        candidate = KnowledgeBaseManifest(
+            knowledge_base_id=self._manifest.knowledge_base_id,
+            display_name=self._manifest.display_name,
+            sources=self._manifest.sources + (config,),
+            limits=self._limits,
+        )
+        write_manifest(self._root / _MANIFEST_NAME, candidate, self._limits)
+        self._manifest = candidate
+
+    def unregister_source(self, source_id: str) -> None:
+        """Remove an unused registration while preserving canonical content."""
+        self._require_open()
+        if type(source_id) is not str or not source_id:
+            raise KnowledgeBaseConfigError("source_id must be non-empty text")
+        registration = next(
+            (item for item in self._manifest.sources if item.source_id == source_id), None
+        )
+        if registration is None:
+            raise KnowledgeBaseSourceError("source_id is not registered")
+        if any(item.source_id == source_id for item in self._collection.snapshot().sources):
+            raise KnowledgeBaseSourceError("synchronized source cannot be unregistered")
+        candidate = KnowledgeBaseManifest(
+            knowledge_base_id=self._manifest.knowledge_base_id,
+            display_name=self._manifest.display_name,
+            sources=tuple(
+                item for item in self._manifest.sources if item.source_id != source_id
+            ),
+            limits=self._limits,
+        )
+        write_manifest(self._root / _MANIFEST_NAME, candidate, self._limits)
+        self._manifest = candidate
+
+    def sync(self) -> tuple[KnowledgeSyncResult, ...]:
+        """Atomically synchronize every registered source in identifier order."""
+        self._require_open()
+        if not self._manifest.sources:
+            return ()
+        return self._sync_configs(self._manifest.sources)
+
+    def sync_source(self, source_id: str) -> KnowledgeSyncResult:
+        """Atomically synchronize exactly one registered source."""
+        self._require_open()
+        config = next(
+            (item for item in self._manifest.sources if item.source_id == source_id), None
+        )
+        if config is None:
+            raise KnowledgeBaseSourceError("source_id is not registered")
+        return self._sync_configs((config,))[0]
+
+    def _sync_configs(
+        self, configs: tuple[RegisteredSourceConfig, ...]
+    ) -> tuple[KnowledgeSyncResult, ...]:
+        live_snapshot = self._collection.snapshot()
+        try:
+            staging = self._new_collection(self._index_factory, self._limits)
+            staging.restore(live_snapshot)
+            results: list[KnowledgeSyncResult] = []
+            for config in sorted(configs, key=lambda item: item.source_id):
+                adapter_class = (
+                    LocalFileAdapter
+                    if type(config) is LocalFileSourceConfig
+                    else LocalDirectoryAdapter
+                )
+                adapter = adapter_class(config.path, source_id=config.source_id)
+                results.append(staging.sync(adapter))
+        except Exception as exc:
+            raise KnowledgeBaseSourceError("unable to synchronize registered source") from exc
+        try:
+            SQLiteKnowledgeSnapshotStore(self._root / _DATABASE_NAME).save(
+                staging.snapshot()
+            )
+        except Exception as exc:
+            raise KnowledgeBasePersistenceError(
+                "unable to persist canonical knowledge state"
+            ) from exc
+        self._collection = staging
+        return tuple(results)
 
     def close(self) -> None:
         self._closed = True
