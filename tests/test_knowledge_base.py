@@ -145,6 +145,7 @@ def test_open_rejects_invalid_database_without_mutating_it(
 ) -> None:
     root = tmp_path / "invalid-database-private-path"
     root.mkdir()
+    _write_coordination_file(root)
     write_manifest(
         root / "manifest.json",
         KnowledgeBaseManifest(knowledge_base_id="kb"),
@@ -156,6 +157,7 @@ def test_open_rejects_invalid_database_without_mutating_it(
     with pytest.raises(KnowledgeBasePersistenceError) as caught:
         KnowledgeBase.open(str(root))
 
+    assert str(caught.value) == "canonical knowledge state is invalid"
     assert database.read_bytes() == payload
     assert "private-token" not in str(caught.value)
     assert str(root) not in str(caught.value)
@@ -167,6 +169,7 @@ def test_open_rejects_sqlite_without_valid_store_sentinel_without_mutation(
 ) -> None:
     root = tmp_path / f"private-sentinel-{sentinel}"
     root.mkdir()
+    _write_coordination_file(root)
     write_manifest(
         root / "manifest.json",
         KnowledgeBaseManifest(knowledge_base_id="kb"),
@@ -203,6 +206,7 @@ def test_open_rejects_sqlite_without_valid_store_sentinel_without_mutation(
             "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
         ).fetchall() == schema_before
     message = str(caught.value)
+    assert message == "canonical knowledge state is invalid"
     assert "private-version" not in message
     assert "private-row" not in message
     assert str(root) not in message
