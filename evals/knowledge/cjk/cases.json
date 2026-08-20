@@ -2,51 +2,61 @@
   "cases": [
     {
       "case_id": "android-cross-process",
+      "category": "cjk",
       "query": "安卓客户端怎样借助代理跨越地址空间调用后台能力",
       "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "android.md"}]
     },
     {
       "case_id": "android-binder-identity",
+      "category": "cjk",
       "query": "Binder IPC 如何传递调用方身份并做权限检查",
       "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "android.md"}]
     },
     {
       "case_id": "trustzone-world-separation",
+      "category": "cjk",
       "query": "Arm 芯片的安全状态怎样阻止普通世界读取受保护内存",
       "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "trustzone.md"}]
     },
     {
       "case_id": "trustzone-shared-buffer",
+      "category": "cjk",
       "query": "TrustZone 隔离还需要防范共享缓冲区的边界错误",
       "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "trustzone.md"}]
     },
     {
       "case_id": "qnx-userspace-services",
+      "category": "cjk",
       "query": "微内核为何把驱动和文件系统放在用户态",
       "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "qnx.md"}]
     },
     {
       "case_id": "qnx-fault-containment",
+      "category": "cjk",
       "query": "QNX microkernel 中单个驱动崩溃后如何限制影响",
       "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "qnx.md"}]
     },
     {
       "case_id": "aes-gcm-nonce",
+      "category": "cjk",
       "query": "重复随机数为什么会损害 AES-GCM 的认证安全",
       "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "cryptography.md"}]
     },
     {
       "case_id": "aead-verification-order",
+      "category": "cjk",
       "query": "解密数据应在解析明文之前完成完整性校验",
       "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "cryptography.md"}]
     },
     {
       "case_id": "key-purpose-separation",
+      "category": "cross_language",
       "query": "不涉及 TLS 握手时，应用如何用上下文 info 从主密钥派生多用途子密钥",
       "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "cryptography.md"}]
     },
     {
       "case_id": "hkdf-context",
+      "category": "cross_language",
       "query": "TLS 之外的应用如何用 HKDF salt 和 info 区分组件用途",
       "relevant_documents": [{"source_id": "cjk-docs", "logical_path": "cryptography.md"}]
     }

@@ -60,6 +60,7 @@ from .lexical_analysis import (
     WhitespaceLexicalAnalyzer,
 )
 from .retrieval_evaluation import (
+    RetrievalCategory,
     RetrievalEvaluationCase,
     RetrievalEvaluationCaseResult,
     RetrievalEvaluationDatasetError,
@@ -165,6 +166,7 @@ __all__ = [
     "LexicalAnalysisError",
     "PathEscapeError",
     "RetrievalEvaluationCase",
+    "RetrievalCategory",
     "RetrievalEvaluationCaseResult",
     "RetrievalEvaluationDatasetError",
     "RetrievalEvaluationError",

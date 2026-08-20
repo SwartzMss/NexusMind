@@ -2,6 +2,7 @@
   "cases": [
     {
       "case_id": "lexical-favored-exact-identifier",
+      "category": "identifier",
       "query": "ZXQ-417",
       "relevant_documents": [
         {"source_id": "hybrid-docs", "logical_path": "lexical.md"}
@@ -9,6 +10,7 @@
     },
     {
       "case_id": "semantic-favored-credential-rotation",
+      "category": "paraphrase",
       "query": "How can login keys change during uninterrupted operation?",
       "relevant_documents": [
         {"source_id": "hybrid-docs", "logical_path": "semantic.md"}
@@ -16,6 +18,7 @@
     },
     {
       "case_id": "mixed-signal-resume-workflow",
+      "category": "mixed_signal",
       "query": "resume a workflow from a saved checkpoint",
       "relevant_documents": [
         {"source_id": "hybrid-docs", "logical_path": "mixed.md"}

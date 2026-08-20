@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 import json
 from pathlib import Path
 
@@ -16,6 +17,19 @@ class RetrievalEvaluationError(Exception):
 
 class RetrievalEvaluationDatasetError(RetrievalEvaluationError):
     """A retrieval evaluation dataset is malformed or unreadable."""
+
+
+class RetrievalCategory(str, Enum):
+    """Strict primary failure-mode category for one relevance case."""
+
+    EXACT_TERM = "exact_term"
+    IDENTIFIER = "identifier"
+    CJK = "cjk"
+    PARAPHRASE = "paraphrase"
+    CROSS_LANGUAGE = "cross_language"
+    MULTI_DOCUMENT = "multi_document"
+    DISTRACTOR_HEAVY = "distractor_heavy"
+    MIXED_SIGNAL = "mixed_signal"
 
 
 def _require_text(value: object, field_name: str) -> str:
@@ -37,11 +51,14 @@ class RetrievalTarget:
 @dataclass(frozen=True, slots=True)
 class RetrievalEvaluationCase:
     case_id: str
+    category: RetrievalCategory
     query: str
     relevant_documents: tuple[RetrievalTarget, ...]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "case_id", _require_text(self.case_id, "case_id"))
+        if not isinstance(self.category, RetrievalCategory):
+            raise TypeError("category must be a RetrievalCategory")
         object.__setattr__(self, "query", _require_text(self.query, "query"))
         if type(self.relevant_documents) is not tuple:
             raise TypeError("relevant_documents must be a tuple")
@@ -104,9 +121,9 @@ def load_retrieval_evaluation_cases(
     for raw_case in raw_cases:
         if type(raw_case) is not dict:
             raise RetrievalEvaluationDatasetError("each case must be an object")
-        if set(raw_case) != {"case_id", "query", "relevant_documents"}:
+        if set(raw_case) != {"case_id", "category", "query", "relevant_documents"}:
             raise RetrievalEvaluationDatasetError(
-                "case fields must be exactly: case_id, query, relevant_documents"
+                "case fields must be exactly: case_id, category, query, relevant_documents"
             )
         raw_targets = raw_case["relevant_documents"]
         if type(raw_targets) is not list:
@@ -135,8 +152,13 @@ def load_retrieval_evaluation_cases(
                 "relevant_documents contains duplicate targets"
             )
         try:
+            try:
+                category = RetrievalCategory(raw_case["category"])
+            except (TypeError, ValueError) as exc:
+                raise RetrievalEvaluationDatasetError("unknown category") from exc
             case = RetrievalEvaluationCase(
                 case_id=raw_case["case_id"],
+                category=category,
                 query=raw_case["query"],
                 relevant_documents=tuple(targets),
             )
@@ -238,6 +260,7 @@ def evaluate_retrieval(
 
 
 __all__ = [
+    "RetrievalCategory",
     "RetrievalEvaluationCase",
     "RetrievalEvaluationCaseResult",
     "RetrievalEvaluationDatasetError",

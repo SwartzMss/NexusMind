@@ -11,6 +11,7 @@ from nexusmind import (
     KnowledgeSearchResult,
     KnowledgeSnapshot,
     KnowledgeSource,
+    RetrievalCategory,
     RetrievalEvaluationCase,
     RetrievalEvaluationError,
     RetrievalTarget,
@@ -82,15 +83,15 @@ def test_retrieval_target_requires_non_empty_text(field: str) -> None:
 def test_evaluation_case_requires_bounded_unique_targets() -> None:
     target = RetrievalTarget("source", "doc.md")
     with pytest.raises(ValueError, match="case_id"):
-        RetrievalEvaluationCase("", "query", (target,))
+        RetrievalEvaluationCase("", RetrievalCategory.EXACT_TERM, "query", (target,))
     with pytest.raises(ValueError, match="query"):
-        RetrievalEvaluationCase("case", " ", (target,))
+        RetrievalEvaluationCase("case", RetrievalCategory.EXACT_TERM, " ", (target,))
     with pytest.raises(TypeError, match="tuple"):
-        RetrievalEvaluationCase("case", "query", [target])  # type: ignore[arg-type]
+        RetrievalEvaluationCase("case", RetrievalCategory.EXACT_TERM, "query", [target])  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="at least one"):
-        RetrievalEvaluationCase("case", "query", ())
+        RetrievalEvaluationCase("case", RetrievalCategory.EXACT_TERM, "query", ())
     with pytest.raises(ValueError, match="duplicate"):
-        RetrievalEvaluationCase("case", "query", (target, target))
+        RetrievalEvaluationCase("case", RetrievalCategory.EXACT_TERM, "query", (target, target))
 
 
 def test_evaluator_preserves_chunk_ranking_and_deduplicates_recall_coverage() -> None:
@@ -102,7 +103,7 @@ def test_evaluator_preserves_chunk_ranking_and_deduplicates_recall_coverage() ->
         (a, b),
         {"query": (_result(a, "a-1"), _result(a, "a-2"), _result(b, "b-1"))},
     )
-    case = RetrievalEvaluationCase("case", "query", (target_a, target_b))
+    case = RetrievalEvaluationCase("case", RetrievalCategory.MULTI_DOCUMENT, "query", (target_a, target_b))
     before = collection.snapshot()
 
     report = evaluate_retrieval(collection, (case,), k=3)  # type: ignore[arg-type]
@@ -125,8 +126,8 @@ def test_evaluator_computes_later_rank_miss_and_aggregate_means() -> None:
     distractor = _document("source", "distractor.md")
     target = RetrievalTarget("source", "relevant.md")
     cases = (
-        RetrievalEvaluationCase("later", "later query", (target,)),
-        RetrievalEvaluationCase("miss", "miss query", (target,)),
+        RetrievalEvaluationCase("later", RetrievalCategory.PARAPHRASE, "later query", (target,)),
+        RetrievalEvaluationCase("miss", RetrievalCategory.PARAPHRASE, "miss query", (target,)),
     )
     collection = FakeCollection(
         (relevant, distractor),
@@ -151,7 +152,7 @@ def test_evaluator_computes_later_rank_miss_and_aggregate_means() -> None:
 
 def test_evaluator_rejects_invalid_case_sets_and_k() -> None:
     target = RetrievalTarget("source", "doc.md")
-    case = RetrievalEvaluationCase("case", "query", (target,))
+    case = RetrievalEvaluationCase("case", RetrievalCategory.EXACT_TERM, "query", (target,))
     collection = FakeCollection((_document("source", "doc.md"),), {})
     with pytest.raises(RetrievalEvaluationError, match="non-empty tuple"):
         evaluate_retrieval(collection, ())  # type: ignore[arg-type]
@@ -168,6 +169,7 @@ def test_unknown_relevance_target_fails_before_any_search() -> None:
     collection = FakeCollection((_document("source", "known.md"),), {})
     case = RetrievalEvaluationCase(
         "case",
+        RetrievalCategory.EXACT_TERM,
         "query",
         (RetrievalTarget("source", "missing.md"),),
     )
@@ -181,7 +183,7 @@ def test_unknown_relevance_target_fails_before_any_search() -> None:
 def test_same_input_produces_equal_reports() -> None:
     document = _document("source", "doc.md")
     target = RetrievalTarget("source", "doc.md")
-    case = RetrievalEvaluationCase("case", "query", (target,))
+    case = RetrievalEvaluationCase("case", RetrievalCategory.EXACT_TERM, "query", (target,))
     collection = FakeCollection((document,), {"query": (_result(document, "chunk"),)})
 
     assert evaluate_retrieval(collection, (case,)) == evaluate_retrieval(  # type: ignore[arg-type]
@@ -192,7 +194,7 @@ def test_same_input_produces_equal_reports() -> None:
 def test_backend_result_limit_is_reported_as_evaluation_error() -> None:
     document = _document("source", "doc.md")
     target = RetrievalTarget("source", "doc.md")
-    case = RetrievalEvaluationCase("case", "query", (target,))
+    case = RetrievalEvaluationCase("case", RetrievalCategory.EXACT_TERM, "query", (target,))
 
     class LimitedCollection(FakeCollection):
         def search(self, query: str, *, limit: int = 10):

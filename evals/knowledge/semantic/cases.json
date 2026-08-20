@@ -2,41 +2,49 @@
   "cases": [
     {
       "case_id": "android-app-boundary",
+      "category": "paraphrase",
       "query": "How do Android apps invoke a service living in another process?",
       "relevant_documents": [{"source_id": "semantic-docs", "logical_path": "android.md"}]
     },
     {
       "case_id": "android-marshalling",
+      "category": "paraphrase",
       "query": "Which mobile mechanism transports structured remote calls between applications?",
       "relevant_documents": [{"source_id": "semantic-docs", "logical_path": "android.md"}]
     },
     {
       "case_id": "trustzone-isolation",
+      "category": "paraphrase",
       "query": "Where should Arm devices execute operations hidden from the ordinary operating system?",
       "relevant_documents": [{"source_id": "semantic-docs", "logical_path": "trustzone.md"}]
     },
     {
       "case_id": "trustzone-transition",
+      "category": "paraphrase",
       "query": "What architecture changes processor security state to reach protected services?",
       "relevant_documents": [{"source_id": "semantic-docs", "logical_path": "trustzone.md"}]
     },
     {
       "case_id": "qnx-fault-containment",
+      "category": "paraphrase",
       "query": "Which operating system design can restart a crashed driver without losing the kernel?",
       "relevant_documents": [{"source_id": "semantic-docs", "logical_path": "qnx.md"}]
     },
     {
       "case_id": "qnx-small-kernel",
+      "category": "paraphrase",
       "query": "Where are system services placed when the privileged core is intentionally minimal?",
       "relevant_documents": [{"source_id": "semantic-docs", "logical_path": "qnx.md"}]
     },
     {
       "case_id": "crypto-key-separation",
+      "category": "paraphrase",
       "query": "How can one root secret produce independent keys for several purposes?",
       "relevant_documents": [{"source_id": "semantic-docs", "logical_path": "cryptography.md"}]
     },
     {
       "case_id": "crypto-authenticated-encryption",
+      "category": "paraphrase",
       "query": "Which construction protects confidentiality and detects ciphertext modification?",
       "relevant_documents": [{"source_id": "semantic-docs", "logical_path": "cryptography.md"}]
     }
