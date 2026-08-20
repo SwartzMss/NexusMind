@@ -81,6 +81,14 @@ from .retrieval_evaluation import (
     compare_retrieval_backends,
     load_retrieval_evaluation_cases,
 )
+from .reranking import (
+    RerankedChunkIndex,
+    Reranker,
+    RerankerCoherenceError,
+    RerankerError,
+    RerankerLimitError,
+    RerankerLimits,
+)
 from .semantic_retrieval import (
     InMemorySemanticChunkIndex,
     SemanticChunkIndexError,
@@ -176,6 +184,12 @@ __all__ = [
     "LexicalAnalyzer",
     "LexicalAnalysisError",
     "PathEscapeError",
+    "RerankedChunkIndex",
+    "Reranker",
+    "RerankerCoherenceError",
+    "RerankerError",
+    "RerankerLimitError",
+    "RerankerLimits",
     "RetrievalEvaluationCase",
     "RetrievalCategory",
     "RetrievalCategoryReport",
