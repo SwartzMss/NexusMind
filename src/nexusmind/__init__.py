@@ -26,6 +26,7 @@ from .knowledge_base_manifest import (
     LocalDirectorySourceConfig,
     LocalFileSourceConfig,
 )
+from .knowledge_base import KnowledgeBase, KnowledgeBaseStatus
 from .hybrid_retrieval import (
     HybridBackendCoherenceError,
     HybridChunkIndex,
@@ -163,12 +164,14 @@ __all__ = [
     "KnowledgeSourceType",
     "KnowledgeCollection",
     "KnowledgeBaseClosedError",
+    "KnowledgeBase",
     "KnowledgeBaseConfigError",
     "KnowledgeBaseError",
     "KnowledgeBaseLimits",
     "KnowledgeBaseManifest",
     "KnowledgeBasePersistenceError",
     "KnowledgeBaseSourceError",
+    "KnowledgeBaseStatus",
     "KnowledgeCollectionError",
     "KnowledgeCollectionLimitError",
     "KnowledgeCollectionLimits",
