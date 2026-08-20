@@ -59,7 +59,19 @@ Chunk、embedding、lexical/semantic/hybrid index 和 reranker 状态都不持�
 
 `create()` 只接受不存在或已存在但为空的真实目录，并以 no-clobber 方式创建完整布局；manifest 更新使用同目录临时文件和原子替换。`open()` 严格要求三个 artifact 存在、类型和身份有效，不会将缺失状态补成空库。同一实例的 mutation 由进程内锁串行化；不同 handle/process 通过 `.knowledge-base.lock` 的 no-wait OS advisory lock 协调。进程崩溃会由 OS 释放锁，文件中的旧内容无害。协作进程不得删除、替换或链接该文件；缺失、symlink/reparse point 或 identity 替换都会 fail closed，运行时也不会 unlink 它。
 
-`status()` 只返回 ID、display name、注册数、canonical source 数和 document 数，不扫描文件系统 dirty state，也不虚构 last-sync 状态。`list_sources()` 按 `source_id` 返回 frozen config；`list_documents()` 返回与内部状态脱离的 canonical documents；`search()` 保留 retrieval backend 顺序和 canonical provenance。当前没有 CLI、UI、watcher、后台同步、自动持久化 index 或 RAG 编排；下一步是在该 API 稳定后增加薄封装的 `nexusmind kb` CLI。
+`status()` 只返回 ID、display name、注册数、canonical source 数和 document 数，不扫描文件系统 dirty state，也不虚构 last-sync 状态。`list_sources()` 按 `source_id` 返回 frozen config；`list_documents()` 返回与内部状态脱离的 canonical documents；`search()` 保留 retrieval backend 顺序和 canonical provenance。当前没有 KnowledgeBase CLI、watcher、后台同步、自动持久化 index 或 RAG 编排。
+
+### KnowledgeBase 本地界面
+
+安装项目后运行以下命令可打开首个本地 KnowledgeBase 桌面界面：
+
+```powershell
+nexusmind-kb
+```
+
+界面支持创建或打开一个明确的 KnowledgeBase、通过系统选择器注册本地文件或目录、查看来源和状态、显式同步全部或单个来源、删除来源，以及按有限结果数搜索并查看 `source_id`、逻辑路径、score、chunk ID 和原文片段。注册来源不会自动同步；同步 mutation 在后台线程运行，其间相关控件会禁用，避免同一窗口发起重复 mutation。
+
+该界面使用 Python 标准库 `tkinter`，不需要本地服务器、外部服务或账号。窗口层只处理控件、选择器和后台调度；可 headless 测试的 controller 仅调用公开 `KnowledgeBase` API。它不读取 manifest/SQLite，不构造 ingestion adapter，也不依赖 `KnowledgeCollection` 或索引实现。错误只映射为有限的产品级提示，不回显底层异常文本、路径、查询或文档内容。
 
 NexusMind 开始引入独立的 Knowledge Runtime / Knowledge Layer，与现有 Agent Runtime 解耦。`KnowledgeSource` 表示知识来源，`source_id` 由 Host 或 Source adapter 提供；`Document` 表示来源下由逻辑标识定位的一份文本内容。Document 的 `document_id` 由 `source_id + logical_path` 派生，并使用 UTF-8 SHA-256 `content_hash` 检测同一逻辑文档的内容变化。`Chunk` 是由 Document 派生的 source-neutral 原文切片，使用 Python 字符偏移记录半开区间 `[start_offset, end_offset)`，并保证 `chunk.content == document.content[start_offset:end_offset]`。本地文件/目录只是可以映射到 Knowledge Runtime 的一个来源示例，后续可由 Agent、Skill 或其他消费者使用。
 
