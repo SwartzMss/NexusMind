@@ -1,4 +1,5 @@
 from dataclasses import FrozenInstanceError
+import os
 from pathlib import Path
 from threading import Event, Thread
 
@@ -92,6 +93,7 @@ def test_failed_registration_write_does_not_swap_memory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     kb = KnowledgeBase.create(str(tmp_path / "kb"), knowledge_base_id="kb")
+    real_write = module.write_manifest
 
     def fail_write(*args, **kwargs):
         raise KnowledgeBasePersistenceError("private controlled failure")
@@ -102,6 +104,9 @@ def test_failed_registration_write_does_not_swap_memory(
 
     assert "private" not in str(caught.value)
     assert kb.list_sources() == ()
+    monkeypatch.setattr(module, "write_manifest", real_write)
+    kb.add_source(LocalFileSourceConfig(source_id="two", path="two.txt"))
+    assert tuple(item.source_id for item in kb.list_sources()) == ("two",)
 
 
 def test_registration_bounds_leave_memory_and_manifest_unchanged(tmp_path: Path) -> None:
@@ -393,8 +398,9 @@ def test_all_mutations_fail_closed_while_cross_handle_lock_is_held(
     contender = KnowledgeBase.open(str(root))
     manifest_before = root.joinpath("manifest.json").read_bytes()
     snapshot_before = SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load()
-    lock_path = root / ".mutation.lock"
-    lock_path.write_bytes(b"held by another process")
+    lock_path = root / ".knowledge-base.lock"
+    descriptor = os.open(lock_path, os.O_RDWR)
+    module._acquire_advisory_lock(descriptor)
 
     operations = (
         lambda: contender.add_source(
@@ -404,15 +410,43 @@ def test_all_mutations_fail_closed_while_cross_handle_lock_is_held(
         contender.sync,
         lambda: contender.sync_source("one"),
     )
-    for operation in operations:
-        with pytest.raises(KnowledgeBasePersistenceError) as caught:
-            operation()
-        assert str(root) not in str(caught.value)
+    try:
+        for operation in operations:
+            with pytest.raises(KnowledgeBasePersistenceError) as caught:
+                operation()
+            assert str(root) not in str(caught.value)
+    finally:
+        module._release_advisory_lock(descriptor)
+        os.close(descriptor)
 
-    assert lock_path.read_bytes() == b"held by another process"
+    assert lock_path.read_bytes() == b"\0"
     assert contender.list_sources() == first.list_sources()
     assert root.joinpath("manifest.json").read_bytes() == manifest_before
     assert SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load() == snapshot_before
+
+
+def test_unlocked_stale_coordination_file_does_not_block_mutation(tmp_path: Path) -> None:
+    root = tmp_path / "kb"
+    kb = KnowledgeBase.create(str(root), knowledge_base_id="kb")
+    lock_path = root / ".knowledge-base.lock"
+    lock_path.write_bytes(b"stale-looking lock contents")
+
+    kb.add_source(LocalFileSourceConfig(source_id="one", path="one.txt"))
+
+    assert tuple(item.source_id for item in kb.list_sources()) == ("one",)
+    assert lock_path.exists()
+
+
+def test_advisory_lock_is_released_when_holder_closes_descriptor(tmp_path: Path) -> None:
+    root = tmp_path / "kb"
+    kb = KnowledgeBase.create(str(root), knowledge_base_id="kb")
+    descriptor = os.open(root / ".knowledge-base.lock", os.O_RDWR)
+    module._acquire_advisory_lock(descriptor)
+    os.close(descriptor)
+
+    kb.add_source(LocalFileSourceConfig(source_id="one", path="one.txt"))
+
+    assert tuple(item.source_id for item in kb.list_sources()) == ("one",)
 
 
 def test_instance_mutations_are_serialized_without_lost_registration(
@@ -490,7 +524,10 @@ def test_search_wraps_private_runtime_failure_but_preserves_input_validation(
         kb.search(42)  # type: ignore[arg-type]
     with pytest.raises(KnowledgeBaseSourceError) as preserved:
         kb.search("controlled")
-    assert preserved.value is controlled
+    assert preserved.value is not controlled
+    assert str(preserved.value) == "unable to search knowledge base"
+    assert preserved.value.__cause__ is controlled
+    assert "controlled search failure" not in str(preserved.value)
     with pytest.raises(KnowledgeBaseSourceError) as caught:
         kb.search("secret-query")
     assert "provider-secret" not in str(caught.value)

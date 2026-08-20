@@ -73,7 +73,12 @@ def test_create_new_and_existing_empty_directories_with_exact_layout(tmp_path: P
         kb = KnowledgeBase.create(
             str(root), knowledge_base_id="security", display_name="Security"
         )
-        assert set(item.name for item in root.iterdir()) == {"manifest.json", "knowledge.db"}
+        assert set(item.name for item in root.iterdir()) == {
+            "manifest.json",
+            "knowledge.db",
+            ".knowledge-base.lock",
+        }
+        assert root.joinpath(".knowledge-base.lock").read_bytes() == b"\0"
         assert root.joinpath("manifest.json").read_bytes() == (
             b'{"display_name":"Security","format_version":"1",'
             b'"knowledge_base_id":"security","sources":[]}\n'
@@ -371,7 +376,11 @@ def test_create_falls_back_to_no_clobber_copy_when_hard_links_are_unsupported(
     kb = KnowledgeBase.create(str(root), knowledge_base_id="kb")
 
     assert kb.status().knowledge_base_id == "kb"
-    assert set(item.name for item in root.iterdir()) == {"manifest.json", "knowledge.db"}
+    assert set(item.name for item in root.iterdir()) == {
+        "manifest.json",
+        "knowledge.db",
+        ".knowledge-base.lock",
+    }
     assert KnowledgeBase.open(str(root)).status().knowledge_base_id == "kb"
 
 

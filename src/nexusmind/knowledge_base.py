@@ -18,7 +18,6 @@ from .knowledge import Document, KnowledgeSourceType
 from .knowledge_base_manifest import (
     KnowledgeBaseClosedError,
     KnowledgeBaseConfigError,
-    KnowledgeBaseError,
     KnowledgeBaseLimits,
     KnowledgeBaseManifest,
     KnowledgeBasePersistenceError,
@@ -44,10 +43,15 @@ from .knowledge_ingestion import LocalDirectoryAdapter, LocalFileAdapter
 from .knowledge_store import KnowledgeSnapshotStoreError, SQLiteKnowledgeSnapshotStore
 from .lexical_analysis import UnicodeCJKLexicalAnalyzer
 
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
 
 _MANIFEST_NAME = "manifest.json"
 _DATABASE_NAME = "knowledge.db"
-_MUTATION_LOCK_NAME = ".mutation.lock"
+_MUTATION_LOCK_NAME = ".knowledge-base.lock"
 _SQLITE_HEADER = b"SQLite format 3\x00"
 _UNSUPPORTED_LINK_ERRNOS = frozenset(
     value
@@ -100,6 +104,29 @@ def _is_reparse_or_symlink(path: Path) -> bool:
 
 def _default_index_factory() -> InMemoryChunkIndex:
     return InMemoryChunkIndex(analyzer=UnicodeCJKLexicalAnalyzer())
+
+
+def _prepare_coordination_file(descriptor: int) -> None:
+    if os.fstat(descriptor).st_size == 0:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        os.write(descriptor, b"\0")
+        os.fsync(descriptor)
+
+
+def _acquire_advisory_lock(descriptor: int) -> None:
+    if os.name == "nt":
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+    else:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _release_advisory_lock(descriptor: int) -> None:
+    if os.name == "nt":
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
 
 
 def _require_sqlite_header(path: Path) -> None:
@@ -196,7 +223,9 @@ class KnowledgeBase:
 
             database_path = root / _DATABASE_NAME
             manifest_path = root / _MANIFEST_NAME
+            lock_path = root / _MUTATION_LOCK_NAME
             owned[database_path] = cls._create_database(root, database_path)
+            owned[lock_path] = cls._write_new_manifest(lock_path, b"\0")
             owned[manifest_path] = cls._write_new_manifest(
                 manifest_path, encode_manifest(manifest, active_limits)
             )
@@ -536,8 +565,6 @@ class KnowledgeBase:
             raise ValueError("limit must be greater than zero")
         try:
             return self._collection.search(query, limit=limit)
-        except KnowledgeBaseError:
-            raise
         except Exception as exc:
             raise KnowledgeBaseSourceError("unable to search knowledge base") from exc
 
@@ -651,13 +678,13 @@ class KnowledgeBase:
         """Serialize mutations locally and fail closed across open handles."""
         with self._mutation_mutex:
             lock_path = self._root / _MUTATION_LOCK_NAME
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            flags = os.O_RDWR | os.O_CREAT
             flags |= getattr(os, "O_BINARY", 0)
             descriptor = -1
             try:
                 descriptor = os.open(lock_path, flags, 0o600)
-                info = os.fstat(descriptor)
-                identity = (info.st_dev, info.st_ino)
+                _prepare_coordination_file(descriptor)
+                _acquire_advisory_lock(descriptor)
             except OSError as exc:
                 if descriptor >= 0:
                     os.close(descriptor)
@@ -668,13 +695,9 @@ class KnowledgeBase:
                 yield
             finally:
                 try:
-                    os.close(descriptor)
+                    _release_advisory_lock(descriptor)
                 finally:
-                    try:
-                        if self._file_identity(lock_path) == identity:
-                            lock_path.unlink()
-                    except OSError:
-                        pass
+                    os.close(descriptor)
 
     def _sync_configs(
         self, configs: tuple[RegisteredSourceConfig, ...]
