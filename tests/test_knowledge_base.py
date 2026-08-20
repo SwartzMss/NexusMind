@@ -238,6 +238,41 @@ def test_create_failure_removes_new_owned_directory_when_it_remains_empty(
     assert not root.exists()
 
 
+@pytest.mark.parametrize("collision_name", ["manifest.json", "knowledge.db"])
+def test_create_does_not_overwrite_or_delete_layout_file_arriving_after_empty_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    collision_name: str,
+) -> None:
+    root = tmp_path / f"race-{collision_name}"
+    root.mkdir()
+    private_bytes = f"private concurrent {collision_name}".encode()
+    original_iterdir = Path.iterdir
+    injected = False
+
+    def racing_iterdir(path: Path):
+        nonlocal injected
+        if path == root and not injected:
+            injected = True
+
+            def empty_then_collide():
+                if False:
+                    yield path
+                root.joinpath(collision_name).write_bytes(private_bytes)
+
+            return empty_then_collide()
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", racing_iterdir)
+
+    with pytest.raises(KnowledgeBasePersistenceError) as caught:
+        KnowledgeBase.create(str(root), knowledge_base_id="kb")
+
+    assert root.joinpath(collision_name).read_bytes() == private_bytes
+    assert "private concurrent" not in str(caught.value)
+    assert str(root) not in str(caught.value)
+
+
 def test_open_rejects_file_and_symlink_roots(tmp_path: Path) -> None:
     file_root = tmp_path / "private-file-root"
     file_root.write_bytes(b"private")
@@ -310,6 +345,38 @@ def test_open_accepts_unsynchronized_registration(tmp_path: Path) -> None:
     assert KnowledgeBase.open(str(root)).status() == KnowledgeBaseStatus(
         "kb", None, 1, 0, 0
     )
+
+
+def test_open_restores_more_than_collection_default_source_limit(tmp_path: Path) -> None:
+    root = tmp_path / "many-sources"
+    root.mkdir()
+    registrations = tuple(
+        LocalFileSourceConfig(source_id=f"source-{number:03}", path=str(tmp_path / f"{number}.txt"))
+        for number in range(101)
+    )
+    write_manifest(
+        root / "manifest.json",
+        KnowledgeBaseManifest(knowledge_base_id="kb", sources=registrations),
+        KnowledgeBaseLimits(),
+    )
+    SQLiteKnowledgeSnapshotStore(root / "knowledge.db").save(
+        KnowledgeSnapshot(
+            sources=tuple(
+                KnowledgeSource(
+                    source_id=item.source_id,
+                    source_type=KnowledgeSourceType.LOCAL_FILE,
+                    display_name=item.source_id,
+                )
+                for item in registrations
+            ),
+            documents=(),
+        )
+    )
+
+    status = KnowledgeBase.open(str(root)).status()
+
+    assert status.registered_source_count == 101
+    assert status.canonical_source_count == 101
 
 
 def test_open_redacts_injected_index_factory_and_restore_failures(tmp_path: Path) -> None:

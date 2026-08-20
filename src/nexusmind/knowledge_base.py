@@ -27,6 +27,7 @@ from .knowledge_chunking import TextChunker
 from .knowledge_collection import (
     CloneableChunkIndex,
     KnowledgeCollection,
+    KnowledgeCollectionLimits,
     KnowledgeSearchResult,
     KnowledgeSnapshot,
 )
@@ -94,7 +95,7 @@ def _require_sqlite_header(path: Path) -> None:
 
 def _require_store_sentinel(path: Path) -> None:
     try:
-        uri = f"{path.resolve(strict=True).as_uri()}?mode=ro&immutable=1"
+        uri = f"{path.resolve(strict=True).as_uri()}?mode=ro"
         with closing(sqlite3.connect(uri, uri=True)) as database:
             table = database.execute(
                 "SELECT type FROM sqlite_master "
@@ -157,10 +158,10 @@ class KnowledgeBase:
             limits=active_limits,
         )
         factory = cls._validate_factory(index_factory)
-        collection = cls._new_collection(factory)
+        collection = cls._new_collection(factory, active_limits)
 
         made_root = False
-        created: list[Path] = []
+        owned: dict[Path, tuple[int, int]] = {}
         try:
             if os.path.lexists(root):
                 if _is_reparse_or_symlink(root) or not root.is_dir():
@@ -172,24 +173,20 @@ class KnowledgeBase:
                 made_root = True
 
             database_path = root / _DATABASE_NAME
-            try:
-                SQLiteKnowledgeSnapshotStore(database_path)
-            finally:
-                for suffix in ("", "-journal", "-wal", "-shm"):
-                    artifact = root / f"{_DATABASE_NAME}{suffix}"
-                    if os.path.lexists(artifact):
-                        created.append(artifact)
             manifest_path = root / _MANIFEST_NAME
+            owned = cls._reserve_layout((manifest_path, database_path))
+            SQLiteKnowledgeSnapshotStore(database_path)
+            cls._require_owned_identity(database_path, owned[database_path])
             write_manifest(manifest_path, manifest, active_limits)
-            created.append(manifest_path)
+            owned[manifest_path] = cls._file_identity(manifest_path)
         except (KnowledgeBaseConfigError, KnowledgeBasePersistenceError):
-            cls._rollback_create(created, root, made_root)
+            cls._rollback_create(owned, root, made_root)
             raise
         except (KnowledgeSnapshotStoreError, OSError) as exc:
-            cls._rollback_create(created, root, made_root)
+            cls._rollback_create(owned, root, made_root)
             raise KnowledgeBasePersistenceError("unable to create knowledge base") from exc
         except Exception as exc:
-            cls._rollback_create(created, root, made_root)
+            cls._rollback_create(owned, root, made_root)
             raise KnowledgeBasePersistenceError("unable to create knowledge base") from exc
 
         return cls(
@@ -237,7 +234,7 @@ class KnowledgeBase:
         except KnowledgeSnapshotStoreError as exc:
             raise KnowledgeBasePersistenceError("unable to read canonical knowledge state") from exc
         cls._validate_coherence(manifest, snapshot)
-        collection = cls._new_collection(factory)
+        collection = cls._new_collection(factory, active_limits)
         try:
             collection.restore(snapshot)
         except Exception as exc:
@@ -263,9 +260,14 @@ class KnowledgeBase:
     @staticmethod
     def _new_collection(
         factory: Callable[[], CloneableChunkIndex],
+        limits: KnowledgeBaseLimits,
     ) -> KnowledgeCollection:
         try:
-            return KnowledgeCollection(chunker=TextChunker(), index_factory=factory)
+            return KnowledgeCollection(
+                chunker=TextChunker(),
+                index_factory=factory,
+                limits=KnowledgeCollectionLimits(max_sources=limits.max_sources),
+            )
         except Exception as exc:
             raise KnowledgeBaseConfigError("unable to configure knowledge retrieval") from exc
 
@@ -287,12 +289,65 @@ class KnowledgeBase:
                 raise KnowledgeBasePersistenceError("knowledge-base stores are incoherent")
 
     @staticmethod
-    def _rollback_create(created: list[Path], root: Path, made_root: bool) -> None:
-        for artifact in reversed(created):
+    def _file_identity(path: Path) -> tuple[int, int]:
+        info = path.stat(follow_symlinks=False)
+        return (info.st_dev, info.st_ino)
+
+    @classmethod
+    def _reserve_layout(
+        cls, paths: tuple[Path, Path]
+    ) -> dict[Path, tuple[int, int]]:
+        owned: dict[Path, tuple[int, int]] = {}
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_BINARY", 0)
+        try:
+            for path in paths:
+                descriptor = os.open(path, flags, 0o600)
+                try:
+                    info = os.fstat(descriptor)
+                    owned[path] = (info.st_dev, info.st_ino)
+                finally:
+                    os.close(descriptor)
+        except OSError as exc:
+            cls._rollback_owned_files(owned)
+            raise KnowledgeBasePersistenceError(
+                "unable to reserve knowledge-base layout"
+            ) from exc
+        return owned
+
+    @classmethod
+    def _require_owned_identity(
+        cls, path: Path, expected: tuple[int, int]
+    ) -> None:
+        try:
+            actual = cls._file_identity(path)
+        except OSError as exc:
+            raise KnowledgeBasePersistenceError(
+                "knowledge-base layout ownership changed"
+            ) from exc
+        if actual != expected:
+            raise KnowledgeBasePersistenceError(
+                "knowledge-base layout ownership changed"
+            )
+
+    @classmethod
+    def _rollback_owned_files(cls, owned: dict[Path, tuple[int, int]]) -> None:
+        for artifact, expected in reversed(tuple(owned.items())):
             try:
+                if cls._file_identity(artifact) != expected:
+                    continue
                 artifact.unlink()
             except OSError:
                 pass
+
+    @classmethod
+    def _rollback_create(
+        cls,
+        owned: dict[Path, tuple[int, int]],
+        root: Path,
+        made_root: bool,
+    ) -> None:
+        cls._rollback_owned_files(owned)
         if made_root:
             try:
                 root.rmdir()
