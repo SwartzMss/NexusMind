@@ -30,6 +30,7 @@ dev = [
 
 [project.scripts]
 nexusmind = "nexusmind.cli:main"
+nexusmind-kb = "nexusmind.knowledge_base_ui:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
