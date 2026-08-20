@@ -109,7 +109,91 @@ def test_failed_registration_write_does_not_swap_memory(
     assert tuple(item.source_id for item in kb.list_sources()) == ("two",)
 
 
+def test_unlock_failure_after_success_does_not_reverse_commit_or_retain_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "kb"
+    kb = KnowledgeBase.create(str(root), knowledge_base_id="kb")
+    real_release = module._release_advisory_lock
+
+    def failing_release(descriptor: int) -> None:
+        raise OSError("private unlock detail")
+
+    monkeypatch.setattr(module, "_release_advisory_lock", failing_release)
+    kb.add_source(LocalFileSourceConfig(source_id="one", path="one.txt"))
+
+    assert tuple(item.source_id for item in kb.list_sources()) == ("one",)
+    assert tuple(
+        item.source_id for item in KnowledgeBase.open(str(root)).list_sources()
+    ) == ("one",)
+
+    monkeypatch.setattr(module, "_release_advisory_lock", real_release)
+    KnowledgeBase.open(str(root)).add_source(
+        LocalFileSourceConfig(source_id="two", path="two.txt")
+    )
+
+
+def test_unlock_failure_does_not_mask_primary_controlled_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kb = KnowledgeBase.create(str(tmp_path / "kb"), knowledge_base_id="kb")
+
+    def failing_write(*args, **kwargs):
+        raise OSError("private write detail")
+
+    def failing_release(descriptor: int) -> None:
+        raise OSError("private unlock detail")
+
+    monkeypatch.setattr(module, "write_manifest", failing_write)
+    monkeypatch.setattr(module, "_release_advisory_lock", failing_release)
+
+    with pytest.raises(
+        KnowledgeBasePersistenceError,
+        match="unable to persist knowledge-base manifest",
+    ) as caught:
+        kb.add_source(LocalFileSourceConfig(source_id="one", path="one.txt"))
+
+    assert "private write detail" not in str(caught.value)
+    assert "private unlock detail" not in str(caught.value)
+
+
+def test_close_failure_after_commit_is_sanitized_and_poisons_handle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kb = KnowledgeBase.create(str(tmp_path / "kb"), knowledge_base_id="kb")
+    real_release = module._release_advisory_lock
+    real_close = module.os.close
+    mutation_descriptor: int | None = None
+
+    def recording_release(descriptor: int) -> None:
+        nonlocal mutation_descriptor
+        mutation_descriptor = descriptor
+        real_release(descriptor)
+
+    def failing_close(descriptor: int) -> None:
+        if descriptor == mutation_descriptor:
+            raise OSError("private close detail")
+        real_close(descriptor)
+
+    monkeypatch.setattr(module, "_release_advisory_lock", recording_release)
+    monkeypatch.setattr(module.os, "close", failing_close)
+    try:
+        with pytest.raises(
+            KnowledgeBasePersistenceError,
+            match="mutation cleanup failed; knowledge base is unusable",
+        ) as caught:
+            kb.add_source(LocalFileSourceConfig(source_id="one", path="one.txt"))
+    finally:
+        if mutation_descriptor is not None:
+            real_close(mutation_descriptor)
+
+    assert "private close detail" not in str(caught.value)
+    with pytest.raises(KnowledgeBaseClosedError):
+        kb.list_sources()
+
+
 def test_registration_bounds_leave_memory_and_manifest_unchanged(tmp_path: Path) -> None:
+    resolved_child = str(Path("child.txt").resolve())
     cases = (
         (
             KnowledgeBaseLimits(max_sources=1),
@@ -122,7 +206,7 @@ def test_registration_bounds_leave_memory_and_manifest_unchanged(tmp_path: Path)
             None,
         ),
         (
-            KnowledgeBaseLimits(max_path_chars=len(str(tmp_path.resolve()))),
+            KnowledgeBaseLimits(max_path_chars=len(resolved_child) - 1),
             LocalFileSourceConfig(source_id="path", path="child.txt"),
             None,
         ),

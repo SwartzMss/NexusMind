@@ -97,10 +97,11 @@ def test_source_id_must_be_non_empty_text(source_id: object) -> None:
         LocalFileSourceConfig(source_id=source_id, path="/tmp")  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("path", [1, None, b"/tmp"])
-def test_source_path_must_be_text(path: object) -> None:
+@pytest.mark.parametrize("source_type", [LocalFileSourceConfig, LocalDirectorySourceConfig])
+@pytest.mark.parametrize("path", ["", 1, None, b"/tmp"])
+def test_source_path_must_be_non_empty_text(source_type: type, path: object) -> None:
     with pytest.raises(KnowledgeBaseConfigError):
-        LocalFileSourceConfig(source_id="docs", path=path)  # type: ignore[arg-type]
+        source_type(source_id="docs", path=path)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("knowledge_base_id", ["", 1, None])
@@ -241,6 +242,7 @@ def test_decode_rejects_root_schema_violations(change: dict[str, object]) -> Non
         {"type": "remote"},
         {"type": 1},
         {"path": 1},
+        {"path": ""},
         {"path": "relative"},
     ],
 )

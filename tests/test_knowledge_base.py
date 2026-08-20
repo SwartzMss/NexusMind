@@ -297,19 +297,25 @@ def test_create_does_not_clobber_manifest_substituted_after_exclusive_open(
     root.mkdir()
     manifest_path = root / "manifest.json"
     private_bytes = b"private substituted manifest"
-    original_open = knowledge_base_module.os.open
+    original_identity = KnowledgeBase._file_identity
     injected = False
+    replacement_identity: tuple[int, int] | None = None
 
-    def substituting_open(path, flags, mode=0o777, *, dir_fd=None):
-        nonlocal injected
-        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
-        if Path(path) == manifest_path and flags & os.O_EXCL and not injected:
+    def substituting_identity(path: Path) -> tuple[int, int]:
+        nonlocal injected, replacement_identity
+        if path == manifest_path and not injected:
             injected = True
             manifest_path.unlink()
             manifest_path.write_bytes(private_bytes)
-        return descriptor
+            actual = original_identity(path)
+            replacement_identity = (actual[0], actual[1] + 1)
+        if path == manifest_path and replacement_identity is not None:
+            return replacement_identity
+        return original_identity(path)
 
-    monkeypatch.setattr(knowledge_base_module.os, "open", substituting_open)
+    monkeypatch.setattr(
+        KnowledgeBase, "_file_identity", staticmethod(substituting_identity)
+    )
 
     with pytest.raises(KnowledgeBasePersistenceError):
         KnowledgeBase.create(str(root), knowledge_base_id="kb")
@@ -401,24 +407,30 @@ def test_unsupported_link_fallback_preserves_substituted_final_database(
     root.mkdir()
     database_path = root / "knowledge.db"
     private_bytes = b"private fallback database"
-    original_open = knowledge_base_module.os.open
+    original_identity = KnowledgeBase._file_identity
 
     def unsupported_link(source: Path, destination: Path) -> None:
         raise OSError(errno.ENOTSUP, "unsupported")
 
     injected = False
+    replacement_identity: tuple[int, int] | None = None
 
-    def substituting_open(path, flags, mode=0o777, *, dir_fd=None):
-        nonlocal injected
-        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
-        if Path(path) == database_path and flags & os.O_EXCL and not injected:
+    def substituting_identity(path: Path) -> tuple[int, int]:
+        nonlocal injected, replacement_identity
+        if path == database_path and not injected:
             injected = True
             database_path.unlink()
             database_path.write_bytes(private_bytes)
-        return descriptor
+            actual = original_identity(path)
+            replacement_identity = (actual[0], actual[1] + 1)
+        if path == database_path and replacement_identity is not None:
+            return replacement_identity
+        return original_identity(path)
 
     monkeypatch.setattr(knowledge_base_module.os, "link", unsupported_link)
-    monkeypatch.setattr(knowledge_base_module.os, "open", substituting_open)
+    monkeypatch.setattr(
+        KnowledgeBase, "_file_identity", staticmethod(substituting_identity)
+    )
 
     with pytest.raises(KnowledgeBasePersistenceError):
         KnowledgeBase.create(str(root), knowledge_base_id="kb")

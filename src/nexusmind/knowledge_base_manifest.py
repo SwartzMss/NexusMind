@@ -61,8 +61,7 @@ class LocalFileSourceConfig:
 
     def __post_init__(self) -> None:
         _require_non_empty_text(self.source_id, "source_id")
-        if type(self.path) is not str:
-            raise KnowledgeBaseConfigError("path must be text")
+        _require_non_empty_text(self.path, "path")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -74,8 +73,7 @@ class LocalDirectorySourceConfig:
 
     def __post_init__(self) -> None:
         _require_non_empty_text(self.source_id, "source_id")
-        if type(self.path) is not str:
-            raise KnowledgeBaseConfigError("path must be text")
+        _require_non_empty_text(self.path, "path")
 
 
 RegisteredSourceConfig: TypeAlias = LocalFileSourceConfig | LocalDirectorySourceConfig

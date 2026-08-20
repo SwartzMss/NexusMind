@@ -820,13 +820,29 @@ class KnowledgeBase:
                 raise KnowledgeBasePersistenceError(
                     "another knowledge-base mutation is active"
                 ) from exc
+            body_failed = False
             try:
                 yield
+            except BaseException:
+                body_failed = True
+                raise
             finally:
                 try:
                     _release_advisory_lock(descriptor)
-                finally:
+                except OSError:
+                    # Closing the descriptor releases the advisory lock on every
+                    # supported platform.  An explicit-unlock anomaly therefore
+                    # must not reverse a committed mutation or mask its failure.
+                    pass
+                try:
                     os.close(descriptor)
+                except OSError as exc:
+                    self._closed = True
+                    if not body_failed:
+                        raise KnowledgeBasePersistenceError(
+                            "knowledge-base mutation cleanup failed; "
+                            "knowledge base is unusable"
+                        ) from exc
 
     def _sync_configs(
         self, configs: tuple[RegisteredSourceConfig, ...]
