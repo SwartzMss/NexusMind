@@ -86,10 +86,26 @@ class RetrievalEvaluationCaseResult:
     reciprocal_rank: float
 
 
+class RetrievalFailureKind(str, Enum):
+    MISSED = "missed"
+    RANKED_BELOW_CUTOFF = "ranked_below_cutoff"
+    PARTIAL_RECALL = "partial_recall"
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalCategoryReport:
+    category: RetrievalCategory
+    case_count: int
+    hit_at_k: float
+    recall_at_k: float
+    mrr: float
+
+
 @dataclass(frozen=True, slots=True)
 class RetrievalEvaluationReport:
     k: int
     case_results: tuple[RetrievalEvaluationCaseResult, ...]
+    category_reports: tuple[RetrievalCategoryReport, ...]
     hit_at_k: float
     recall_at_k: float
     mrr: float
@@ -271,13 +287,49 @@ def _report_from_rankings(
         )
     results = tuple(case_results)
     count = len(results)
+    category_reports: list[RetrievalCategoryReport] = []
+    for category in RetrievalCategory:
+        members = tuple(result for result in results if result.category is category)
+        if not members:
+            continue
+        member_count = len(members)
+        category_reports.append(
+            RetrievalCategoryReport(
+                category=category,
+                case_count=member_count,
+                hit_at_k=sum(result.hit_at_k for result in members) / member_count,
+                recall_at_k=sum(result.recall_at_k for result in members) / member_count,
+                mrr=sum(result.reciprocal_rank for result in members) / member_count,
+            )
+        )
     return RetrievalEvaluationReport(
         k=k,
         case_results=results,
+        category_reports=tuple(category_reports),
         hit_at_k=sum(result.hit_at_k for result in results) / count,
         recall_at_k=sum(result.recall_at_k for result in results) / count,
         mrr=sum(result.reciprocal_rank for result in results) / count,
     )
+
+
+def classify_retrieval_failure(
+    result: RetrievalEvaluationCaseResult,
+    *,
+    smaller_k: int,
+) -> RetrievalFailureKind | None:
+    """Classify deterministic evidence in a case result without generating prose."""
+
+    if not isinstance(result, RetrievalEvaluationCaseResult):
+        raise TypeError("result must be a RetrievalEvaluationCaseResult")
+    if type(smaller_k) is not int or smaller_k <= 0:
+        raise ValueError("smaller_k must be a positive integer")
+    if result.first_relevant_rank is None:
+        return RetrievalFailureKind.MISSED
+    if result.recall_at_k < 1.0:
+        return RetrievalFailureKind.PARTIAL_RECALL
+    if result.first_relevant_rank > smaller_k:
+        return RetrievalFailureKind.RANKED_BELOW_CUTOFF
+    return None
 
 
 def evaluate_retrieval_multi_k(
@@ -320,15 +372,18 @@ def evaluate_retrieval(
 
 __all__ = [
     "RetrievalCategory",
+    "RetrievalCategoryReport",
     "RetrievalEvaluationCase",
     "RetrievalEvaluationCaseResult",
     "RetrievalEvaluationDatasetError",
     "RetrievalEvaluationError",
     "RetrievalEvaluationReport",
+    "RetrievalFailureKind",
     "RetrievalTarget",
     "MAX_EVALUATION_K",
     "MAX_EVALUATION_K_VALUES",
     "evaluate_retrieval",
     "evaluate_retrieval_multi_k",
+    "classify_retrieval_failure",
     "load_retrieval_evaluation_cases",
 ]

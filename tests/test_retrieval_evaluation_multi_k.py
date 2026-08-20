@@ -89,6 +89,9 @@ def test_multi_k_uses_one_max_ranking_and_strict_prefixes() -> None:
     assert tuple(report.recall_at_k for report in reports) == (0.0, 0.5, 1.0)
     assert reports[1].case_results[0].category is RetrievalCategory.MULTI_DOCUMENT
     assert reports[1].case_results[0].relevant_targets == case.relevant_documents
+    assert reports[2].category_reports[0].category is RetrievalCategory.MULTI_DOCUMENT
+    assert reports[2].category_reports[0].case_count == 1
+    assert reports[2].category_reports[0].recall_at_k == 1.0
 
 
 @pytest.mark.parametrize(
