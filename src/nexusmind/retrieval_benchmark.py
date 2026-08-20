@@ -11,9 +11,8 @@ from .hybrid_retrieval import HybridChunkIndex
 from .knowledge_chunking import TextChunker
 from .knowledge_collection import KnowledgeCollection
 from .knowledge_ingestion import LocalDirectoryAdapter
-from .knowledge_retrieval import InMemoryChunkIndex
+from .knowledge_retrieval import InMemoryChunkIndex, SearchHit
 from .lexical_analysis import UnicodeCJKLexicalAnalyzer
-from .knowledge_retrieval import SearchHit
 from .reranking import RerankedChunkIndex
 from .retrieval_evaluation import (
     RetrievalBackend,

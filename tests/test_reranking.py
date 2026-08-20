@@ -254,3 +254,25 @@ def test_clone_and_mutations_use_independent_base_and_commit_atomically() -> Non
     base.alias_clone = True
     with pytest.raises(RerankerError, match="clone failed"):
         _wrapper(base, reranker).clone()
+
+
+@pytest.mark.parametrize(
+    ("method", "args"),
+    [
+        ("add", ((_chunk("a"),),)),
+        ("replace_document", ("doc", (_chunk("a"),))),
+        ("remove_document", ("doc",)),
+    ],
+)
+def test_every_failed_mutation_preserves_committed_base(
+    method: str, args: tuple[object, ...]
+) -> None:
+    base = _Index((SearchHit(_chunk("old"), 1.0),))
+    base.fail_mutation = method
+    index = _wrapper(base, _Reranker())
+
+    with pytest.raises(RerankerError, match="mutation failed"):
+        getattr(index, method)(*args)
+
+    assert index.search("old", limit=1)[0].chunk.chunk_id == "old"
+    assert base.mutations == []
