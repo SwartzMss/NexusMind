@@ -20,7 +20,7 @@ NexusMind 的主要能力层如下：
 
 ### KnowledgeBase 产品 API
 
-`KnowledgeBase` 是面向库调用者的持久化知识库 API，不是 Agent Runtime 的 `Workspace`。它将本地来源注册、显式同步、canonical 状态、搜索和重启恢复收敛到一个对象中：
+`KnowledgeBase` 是面向库调用者的持久化知识库 API，不是 Agent Runtime 的 `Workspace`。它将本地来源注册、显式同步、canonical 状态、搜索和重启恢复收敛到一个对象中。运行下例前，`./security-notes` 必须已存在，并至少包含一个 UTF-8 编码的 `.txt`、`.md` 或 `.markdown` 文件：
 
 ```python
 from nexusmind import KnowledgeBase, LocalDirectorySourceConfig
