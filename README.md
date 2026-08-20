@@ -84,7 +84,11 @@ collection = KnowledgeCollection(
 
 语义 index 在进程内对全部 chunks 做有界 brute-force cosine 排序，score 范围为 `[-1.0, 1.0]`，按 score 降序、`chunk_id` 升序稳定返回；负分和零分候选不会被静默丢弃，`matched_terms` 固定为空。Cosine 与 BM25 是 backend-specific 分数，不能直接跨 backend 比较。首个非空 commit 固定 vector dimension；显式移除到空状态后才允许建立新维度。Chunk 数、内容字符、batch、dimension、保留的 vector values、query 字符和结果数均有显式上限。Add/replace 在 provider 调用和完整候选校验成功后才交换状态，remove 不调用 provider。
 
-Custom `EmbeddingProvider` 必须可安全地在 index clones 之间共享；`InMemorySemanticChunkIndex.clone()` 共享同一个 provider instance 和不可变 limits，只复制 chunks、vectors、ownership 与 accounting 等可变状态。Provider 配置属于未持久化的 runtime configuration，vectors 属于未持久化的 derived state。Snapshot / SQLite 不保存 provider 或 embedding；restore/restart 会使用当前 provider 重新 embedding，因此可能产生远程费用、延迟以及模型版本漂移。持久化 embedding/cache、ANN、hybrid fusion、reranking 和 RAG 不在当前范围内。
+Custom `EmbeddingProvider` 必须可安全地在 index clones 之间共享；`InMemorySemanticChunkIndex.clone()` 共享同一个 provider instance 和不可变 limits，只复制 chunks、vectors、ownership 与 accounting 等可变状态。Provider 配置属于未持久化的 runtime configuration，vectors 属于未持久化的 derived state。Snapshot / SQLite 不保存 provider 或 embedding；restore/restart 会使用当前 provider 重新 embedding，因此可能产生远程费用、延迟以及模型版本漂移。持久化 embedding/cache、ANN 和 RAG 不在当前范围内。
+
+`RerankedChunkIndex` 是任意 cloneable `ChunkIndex` 外的有界第二阶段装饰器。它只向 base index 执行一次固定 `candidate_depth` 搜索，reranker 只能对该精确候选 tuple 重新评分和排序，不能获取额外候选、修改 canonical `Chunk` / `matched_terms` 或拥有持久化状态。`RerankerLimits` 在 provider 工作前限制 query 字符、候选数、候选总字符和结果数；所有值与 `candidate_depth` 都必须是正的 plain integer。
+
+reranker 输出必须是精确 tuple，并逐项对应输入候选；ghost、duplicate、冲突 Chunk、非法 score 或越界结果都会受控 fail closed。最终 score 来自 reranker，同分按 first-stage rank、再按 `chunk_id` 确定性排序。合法 underrun 会原样返回较短结果，不从原排名补齐，也不会在 provider 失败时 fallback。wrapper 的 mutation 与 clone 使用独立 base clone 和 commit-after-success；reranker 作为确定性、无状态 runtime configuration 在 clones 间共享。Snapshot / SQLite 仍只保存 canonical Source 与 Document。
 
 离线语义 fixture、固定配置、复现命令和描述性 Hit@3 / Recall@3 / MRR 位于 [`evals/knowledge/semantic/`](evals/knowledge/semantic/)。它通过真实 ingestion -> collection -> semantic index -> provenance -> evaluator 路径运行，使用固定概念向量验证接线，而不是评估外部 embedding 模型质量，也不是 release gate。
 
@@ -96,7 +100,7 @@ CJK analyzer 对比评估的语料、labels、固定配置、复现命令和当�
 
 `ChunkIndex.search()` 返回 retrieval-layer `SearchHit`，只描述匹配 Chunk、分数和命中词。`KnowledgeCollection.search()` 会按 backend 原始顺序把每个 hit 的 `document_id` 解析到当前已提交的 canonical `Document` 和所属 `KnowledgeSource`，并验证 Chunk offsets 合法且内容等于 canonical Document 的对应字符切片，然后返回 `KnowledgeSearchResult(source, document, hit)`；Source 和 Document 是深拷贝，调用方修改嵌套 metadata 不会影响 collection 状态。无法解析的 ghost/malformed/stale hit 会以受控的 `KnowledgeSearchResolutionError` fail closed，不会伪造 provenance 或返回部分结果。
 
-collection 和 index 仍只存在于当前进程；canonical source/document snapshot 可由显式 store 保存并在重启后加载，但 derived Chunk/Index（包括语义 vectors）会重新构建。当前没有向量数据库、持久化 retrieval index、hybrid retrieval 或 RAG/LLM 答案生成。
+collection 和 index 仍只存在于当前进程；canonical source/document snapshot 可由显式 store 保存并在重启后加载，但 derived Chunk/Index（包括语义 vectors、hybrid fusion 与 reranking composition）会重新构建。当前没有向量数据库、持久化 retrieval index 或 RAG/LLM 答案生成。
 
 `KnowledgeCollection.snapshot()` 可按稳定 identity 顺序导出 frozen container 形式的 `KnowledgeSnapshot`，其中包含与 collection 内部状态脱离的 canonical `KnowledgeSource` / `Document` 副本；嵌套 metadata 仍是普通可变 mapping，因此它不是递归 deep-immutable 对象。`restore()` 把 snapshot 视为完整 authoritative replacement，先验证 source/document 图和 collection limits，再使用当前 chunker 与 `index_factory` 创建的全新空 index 重建所有 derived `Chunk` / retrieval state，全部成功后才原子交换 collection 状态。Snapshot 不包含 Chunk、Index 或 SearchHit；使用不同 chunker 或 retrieval backend 恢复同一 canonical snapshot 时，可以得到不同的 derived state。
 
@@ -133,7 +137,7 @@ SQLite
     -> search
 ```
 
-保存由调用方显式触发；当前没有 autosave、watcher、增量持久化或多进程 writer orchestration。SQLite 是第一个可替换 backend，不属于核心 Knowledge model；FTS、持久化 embedding、vector database、hybrid retrieval 和 RAG 仍是未来工作。
+保存由调用方显式触发；当前没有 autosave、watcher、增量持久化或多进程 writer orchestration。SQLite 是第一个可替换 backend，不属于核心 Knowledge model；FTS、持久化 embedding、vector database 和 RAG 仍是未来工作。
 
 ```text
 External Source
@@ -149,14 +153,14 @@ External Source
 ```text
 Knowledge Ingestion -> KnowledgeSource -> Document
 Knowledge Chunking                           -> Chunk
-Knowledge Index / Retrieval                  -> Lexical / Semantic Index -> SearchHit[]
+Knowledge Index / Retrieval                  -> Lexical / Semantic / Hybrid -> Rerank -> SearchHit[]
 Knowledge Collection                                         -> KnowledgeSearchResult[]
 future                                       -> Persistent Chunk / Index
                                              -> Persistent / ANN Retrieval
                                              -> RAG
 ```
 
-这里不增加第二层排序。当前不包含 citation 编号/格式化、token-based / semantic chunking、持久化 Index、hybrid fusion、query rewriting、reranking、答案生成或 RAG 编排等能力。
+第二阶段 reranking 仍停留在 retrieval backend 内，不改变 collection provenance 层。当前不包含 citation 编号/格式化、token-based / semantic chunking、持久化 Index、query rewriting、答案生成或 RAG 编排等能力。
 
 执行关系可以概括为：
 
@@ -431,7 +435,9 @@ SQLite 租约的 `clock` 是测试注入点。生产环境应让所有访问同�
 ## 分类检索评估与后端比较
 
 `evals/knowledge/benchmark/` 是离线、UTF-8、人工标注的检索基准，比较
-BM25-only、Semantic-only 与 Hybrid-RRF。每个 case 必须显式使用一个严格类别：
+BM25-only、Semantic-only、Hybrid-RRF 与 Hybrid-RRF + Rerank。第四个 backend
+使用完全离线、由 query/candidate 内容驱动的确定性 fixture，只重排固定 Hybrid 候选，
+不读取 case ID 或 relevance answer。每个 case 必须显式使用一个严格类别：
 `exact_term`、`identifier`、`cjk`、`paraphrase`、`cross_language`、
 `multi_document`、`distractor_heavy` 或 `mixed_signal`；未知类别、重复 case ID
 与重复相关文档都会 fail closed，类别不会从 ID 推断。
@@ -458,6 +464,13 @@ renderer 是结构化 report 与固定显示配置之间的纯函数，不读取
 环境变量、时钟或随机数。测试要求重新生成的 Markdown 与 checked-in baseline
 逐字节相同。结果可用于决定后续研究召回、reranking、embedding persistence 或索引
 策略，但本评估不会自动实现或选择这些功能。
+
+### Retrieval Runtime v1 roadmap
+
+有界 lexical、semantic、Hybrid-RRF、second-stage reranking、canonical provenance、
+snapshot/SQLite restore 与分类离线评估共同完成 Retrieval Runtime v1 的底层边界。
+下一阶段是面向使用者的 Knowledge Base / Workspace APIs；query rewriting、远程 reranker、
+持久化 embedding/index、RAG 生成和产品 UI 仍不属于本阶段。
 
 ## 开发验证
 

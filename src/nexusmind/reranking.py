@@ -199,6 +199,22 @@ class RerankedChunkIndex:
         for hit in hits:
             if type(hit) is not SearchHit or not isinstance(hit.chunk, Chunk):
                 raise RerankerCoherenceError(f"{source} returned an invalid SearchHit")
+            chunk = hit.chunk
+            if (
+                type(chunk.document_id) is not str
+                or not chunk.document_id
+                or type(chunk.chunk_id) is not str
+                or not chunk.chunk_id
+                or type(chunk.content) is not str
+                or type(chunk.start_offset) is not int
+                or type(chunk.end_offset) is not int
+                or chunk.start_offset < 0
+                or chunk.end_offset < chunk.start_offset
+                or chunk.end_offset - chunk.start_offset != len(chunk.content)
+            ):
+                raise RerankerCoherenceError(
+                    f"{source} returned invalid canonical chunk data"
+                )
             if type(hit.score) is not float or not isfinite(hit.score):
                 raise RerankerCoherenceError(f"{source} returned an invalid score")
             if type(hit.matched_terms) is not tuple or any(

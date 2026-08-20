@@ -163,6 +163,35 @@ def test_search_preflights_public_limits_before_provider_work() -> None:
     assert reranker.calls == []
 
 
+def test_candidate_bounds_and_shape_fail_before_reranker_work() -> None:
+    reranker = _Reranker()
+    oversized = _Index((SearchHit(_chunk("a", "1234"), 1.0),))
+    index = _wrapper(
+        oversized,
+        reranker,
+        limits=RerankerLimits(
+            max_query_chars=10,
+            max_candidates=3,
+            max_total_candidate_chars=3,
+            max_results=3,
+        ),
+    )
+    with pytest.raises(RerankerLimitError, match="candidate_chars"):
+        index.search("q", limit=1)
+    assert reranker.calls == []
+
+    over_returning = _Index(tuple(SearchHit(_chunk(str(i)), 1.0) for i in range(4)))
+    with pytest.raises(RerankerCoherenceError, match="result limit"):
+        _wrapper(over_returning, reranker).search("q")
+    assert reranker.calls == []
+
+
+def test_base_candidate_must_have_valid_canonical_chunk_fields() -> None:
+    malformed = Chunk("doc", "a", "abc", 0, 2)
+    with pytest.raises(RerankerCoherenceError, match="chunk"):
+        _wrapper(_Index((SearchHit(malformed, 1.0),)), _Reranker()).search("q")
+
+
 @pytest.mark.parametrize(
     "result",
     [
