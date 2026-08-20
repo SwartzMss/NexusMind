@@ -641,11 +641,24 @@ class KnowledgeBase:
 
         try:
             store = SQLiteKnowledgeSnapshotStore(self._root / _DATABASE_NAME)
-            store.save(staging.snapshot())
         except Exception as exc:
             raise KnowledgeBasePersistenceError(
                 "unable to persist canonical knowledge state"
             ) from exc
+
+        try:
+            store.save(staging.snapshot())
+        except Exception as save_error:
+            try:
+                store.save(old_snapshot)
+            except Exception as recovery_error:
+                self._closed = True
+                raise KnowledgeBasePersistenceError(
+                    "knowledge-source removal recovery failed; knowledge base is unusable"
+                ) from recovery_error
+            raise KnowledgeBasePersistenceError(
+                "unable to persist canonical knowledge state"
+            ) from save_error
 
         try:
             self._persist_manifest(candidate)

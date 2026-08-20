@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -43,6 +44,23 @@ def test_remove_source_removes_registration_canonical_and_search_state(tmp_path:
     reopened = KnowledgeBase.open(str(root))
     assert tuple(item.source_id for item in reopened.list_sources()) == ("second",)
     assert tuple(item.source_id for item in reopened.list_documents()) == ("second",)
+    assert b"alpha removable" not in root.joinpath("manifest.json").read_bytes()
+    with sqlite3.connect(root / "knowledge.db") as database:
+        tables = {
+            row[0]
+            for row in database.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        columns = {
+            table: {row[1] for row in database.execute(f"PRAGMA table_info({table})")}
+            for table in tables
+        }
+    assert tables == {"knowledge_store_metadata", "sources", "documents"}
+    persisted_names = {name for names in columns.values() for name in names}
+    assert not persisted_names & {
+        "chunk", "chunks", "embedding", "embeddings", "index", "reranker", "config"
+    }
 
 
 @pytest.mark.parametrize("source_id", ["", " ", None, 1])
@@ -82,11 +100,15 @@ def test_initial_canonical_failure_preserves_both_stores_and_memory(
     kb, root = _synced_pair(tmp_path)
     manifest_before = root.joinpath("manifest.json").read_bytes()
     snapshot_before = SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load()
-    calls: list[str] = []
+    status_before = kb.status()
+    documents_before = kb.list_documents()
+    search_before = kb.search("removable")
+    calls: list[object] = []
 
     def fail_save(self, snapshot):
-        calls.append("save")
-        raise RuntimeError("private provider detail")
+        calls.append(snapshot)
+        if len(calls) == 1:
+            raise RuntimeError("private provider detail")
 
     monkeypatch.setattr(module.SQLiteKnowledgeSnapshotStore, "save", fail_save)
     monkeypatch.setattr(module, "write_manifest", lambda *args, **kwargs: calls.append("manifest"))
@@ -94,11 +116,69 @@ def test_initial_canonical_failure_preserves_both_stores_and_memory(
     with pytest.raises(KnowledgeBasePersistenceError) as caught:
         kb.remove_source("first")
 
-    assert calls == ["save"]
+    assert tuple(item.source_id for item in calls[0].sources) == ("second",)
+    assert calls[1] == snapshot_before
     assert "private" not in str(caught.value)
     assert tuple(item.source_id for item in kb.list_sources()) == ("first", "second")
+    assert kb.status() == status_before
+    assert kb.list_documents() == documents_before
+    assert kb.search("removable") == search_before
     assert root.joinpath("manifest.json").read_bytes() == manifest_before
     assert SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load() == snapshot_before
+
+
+def test_post_commit_initial_save_failure_compensates_exact_old_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kb, root = _synced_pair(tmp_path)
+    manifest_before = root.joinpath("manifest.json").read_bytes()
+    snapshot_before = SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load()
+    status_before = kb.status()
+    documents_before = kb.list_documents()
+    search_before = kb.search("removable")
+    real_save = module.SQLiteKnowledgeSnapshotStore.save
+    calls: list[object] = []
+
+    def commit_then_fail(self, snapshot):
+        calls.append(snapshot)
+        real_save(self, snapshot)
+        if len(calls) == 1:
+            raise RuntimeError("private post-commit detail")
+
+    monkeypatch.setattr(module.SQLiteKnowledgeSnapshotStore, "save", commit_then_fail)
+    with pytest.raises(KnowledgeBasePersistenceError) as caught:
+        kb.remove_source("first")
+
+    assert tuple(item.source_id for item in calls[0].sources) == ("second",)
+    assert calls[1] == snapshot_before
+    assert "private" not in str(caught.value)
+    assert kb.status() == status_before
+    assert kb.list_documents() == documents_before
+    assert kb.search("removable") == search_before
+    assert root.joinpath("manifest.json").read_bytes() == manifest_before
+    assert SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load() == snapshot_before
+
+
+def test_initial_save_and_compensation_failure_poisons_handle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kb, _ = _synced_pair(tmp_path)
+    calls: list[object] = []
+
+    def fail_both_saves(self, snapshot):
+        calls.append(snapshot)
+        detail = "private initial detail" if len(calls) == 1 else "private recovery detail"
+        raise RuntimeError(detail)
+
+    monkeypatch.setattr(module.SQLiteKnowledgeSnapshotStore, "save", fail_both_saves)
+    with pytest.raises(KnowledgeBasePersistenceError, match="recovery") as caught:
+        kb.remove_source("first")
+
+    assert tuple(item.source_id for item in calls[0].sources) == ("second",)
+    assert tuple(item.source_id for item in calls[1].sources) == ("first", "second")
+    assert "private" not in str(caught.value)
+    with pytest.raises(KnowledgeBaseClosedError):
+        kb.status()
 
 
 def test_canonical_store_initialization_failure_is_sanitized_and_releases_lock(
@@ -188,6 +268,14 @@ def test_failed_compensation_poisons_handle_and_reports_recovery_failure(
     assert "private" not in str(caught.value)
     assert saves == 2
     for operation in (kb.status, kb.list_sources, kb.list_documents, lambda: kb.search("x"), kb.sync):
+        with pytest.raises(KnowledgeBaseClosedError):
+            operation()
+    for operation in (
+        lambda: kb.add_source(LocalFileSourceConfig(source_id="third", path="third.txt")),
+        lambda: kb.unregister_source("second"),
+        lambda: kb.remove_source("second"),
+        lambda: kb.sync_source("second"),
+    ):
         with pytest.raises(KnowledgeBaseClosedError):
             operation()
     kb.close()
