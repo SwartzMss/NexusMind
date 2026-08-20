@@ -342,18 +342,27 @@ def test_empty_sync_skips_store_and_save_failure_keeps_live_state(
     kb.add_source(LocalFileSourceConfig(source_id="doc", path=str(path)))
     before = kb.list_documents()
     stored_before = original(root / "knowledge.db").load()
+    save_calls = 0
 
     class SaveFailingStore:
         def __init__(self, path):
-            pass
+            self._store = original(path)
+
+        def load(self):
+            return self._store.load()
 
         def save(self, snapshot):
-            raise RuntimeError("private provider and path")
+            nonlocal save_calls
+            save_calls += 1
+            if save_calls == 1:
+                raise RuntimeError("private provider and path")
+            self._store.save(snapshot)
 
     monkeypatch.setattr(module, "SQLiteKnowledgeSnapshotStore", SaveFailingStore)
     with pytest.raises(KnowledgeBasePersistenceError) as caught:
         kb.sync()
     assert "private" not in str(caught.value)
+    assert save_calls == 2
     assert kb.list_documents() == before
     monkeypatch.setattr(module, "SQLiteKnowledgeSnapshotStore", original)
     assert original(root / "knowledge.db").load() == stored_before
@@ -629,3 +638,130 @@ def test_sync_source_rejects_malformed_source_id(
     kb = KnowledgeBase.create(str(tmp_path / f"kb-{source_id}"), knowledge_base_id="kb")
     with pytest.raises(KnowledgeBaseConfigError):
         kb.sync_source(source_id)  # type: ignore[arg-type]
+
+
+def test_create_relative_root_remains_stable_after_working_directory_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first_cwd = tmp_path / "first"
+    second_cwd = tmp_path / "second"
+    first_cwd.mkdir()
+    second_cwd.mkdir()
+    source = tmp_path / "source.txt"
+    source.write_text("stable relative create", encoding="utf-8")
+    monkeypatch.chdir(first_cwd)
+    kb = KnowledgeBase.create("kb", knowledge_base_id="kb")
+    monkeypatch.chdir(second_cwd)
+
+    kb.add_source(LocalFileSourceConfig(source_id="source", path=str(source)))
+    kb.sync()
+
+    assert kb.status().document_count == 1
+    assert first_cwd.joinpath("kb", "manifest.json").is_file()
+    assert not second_cwd.joinpath("kb").exists()
+
+
+def test_open_relative_root_remains_stable_after_working_directory_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first_cwd = tmp_path / "first"
+    second_cwd = tmp_path / "second"
+    first_cwd.mkdir()
+    second_cwd.mkdir()
+    source = tmp_path / "source.txt"
+    source.write_text("stable relative open searchable", encoding="utf-8")
+    root = first_cwd / "kb"
+    original = KnowledgeBase.create(str(root), knowledge_base_id="kb")
+    original.add_source(LocalFileSourceConfig(source_id="source", path=str(source)))
+    original.sync()
+    original.close()
+    monkeypatch.chdir(first_cwd)
+    reopened = KnowledgeBase.open("kb")
+    monkeypatch.chdir(second_cwd)
+
+    reopened.sync_source("source")
+
+    assert reopened.search("searchable")
+    assert reopened.status().document_count == 1
+
+
+def test_ambiguous_save_is_compensated_to_exact_old_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "kb"
+    source = tmp_path / "source.txt"
+    source.write_text("old canonical", encoding="utf-8")
+    kb = KnowledgeBase.create(str(root), knowledge_base_id="kb")
+    kb.add_source(LocalFileSourceConfig(source_id="source", path=str(source)))
+    kb.sync()
+    old_snapshot = SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load()
+    source.write_text("new private canonical", encoding="utf-8")
+    real_store = module.SQLiteKnowledgeSnapshotStore
+    calls = []
+
+    class AmbiguousStore:
+        def __init__(self, path):
+            self._store = real_store(path)
+
+        def load(self):
+            return self._store.load()
+
+        def save(self, snapshot):
+            calls.append(snapshot)
+            self._store.save(snapshot)
+            if len(calls) == 1:
+                raise RuntimeError("private ambiguous commit")
+
+    monkeypatch.setattr(module, "SQLiteKnowledgeSnapshotStore", AmbiguousStore)
+    with pytest.raises(KnowledgeBasePersistenceError) as caught:
+        kb.sync_source("source")
+
+    assert "private" not in str(caught.value)
+    assert len(calls) == 2
+    assert calls[0].documents[0].content == "new private canonical"
+    assert calls[1] == old_snapshot
+    assert kb.list_documents() == old_snapshot.documents
+    monkeypatch.setattr(module, "SQLiteKnowledgeSnapshotStore", real_store)
+    assert real_store(root / "knowledge.db").load() == old_snapshot
+    assert KnowledgeBase.open(str(root)).list_documents() == old_snapshot.documents
+
+
+def test_failed_ambiguous_save_compensation_poisons_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "kb"
+    source = tmp_path / "source.txt"
+    source.write_text("old", encoding="utf-8")
+    kb = KnowledgeBase.create(str(root), knowledge_base_id="kb")
+    kb.add_source(LocalFileSourceConfig(source_id="source", path=str(source)))
+    kb.sync()
+    old_snapshot = SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load()
+    source.write_text("new private provider value", encoding="utf-8")
+    real_store = module.SQLiteKnowledgeSnapshotStore
+    calls = []
+
+    class UnrecoverableStore:
+        def __init__(self, path):
+            self._store = real_store(path)
+
+        def load(self):
+            return self._store.load()
+
+        def save(self, snapshot):
+            calls.append(snapshot)
+            if len(calls) == 1:
+                self._store.save(snapshot)
+                raise RuntimeError("private original ambiguity")
+            raise RuntimeError("private compensation failure")
+
+    monkeypatch.setattr(module, "SQLiteKnowledgeSnapshotStore", UnrecoverableStore)
+    with pytest.raises(KnowledgeBasePersistenceError) as caught:
+        kb.sync()
+
+    assert str(caught.value) == "unable to recover canonical knowledge state"
+    assert len(calls) == 2
+    assert calls[1] == old_snapshot
+    with pytest.raises(KnowledgeBaseClosedError):
+        kb.status()
+    with pytest.raises(KnowledgeBaseClosedError):
+        kb.list_documents()

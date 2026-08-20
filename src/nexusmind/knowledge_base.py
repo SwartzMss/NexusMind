@@ -194,6 +194,18 @@ class KnowledgeBase:
     ) -> "KnowledgeBase":
         active_limits = _limits(limits)
         root = _root(path)
+        try:
+            if os.path.lexists(root) and _is_reparse_or_symlink(root):
+                raise KnowledgeBasePersistenceError(
+                    "knowledge-base root must be a real directory"
+                )
+            root = root.resolve(strict=False)
+        except KnowledgeBasePersistenceError:
+            raise
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise KnowledgeBasePersistenceError(
+                "unable to resolve knowledge-base root"
+            ) from exc
         manifest = KnowledgeBaseManifest(
             knowledge_base_id=knowledge_base_id,
             display_name=display_name,
@@ -255,6 +267,11 @@ class KnowledgeBase:
         root = _root(path)
         factory = cls._validate_factory(index_factory)
         try:
+            if os.path.lexists(root) and _is_reparse_or_symlink(root):
+                raise KnowledgeBasePersistenceError(
+                    "knowledge-base root must be a real directory"
+                )
+            root = root.resolve(strict=False)
             if (
                 not os.path.lexists(root)
                 or _is_reparse_or_symlink(root)
@@ -280,7 +297,7 @@ class KnowledgeBase:
                 raise KnowledgeBasePersistenceError("knowledge-base layout is invalid")
         except KnowledgeBasePersistenceError:
             raise
-        except OSError as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             raise KnowledgeBasePersistenceError("unable to inspect knowledge-base layout") from exc
 
         manifest = read_manifest(manifest_path, active_limits)
@@ -829,16 +846,32 @@ class KnowledgeBase:
                 results.append(staging.sync(adapter))
         except Exception as exc:
             raise KnowledgeBaseSourceError("unable to synchronize registered source") from exc
+        self._save_staging_snapshot(staging.snapshot(), live_snapshot)
+        self._collection = staging
+        return tuple(results)
+
+    def _save_staging_snapshot(
+        self, staged_snapshot: KnowledgeSnapshot, old_snapshot: KnowledgeSnapshot
+    ) -> None:
         try:
-            SQLiteKnowledgeSnapshotStore(self._root / _DATABASE_NAME).save(
-                staging.snapshot()
-            )
+            store = SQLiteKnowledgeSnapshotStore(self._root / _DATABASE_NAME)
         except Exception as exc:
             raise KnowledgeBasePersistenceError(
                 "unable to persist canonical knowledge state"
             ) from exc
-        self._collection = staging
-        return tuple(results)
+        try:
+            store.save(staged_snapshot)
+        except Exception as original_exc:
+            try:
+                store.save(old_snapshot)
+            except Exception as recovery_exc:
+                self._closed = True
+                raise KnowledgeBasePersistenceError(
+                    "unable to recover canonical knowledge state"
+                ) from recovery_exc
+            raise KnowledgeBasePersistenceError(
+                "unable to persist canonical knowledge state"
+            ) from original_exc
 
     def close(self) -> None:
         self._closed = True
