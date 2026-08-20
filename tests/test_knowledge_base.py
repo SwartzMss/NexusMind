@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+import os
 from pathlib import Path
 import sqlite3
 
@@ -271,6 +272,63 @@ def test_create_does_not_overwrite_or_delete_layout_file_arriving_after_empty_ch
     assert root.joinpath(collision_name).read_bytes() == private_bytes
     assert "private concurrent" not in str(caught.value)
     assert str(root) not in str(caught.value)
+
+
+def test_create_does_not_clobber_manifest_substituted_after_exclusive_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "manifest-substitution"
+    root.mkdir()
+    manifest_path = root / "manifest.json"
+    private_bytes = b"private substituted manifest"
+    original_open = knowledge_base_module.os.open
+    injected = False
+
+    def substituting_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal injected
+        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if Path(path) == manifest_path and flags & os.O_EXCL and not injected:
+            injected = True
+            manifest_path.unlink()
+            manifest_path.write_bytes(private_bytes)
+        return descriptor
+
+    monkeypatch.setattr(knowledge_base_module.os, "open", substituting_open)
+
+    with pytest.raises(KnowledgeBasePersistenceError):
+        KnowledgeBase.create(str(root), knowledge_base_id="kb")
+
+    assert manifest_path.read_bytes() == private_bytes
+
+
+def test_create_does_not_initialize_or_delete_substituted_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "database-substitution"
+    root.mkdir()
+    database_path = root / "knowledge.db"
+    private_bytes = b""
+    real_store = knowledge_base_module.SQLiteKnowledgeSnapshotStore
+    injected = False
+
+    class SubstitutingStore:
+        def __init__(self, path: Path) -> None:
+            nonlocal injected
+            if not injected:
+                injected = True
+                if database_path.exists():
+                    database_path.unlink()
+                database_path.write_bytes(private_bytes)
+            real_store(path)
+
+    monkeypatch.setattr(
+        knowledge_base_module, "SQLiteKnowledgeSnapshotStore", SubstitutingStore
+    )
+
+    with pytest.raises(KnowledgeBasePersistenceError):
+        KnowledgeBase.create(str(root), knowledge_base_id="kb")
+
+    assert database_path.read_bytes() == private_bytes
 
 
 def test_open_rejects_file_and_symlink_roots(tmp_path: Path) -> None:

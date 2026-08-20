@@ -9,6 +9,7 @@ from pathlib import Path
 import sqlite3
 import stat
 from typing import Callable
+from uuid import uuid4
 
 from .knowledge import Document, KnowledgeSourceType
 from .knowledge_base_manifest import (
@@ -20,8 +21,8 @@ from .knowledge_base_manifest import (
     LocalDirectorySourceConfig,
     LocalFileSourceConfig,
     RegisteredSourceConfig,
+    encode_manifest,
     read_manifest,
-    write_manifest,
 )
 from .knowledge_chunking import TextChunker
 from .knowledge_collection import (
@@ -174,11 +175,13 @@ class KnowledgeBase:
 
             database_path = root / _DATABASE_NAME
             manifest_path = root / _MANIFEST_NAME
-            owned = cls._reserve_layout((manifest_path, database_path))
-            SQLiteKnowledgeSnapshotStore(database_path)
-            cls._require_owned_identity(database_path, owned[database_path])
-            write_manifest(manifest_path, manifest, active_limits)
-            owned[manifest_path] = cls._file_identity(manifest_path)
+            owned[database_path] = cls._create_database(root, database_path)
+            owned[manifest_path] = cls._write_new_manifest(
+                manifest_path, encode_manifest(manifest, active_limits)
+            )
+            cls._fsync_directory(root)
+            for artifact, identity in owned.items():
+                cls._require_identity(artifact, identity)
         except (KnowledgeBaseConfigError, KnowledgeBasePersistenceError):
             cls._rollback_create(owned, root, made_root)
             raise
@@ -294,41 +297,117 @@ class KnowledgeBase:
         return (info.st_dev, info.st_ino)
 
     @classmethod
-    def _reserve_layout(
-        cls, paths: tuple[Path, Path]
-    ) -> dict[Path, tuple[int, int]]:
-        owned: dict[Path, tuple[int, int]] = {}
+    def _require_identity(cls, path: Path, expected: tuple[int, int]) -> None:
+        try:
+            if cls._file_identity(path) != expected:
+                raise KnowledgeBasePersistenceError(
+                    "knowledge-base layout ownership changed"
+                )
+        except KnowledgeBasePersistenceError:
+            raise
+        except OSError as exc:
+            raise KnowledgeBasePersistenceError(
+                "knowledge-base layout ownership changed"
+            ) from exc
+
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        try:
+            descriptor = os.open(path, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except OSError:
+            pass
+
+    @classmethod
+    def _open_exclusive(cls, path: Path) -> tuple[int, tuple[int, int]]:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         flags |= getattr(os, "O_BINARY", 0)
         try:
-            for path in paths:
-                descriptor = os.open(path, flags, 0o600)
-                try:
-                    info = os.fstat(descriptor)
-                    owned[path] = (info.st_dev, info.st_ino)
-                finally:
-                    os.close(descriptor)
+            descriptor = os.open(path, flags, 0o600)
         except OSError as exc:
-            cls._rollback_owned_files(owned)
             raise KnowledgeBasePersistenceError(
-                "unable to reserve knowledge-base layout"
+                "unable to create knowledge-base artifact"
             ) from exc
-        return owned
+        try:
+            info = os.fstat(descriptor)
+        except OSError as exc:
+            os.close(descriptor)
+            raise KnowledgeBasePersistenceError(
+                "unable to identify knowledge-base artifact"
+            ) from exc
+        return descriptor, (info.st_dev, info.st_ino)
 
     @classmethod
-    def _require_owned_identity(
-        cls, path: Path, expected: tuple[int, int]
-    ) -> None:
+    def _write_new_manifest(cls, path: Path, data: bytes) -> tuple[int, int]:
+        descriptor, identity = cls._open_exclusive(path)
         try:
-            actual = cls._file_identity(path)
+            with os.fdopen(descriptor, "wb") as stream:
+                descriptor = -1
+                view = memoryview(data)
+                while view:
+                    written = stream.write(view)
+                    if written is None or written <= 0:
+                        raise OSError("incomplete manifest write")
+                    view = view[written:]
+                stream.flush()
+                os.fsync(stream.fileno())
+            if cls._file_identity(path) != identity:
+                raise KnowledgeBasePersistenceError(
+                    "knowledge-base layout ownership changed"
+                )
+            return identity
+        except KnowledgeBasePersistenceError:
+            cls._rollback_owned_files({path: identity})
+            raise
         except OSError as exc:
+            cls._rollback_owned_files({path: identity})
             raise KnowledgeBasePersistenceError(
-                "knowledge-base layout ownership changed"
+                "unable to write knowledge-base manifest"
             ) from exc
-        if actual != expected:
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    @classmethod
+    def _create_database(cls, root: Path, final: Path) -> tuple[int, int]:
+        temporary = root / f".{_DATABASE_NAME}.{uuid4().hex}.tmp"
+        descriptor, temporary_identity = cls._open_exclusive(temporary)
+        os.close(descriptor)
+        published: dict[Path, tuple[int, int]] = {}
+        try:
+            SQLiteKnowledgeSnapshotStore(temporary)
+            if cls._file_identity(temporary) != temporary_identity:
+                raise KnowledgeBasePersistenceError(
+                    "knowledge-base layout ownership changed"
+                )
+            os.link(temporary, final)
+            final_identity = cls._file_identity(final)
+            if final_identity != temporary_identity:
+                raise KnowledgeBasePersistenceError(
+                    "knowledge-base layout ownership changed"
+                )
+            published[final] = final_identity
+            cls._rollback_owned_files({temporary: temporary_identity})
+            return final_identity
+        except KnowledgeBasePersistenceError:
+            cls._rollback_owned_files(published)
+            cls._rollback_owned_files({temporary: temporary_identity})
+            raise
+        except (KnowledgeSnapshotStoreError, OSError) as exc:
+            cls._rollback_owned_files(published)
+            cls._rollback_owned_files({temporary: temporary_identity})
             raise KnowledgeBasePersistenceError(
-                "knowledge-base layout ownership changed"
-            )
+                "unable to create canonical knowledge state"
+            ) from exc
+        except Exception as exc:
+            cls._rollback_owned_files(published)
+            cls._rollback_owned_files({temporary: temporary_identity})
+            raise KnowledgeBasePersistenceError(
+                "unable to create canonical knowledge state"
+            ) from exc
 
     @classmethod
     def _rollback_owned_files(cls, owned: dict[Path, tuple[int, int]]) -> None:
