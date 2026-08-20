@@ -80,6 +80,8 @@ RegisteredSourceConfig: TypeAlias = LocalFileSourceConfig | LocalDirectorySource
 
 
 def _normalized_path(path: str) -> str:
+    if "\0" in path:
+        raise KnowledgeBaseConfigError("source path cannot be normalized")
     try:
         return str(Path(path).resolve(strict=False))
     except (OSError, RuntimeError, ValueError) as exc:
