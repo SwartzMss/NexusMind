@@ -4,6 +4,7 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
+import nexusmind.knowledge_base as knowledge_base_module
 
 from nexusmind import (
     Document,
@@ -15,6 +16,7 @@ from nexusmind import (
     KnowledgeBasePersistenceError,
     KnowledgeBaseStatus,
     KnowledgeSnapshot,
+    KnowledgeSnapshotStoreError,
     KnowledgeSource,
     KnowledgeSourceType,
     LocalDirectorySourceConfig,
@@ -123,6 +125,90 @@ def test_open_reopens_identity_and_rejects_missing_or_corrupt_layout(tmp_path: P
     assert str(corrupt) not in str(caught.value)
 
 
+@pytest.mark.parametrize("payload", [b"", b"not a sqlite database: private-token"])
+def test_open_rejects_invalid_database_without_mutating_it(
+    tmp_path: Path, payload: bytes
+) -> None:
+    root = tmp_path / "invalid-database-private-path"
+    root.mkdir()
+    write_manifest(
+        root / "manifest.json",
+        KnowledgeBaseManifest(knowledge_base_id="kb"),
+        KnowledgeBaseLimits(),
+    )
+    database = root / "knowledge.db"
+    database.write_bytes(payload)
+
+    with pytest.raises(KnowledgeBasePersistenceError) as caught:
+        KnowledgeBase.open(str(root))
+
+    assert database.read_bytes() == payload
+    assert "private-token" not in str(caught.value)
+    assert str(root) not in str(caught.value)
+
+
+def test_create_failure_cleans_only_owned_artifacts_and_preserves_user_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "existing-empty"
+    root.mkdir()
+
+    class FailingStore:
+        def __init__(self, path: Path) -> None:
+            Path(path).write_bytes(b"owned database")
+            Path(path).with_name("user-arrived.txt").write_text("keep", encoding="utf-8")
+            raise KnowledgeSnapshotStoreError("private injected store detail")
+
+    monkeypatch.setattr(knowledge_base_module, "SQLiteKnowledgeSnapshotStore", FailingStore)
+
+    with pytest.raises(KnowledgeBasePersistenceError) as caught:
+        KnowledgeBase.create(str(root), knowledge_base_id="kb")
+
+    assert "private" not in str(caught.value)
+    assert str(root) not in str(caught.value)
+    assert root.is_dir()
+    assert root.joinpath("user-arrived.txt").read_text(encoding="utf-8") == "keep"
+    assert not root.joinpath("knowledge.db").exists()
+    assert not root.joinpath("manifest.json").exists()
+
+
+def test_create_failure_removes_new_owned_directory_when_it_remains_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "new-root"
+
+    class FailingStore:
+        def __init__(self, path: Path) -> None:
+            Path(path).write_bytes(b"owned database")
+            raise KnowledgeSnapshotStoreError("private")
+
+    monkeypatch.setattr(knowledge_base_module, "SQLiteKnowledgeSnapshotStore", FailingStore)
+
+    with pytest.raises(KnowledgeBasePersistenceError):
+        KnowledgeBase.create(str(root), knowledge_base_id="kb")
+
+    assert not root.exists()
+
+
+def test_open_rejects_file_and_symlink_roots(tmp_path: Path) -> None:
+    file_root = tmp_path / "private-file-root"
+    file_root.write_bytes(b"private")
+    with pytest.raises(KnowledgeBasePersistenceError) as file_error:
+        KnowledgeBase.open(str(file_root))
+    assert str(file_root) not in str(file_error.value)
+
+    real_root = tmp_path / "real"
+    KnowledgeBase.create(str(real_root), knowledge_base_id="kb").close()
+    link_root = tmp_path / "private-link-root"
+    try:
+        link_root.symlink_to(real_root, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+    with pytest.raises(KnowledgeBasePersistenceError) as link_error:
+        KnowledgeBase.open(str(link_root))
+    assert str(link_root) not in str(link_error.value)
+
+
 def test_close_is_idempotent_and_guards_all_inspection_methods(tmp_path: Path) -> None:
     kb = KnowledgeBase.create(str(tmp_path / "base"), knowledge_base_id="kb")
     kb.close()
@@ -156,6 +242,75 @@ def test_open_restores_default_unicode_cjk_index_offline(tmp_path: Path) -> None
     result = kb.search("语义检索")[0]
     assert result.document.content == "知识图谱支持语义检索"
     assert result.hit.matched_terms == ("语义", "义检", "检索")
+
+
+def test_open_accepts_unsynchronized_registration(tmp_path: Path) -> None:
+    root = tmp_path / "unsynchronized"
+    root.mkdir()
+    write_manifest(
+        root / "manifest.json",
+        KnowledgeBaseManifest(
+            knowledge_base_id="kb",
+            sources=(
+                LocalFileSourceConfig(source_id="docs", path=str(tmp_path / "docs.txt")),
+            ),
+        ),
+        KnowledgeBaseLimits(),
+    )
+    SQLiteKnowledgeSnapshotStore(root / "knowledge.db")
+
+    assert KnowledgeBase.open(str(root)).status() == KnowledgeBaseStatus(
+        "kb", None, 1, 0, 0
+    )
+
+
+def test_open_redacts_injected_index_factory_and_restore_failures(tmp_path: Path) -> None:
+    empty = tmp_path / "empty"
+    KnowledgeBase.create(str(empty), knowledge_base_id="kb").close()
+
+    def failing_factory() -> InMemoryChunkIndex:
+        raise RuntimeError("private factory token")
+
+    with pytest.raises(KnowledgeBaseConfigError) as factory_error:
+        KnowledgeBase.open(str(empty), index_factory=failing_factory)
+    assert "private factory token" not in str(factory_error.value)
+    assert str(empty) not in str(factory_error.value)
+
+    fixture = tmp_path / "restore-private-path"
+    registration = LocalFileSourceConfig(source_id="docs", path=str(tmp_path / "docs.txt"))
+    _write_fixture(
+        fixture, registration=registration, source_type=KnowledgeSourceType.LOCAL_FILE,
+        content="private document content",
+    )
+
+    class FailingRestoreIndex(InMemoryChunkIndex):
+        def replace_document(self, document_id: str, chunks: tuple) -> None:
+            raise RuntimeError("private restore token")
+
+    with pytest.raises(KnowledgeBasePersistenceError) as restore_error:
+        KnowledgeBase.open(str(fixture), index_factory=FailingRestoreIndex)
+    message = str(restore_error.value)
+    assert "private restore token" not in message
+    assert "private document content" not in message
+    assert str(fixture) not in message
+
+
+def test_open_redacts_injected_store_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "store-private-path"
+    KnowledgeBase.create(str(root), knowledge_base_id="kb").close()
+
+    class FailingStore:
+        def __init__(self, path: Path) -> None:
+            raise KnowledgeSnapshotStoreError("private store token")
+
+    monkeypatch.setattr(knowledge_base_module, "SQLiteKnowledgeSnapshotStore", FailingStore)
+
+    with pytest.raises(KnowledgeBasePersistenceError) as caught:
+        KnowledgeBase.open(str(root))
+    assert "private store token" not in str(caught.value)
+    assert str(root) not in str(caught.value)
 
 
 def test_injected_index_factory_rebuilds_state_and_is_not_persisted(tmp_path: Path) -> None:

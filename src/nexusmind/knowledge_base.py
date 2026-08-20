@@ -35,6 +35,7 @@ from .lexical_analysis import UnicodeCJKLexicalAnalyzer
 
 _MANIFEST_NAME = "manifest.json"
 _DATABASE_NAME = "knowledge.db"
+_SQLITE_HEADER = b"SQLite format 3\x00"
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +76,18 @@ def _is_reparse_or_symlink(path: Path) -> bool:
 
 def _default_index_factory() -> InMemoryChunkIndex:
     return InMemoryChunkIndex(analyzer=UnicodeCJKLexicalAnalyzer())
+
+
+def _require_sqlite_header(path: Path) -> None:
+    try:
+        with path.open("rb") as stream:
+            header = stream.read(len(_SQLITE_HEADER))
+    except OSError as exc:
+        raise KnowledgeBasePersistenceError(
+            "unable to read canonical knowledge state"
+        ) from exc
+    if header != _SQLITE_HEADER:
+        raise KnowledgeBasePersistenceError("canonical knowledge state is invalid")
 
 
 class KnowledgeBase:
@@ -187,6 +200,7 @@ class KnowledgeBase:
             raise KnowledgeBasePersistenceError("unable to inspect knowledge-base layout") from exc
 
         manifest = read_manifest(manifest_path, active_limits)
+        _require_sqlite_header(database_path)
         try:
             snapshot = SQLiteKnowledgeSnapshotStore(database_path).load()
         except KnowledgeSnapshotStoreError as exc:
