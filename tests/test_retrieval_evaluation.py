@@ -205,4 +205,4 @@ def test_backend_result_limit_is_reported_as_evaluation_error() -> None:
     with pytest.raises(
         RetrievalEvaluationError, match="k exceeds retrieval backend result limit"
     ):
-        evaluate_retrieval(collection, (case,), k=101)  # type: ignore[arg-type]
+        evaluate_retrieval(collection, (case,), k=100)  # type: ignore[arg-type]

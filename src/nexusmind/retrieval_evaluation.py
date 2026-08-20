@@ -73,7 +73,9 @@ class RetrievalEvaluationCase:
 @dataclass(frozen=True, slots=True)
 class RetrievalEvaluationCaseResult:
     case_id: str
+    category: RetrievalCategory
     query: str
+    relevant_targets: tuple[RetrievalTarget, ...]
     returned_targets: tuple[RetrievalTarget, ...]
     returned_chunk_ids: tuple[str, ...]
     relevant_targets_found: tuple[RetrievalTarget, ...]
@@ -91,6 +93,10 @@ class RetrievalEvaluationReport:
     hit_at_k: float
     recall_at_k: float
     mrr: float
+
+
+MAX_EVALUATION_K_VALUES = 8
+MAX_EVALUATION_K = 100
 
 
 def load_retrieval_evaluation_cases(
@@ -171,12 +177,9 @@ def load_retrieval_evaluation_cases(
     return tuple(cases)
 
 
-def evaluate_retrieval(
-    collection: KnowledgeCollection,
+def _validate_cases(
     cases: tuple[RetrievalEvaluationCase, ...],
-    *,
-    k: int = 5,
-) -> RetrievalEvaluationReport:
+) -> None:
     if type(cases) is not tuple or not cases:
         raise RetrievalEvaluationError("cases must be a non-empty tuple")
     if any(not isinstance(case, RetrievalEvaluationCase) for case in cases):
@@ -184,13 +187,30 @@ def evaluate_retrieval(
     case_ids = [case.case_id for case in cases]
     if len(set(case_ids)) != len(case_ids):
         raise RetrievalEvaluationError("cases contain duplicate case_id values")
-    if type(k) is not int or k <= 0:
-        raise RetrievalEvaluationError("k must be a positive integer")
+
+
+def _validate_ks(ks: tuple[int, ...]) -> tuple[int, ...]:
+    if type(ks) is not tuple or not ks:
+        raise RetrievalEvaluationError("ks must be a non-empty tuple")
+    if any(type(k) is not int or k <= 0 for k in ks):
+        raise RetrievalEvaluationError("ks must contain positive plain integers")
+    if len(set(ks)) != len(ks):
+        raise RetrievalEvaluationError("ks contains duplicate values")
+    if len(ks) > MAX_EVALUATION_K_VALUES:
+        raise RetrievalEvaluationError("ks contains too many values")
+    if max(ks) > MAX_EVALUATION_K:
+        raise RetrievalEvaluationError("k exceeds configured maximum")
+    return tuple(sorted(ks))
+
+
+def _snapshot_and_validate_relevance(
+    collection: KnowledgeCollection,
+    cases: tuple[RetrievalEvaluationCase, ...],
+):
     if not callable(getattr(collection, "snapshot", None)) or not callable(
         getattr(collection, "search", None)
     ):
         raise RetrievalEvaluationError("collection must implement snapshot() and search()")
-
     snapshot = collection.snapshot()
     canonical_targets = {
         RetrievalTarget(document.source_id, document.logical_path)
@@ -203,15 +223,18 @@ def evaluate_retrieval(
                     f"unknown relevance target in case {case.case_id}: "
                     f"{target.source_id}/{target.logical_path}"
                 )
+    return snapshot
 
+
+def _report_from_rankings(
+    cases: tuple[RetrievalEvaluationCase, ...],
+    rankings: tuple[tuple[object, ...], ...],
+    *,
+    k: int,
+) -> RetrievalEvaluationReport:
     case_results: list[RetrievalEvaluationCaseResult] = []
-    for case in cases:
-        try:
-            search_results = collection.search(case.query, limit=k)
-        except ChunkIndexLimitError as exc:
-            raise RetrievalEvaluationError(
-                "k exceeds retrieval backend result limit"
-            ) from exc
+    for case, full_ranking in zip(cases, rankings):
+        search_results = full_ranking[:k]
         returned_targets = tuple(
             RetrievalTarget(result.source.source_id, result.document.logical_path)
             for result in search_results
@@ -230,24 +253,22 @@ def evaluate_retrieval(
                 found.append(target)
                 seen.add(target)
         missed = tuple(target for target in case.relevant_documents if target not in seen)
-        hit_at_k = 1.0 if first_relevant_rank is not None else 0.0
-        recall_at_k = len(found) / len(case.relevant_documents)
-        reciprocal_rank = 1.0 / first_relevant_rank if first_relevant_rank else 0.0
         case_results.append(
             RetrievalEvaluationCaseResult(
                 case_id=case.case_id,
+                category=case.category,
                 query=case.query,
+                relevant_targets=case.relevant_documents,
                 returned_targets=returned_targets,
                 returned_chunk_ids=returned_chunk_ids,
                 relevant_targets_found=tuple(found),
                 relevant_targets_missed=missed,
                 first_relevant_rank=first_relevant_rank,
-                hit_at_k=hit_at_k,
-                recall_at_k=recall_at_k,
-                reciprocal_rank=reciprocal_rank,
+                hit_at_k=1.0 if first_relevant_rank is not None else 0.0,
+                recall_at_k=len(found) / len(case.relevant_documents),
+                reciprocal_rank=1.0 / first_relevant_rank if first_relevant_rank else 0.0,
             )
         )
-
     results = tuple(case_results)
     count = len(results)
     return RetrievalEvaluationReport(
@@ -259,6 +280,44 @@ def evaluate_retrieval(
     )
 
 
+def evaluate_retrieval_multi_k(
+    collection: KnowledgeCollection,
+    cases: tuple[RetrievalEvaluationCase, ...],
+    *,
+    ks: tuple[int, ...] = (1, 3, 5, 10),
+) -> tuple[RetrievalEvaluationReport, ...]:
+    _validate_cases(cases)
+    ordered_ks = _validate_ks(ks)
+    _snapshot_and_validate_relevance(collection, cases)
+    rankings: list[tuple[object, ...]] = []
+    max_k = max(ordered_ks)
+    for case in cases:
+        try:
+            search_results = collection.search(case.query, limit=max_k)
+        except ChunkIndexLimitError as exc:
+            raise RetrievalEvaluationError(
+                "k exceeds retrieval backend result limit"
+            ) from exc
+        if type(search_results) is not tuple:
+            raise RetrievalEvaluationError("retrieval backend must return a tuple")
+        rankings.append(search_results)
+    frozen_rankings = tuple(rankings)
+    return tuple(
+        _report_from_rankings(cases, frozen_rankings, k=k) for k in ordered_ks
+    )
+
+
+def evaluate_retrieval(
+    collection: KnowledgeCollection,
+    cases: tuple[RetrievalEvaluationCase, ...],
+    *,
+    k: int = 5,
+) -> RetrievalEvaluationReport:
+    if type(k) is not int or k <= 0:
+        raise RetrievalEvaluationError("k must be a positive integer")
+    return evaluate_retrieval_multi_k(collection, cases, ks=(k,))[0]
+
+
 __all__ = [
     "RetrievalCategory",
     "RetrievalEvaluationCase",
@@ -267,6 +326,9 @@ __all__ = [
     "RetrievalEvaluationError",
     "RetrievalEvaluationReport",
     "RetrievalTarget",
+    "MAX_EVALUATION_K",
+    "MAX_EVALUATION_K_VALUES",
     "evaluate_retrieval",
+    "evaluate_retrieval_multi_k",
     "load_retrieval_evaluation_cases",
 ]

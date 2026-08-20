@@ -60,6 +60,8 @@ from .lexical_analysis import (
     WhitespaceLexicalAnalyzer,
 )
 from .retrieval_evaluation import (
+    MAX_EVALUATION_K,
+    MAX_EVALUATION_K_VALUES,
     RetrievalCategory,
     RetrievalEvaluationCase,
     RetrievalEvaluationCaseResult,
@@ -68,6 +70,7 @@ from .retrieval_evaluation import (
     RetrievalEvaluationReport,
     RetrievalTarget,
     evaluate_retrieval,
+    evaluate_retrieval_multi_k,
     load_retrieval_evaluation_cases,
 )
 from .semantic_retrieval import (
@@ -172,6 +175,8 @@ __all__ = [
     "RetrievalEvaluationError",
     "RetrievalEvaluationReport",
     "RetrievalTarget",
+    "MAX_EVALUATION_K",
+    "MAX_EVALUATION_K_VALUES",
     "SourceNotFoundError",
     "SourceTypeError",
     "SearchHit",
@@ -188,6 +193,7 @@ __all__ = [
     "UnsupportedFileTypeError",
     "WhitespaceLexicalAnalyzer",
     "evaluate_retrieval",
+    "evaluate_retrieval_multi_k",
     "load_retrieval_evaluation_cases",
     "__version__",
 ]
