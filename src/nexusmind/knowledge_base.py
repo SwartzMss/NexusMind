@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from contextlib import closing, contextmanager
 from copy import deepcopy
-from dataclasses import dataclass
 import errno
 import os
 from pathlib import Path
@@ -14,7 +13,7 @@ from threading import RLock
 from typing import Callable
 from uuid import uuid4
 
-from .knowledge import Document, KnowledgeSourceType
+from .knowledge import Document, KnowledgeSource, KnowledgeSourceType
 from .knowledge_base_manifest import (
     KnowledgeBaseClosedError,
     KnowledgeBaseConfigError,
@@ -30,10 +29,20 @@ from .knowledge_base_manifest import (
     write_manifest,
 )
 from .knowledge_chunking import TextChunker
+from .knowledge_inspection import (
+    KnowledgeBaseInspection,
+    KnowledgeBaseStatus,
+    KnowledgeChunkInspection,
+    KnowledgeDocumentInspection,
+    KnowledgeDocumentSummary,
+    KnowledgeSourceInspection,
+    KnowledgeSourceSyncStatus,
+)
 from .knowledge_collection import (
     CloneableChunkIndex,
     KnowledgeCollection,
     KnowledgeCollectionLimits,
+    KnowledgeRetrievalDiagnostics,
     KnowledgeSearchResult,
     KnowledgeSnapshot,
     KnowledgeSyncResult,
@@ -64,15 +73,6 @@ _UNSUPPORTED_LINK_ERRNOS = frozenset(
     if value is not None
 )
 _WINDOWS_ERROR_NOT_SUPPORTED = 50
-
-
-@dataclass(frozen=True, slots=True)
-class KnowledgeBaseStatus:
-    knowledge_base_id: str
-    display_name: str | None
-    registered_source_count: int
-    canonical_source_count: int
-    document_count: int
 
 
 def _limits(value: KnowledgeBaseLimits | None) -> KnowledgeBaseLimits:
@@ -566,6 +566,142 @@ class KnowledgeBase:
             len(snapshot.documents),
         )
 
+    def inspect(self) -> KnowledgeBaseInspection:
+        """Summarize one coherent current manifest and canonical collection state."""
+
+        self._require_open()
+        try:
+            with self._mutation_mutex:
+                manifest = self._manifest
+                snapshot = self._collection.snapshot()
+                document_inspections = self._collection.inspect_documents(
+                    preview_chars=1
+                )
+
+            canonical_source_ids = {source.source_id for source in snapshot.sources}
+            snapshot_document_keys = {
+                (
+                    document.source_id,
+                    document.document_id,
+                    document.content_hash,
+                )
+                for document in snapshot.documents
+            }
+            inspection_document_keys = {
+                (
+                    item.document.source_id,
+                    item.document.document_id,
+                    item.document.content_hash,
+                )
+                for item in document_inspections
+            }
+            if (
+                len(snapshot.documents) != len(document_inspections)
+                or snapshot_document_keys != inspection_document_keys
+            ):
+                raise ValueError("collection inspection does not match canonical snapshot")
+            documents = tuple(
+                KnowledgeDocumentSummary(
+                    source_id=item.document.source_id,
+                    document_id=item.document.document_id,
+                    logical_path=item.document.logical_path,
+                    content_type=item.document.content_type,
+                    content_hash=item.document.content_hash,
+                    metadata=item.document.metadata,
+                    character_count=len(item.document.content),
+                    chunk_count=len(item.chunks),
+                )
+                for item in sorted(
+                    document_inspections,
+                    key=lambda value: (
+                        value.document.source_id,
+                        value.document.logical_path,
+                    ),
+                )
+            )
+            document_counts = dict.fromkeys(canonical_source_ids, 0)
+            chunk_counts = dict.fromkeys(canonical_source_ids, 0)
+            for document in documents:
+                document_counts[document.source_id] += 1
+                chunk_counts[document.source_id] += document.chunk_count
+            sources = tuple(
+                KnowledgeSourceInspection(
+                    config=config,
+                    sync_status=(
+                        KnowledgeSourceSyncStatus.SYNCED
+                        if config.source_id in canonical_source_ids
+                        else KnowledgeSourceSyncStatus.REGISTERED
+                    ),
+                    document_count=document_counts.get(config.source_id, 0),
+                    chunk_count=chunk_counts.get(config.source_id, 0),
+                )
+                for config in sorted(manifest.sources, key=lambda item: item.source_id)
+            )
+            status = KnowledgeBaseStatus(
+                manifest.knowledge_base_id,
+                manifest.display_name,
+                len(manifest.sources),
+                len(snapshot.sources),
+                len(document_inspections),
+            )
+            return KnowledgeBaseInspection(status, sources, documents)
+        except Exception:
+            raise KnowledgeBaseSourceError("unable to inspect knowledge base") from None
+
+    def inspect_document(
+        self, document_id: str, *, preview_chars: int = 160
+    ) -> KnowledgeDocumentInspection:
+        """Return detached canonical provenance and bounded chunk previews."""
+
+        self._require_open()
+        if type(document_id) is not str:
+            raise TypeError("document_id must be a string")
+        if not document_id.strip():
+            raise ValueError("document_id must be a non-empty string")
+        if type(preview_chars) is not int:
+            raise TypeError("preview_chars must be an integer")
+        if preview_chars <= 0:
+            raise ValueError("preview_chars must be greater than zero")
+        try:
+            inspection = self._collection.inspect_document(
+                document_id, preview_chars=preview_chars
+            )
+            if type(inspection) is not KnowledgeDocumentInspection:
+                raise TypeError("collection returned an invalid document inspection")
+            source = KnowledgeSource(
+                source_id=inspection.source.source_id,
+                source_type=inspection.source.source_type,
+                display_name=inspection.source.display_name,
+                logical_location=inspection.source.logical_location,
+                metadata=inspection.source.metadata,
+            )
+            document = Document(
+                source_id=inspection.document.source_id,
+                logical_path=inspection.document.logical_path,
+                content=inspection.document.content,
+                content_type=inspection.document.content_type,
+                metadata=inspection.document.metadata,
+            )
+            if (
+                document.document_id != inspection.document.document_id
+                or document.content_hash != inspection.document.content_hash
+            ):
+                raise ValueError("collection returned incoherent document provenance")
+            chunks = tuple(
+                KnowledgeChunkInspection(
+                    item.ordinal,
+                    item.chunk_id,
+                    item.start_offset,
+                    item.end_offset,
+                    item.character_count,
+                    item.preview,
+                )
+                for item in inspection.chunks
+            )
+            return KnowledgeDocumentInspection(source, document, chunks)
+        except Exception:
+            raise KnowledgeBaseSourceError("unable to inspect knowledge base") from None
+
     def list_sources(self) -> tuple[RegisteredSourceConfig, ...]:
         self._require_open()
         return self._manifest.sources
@@ -588,6 +724,35 @@ class KnowledgeBase:
             return self._collection.search(query, limit=limit)
         except Exception as exc:
             raise KnowledgeBaseSourceError("unable to search knowledge base") from exc
+
+    def diagnose_search(
+        self, query: str, *, limit: int = 10
+    ) -> KnowledgeRetrievalDiagnostics:
+        """Return one provenance-resolved trace from a diagnostic index."""
+
+        self._require_open()
+        if type(query) is not str:
+            raise TypeError("query must be a string")
+        if type(limit) is not int:
+            raise TypeError("limit must be an integer")
+        if limit <= 0:
+            raise ValueError("limit must be greater than zero")
+        try:
+            diagnostics = self._collection.diagnose_search(query, limit=limit)
+            if type(diagnostics) is not KnowledgeRetrievalDiagnostics:
+                raise TypeError("collection returned invalid search diagnostics")
+            validated = KnowledgeRetrievalDiagnostics(
+                diagnostics.query,
+                diagnostics.results,
+                diagnostics.candidates,
+            )
+            if validated.query != query:
+                raise ValueError("collection returned diagnostics for another query")
+            return validated
+        except Exception:
+            raise KnowledgeBaseSourceError(
+                "unable to diagnose knowledge search"
+            ) from None
 
     def add_source(self, config: RegisteredSourceConfig) -> None:
         """Persist a source registration without touching the source itself."""

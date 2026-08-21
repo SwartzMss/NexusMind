@@ -11,6 +11,9 @@ from .knowledge_retrieval import (
     ChunkIdentityConflictError,
     ChunkIndexError,
     DocumentReplacementError,
+    RetrievalCandidateDiagnostic,
+    RetrievalDiagnostics,
+    RetrievalStage,
     SearchHit,
 )
 
@@ -241,6 +244,24 @@ class InMemorySemanticChunkIndex:
         return clone
 
     def search(self, query: str, *, limit: int = 10) -> tuple[SearchHit, ...]:
+        return self._compute_hits(query, limit=limit)
+
+    def diagnose(self, query: str, *, limit: int = 10) -> RetrievalDiagnostics:
+        hits = self._compute_hits(query, limit=limit)
+        candidates = tuple(
+            RetrievalCandidateDiagnostic(
+                stage=RetrievalStage.SEMANTIC,
+                rank=rank,
+                chunk=hit.chunk,
+                score=hit.score,
+                matched_terms=hit.matched_terms,
+                selected=True,
+            )
+            for rank, hit in enumerate(hits, start=1)
+        )
+        return RetrievalDiagnostics(hits=hits, candidates=candidates)
+
+    def _compute_hits(self, query: str, *, limit: int) -> tuple[SearchHit, ...]:
         if type(query) is not str:
             raise TypeError("query must be a string")
         if len(query) > self._limits.max_query_chars:

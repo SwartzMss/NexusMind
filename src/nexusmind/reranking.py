@@ -8,7 +8,13 @@ from typing import Callable, Protocol, cast
 
 from .knowledge_chunking import Chunk
 from .knowledge_collection import CloneableChunkIndex
-from .knowledge_retrieval import ChunkIndexError, SearchHit
+from .knowledge_retrieval import (
+    ChunkIndexError,
+    RetrievalCandidateDiagnostic,
+    RetrievalDiagnostics,
+    RetrievalStage,
+    SearchHit,
+)
 
 
 class RerankerError(ChunkIndexError):
@@ -108,6 +114,61 @@ class RerankedChunkIndex:
         return clone
 
     def search(self, query: str, *, limit: int = 10) -> tuple[SearchHit, ...]:
+        self._validate_request(query, limit)
+        try:
+            raw_candidates = self._base.search(query, limit=self._candidate_depth)
+        except Exception as exc:
+            raise RerankerError("base index search failed") from exc
+        candidates = self._validated_hits(
+            raw_candidates,
+            bound=self._candidate_depth,
+            source="base index",
+        )
+        return self._rerank_validated_candidates(query, candidates, limit=limit)
+
+    def diagnose(self, query: str, *, limit: int = 10) -> RetrievalDiagnostics:
+        """Rerank one bounded base diagnostic trace without an extra search."""
+
+        self._validate_request(query, limit)
+        try:
+            diagnose = getattr(self._base, "diagnose", None)
+        except Exception as exc:
+            raise RerankerError("base index does not support diagnostics") from exc
+        if not callable(diagnose):
+            raise RerankerError("base index does not support diagnostics")
+        try:
+            raw_trace = diagnose(query, limit=self._candidate_depth)
+        except Exception as exc:
+            raise RerankerError("base index diagnose failed") from exc
+        candidates, base_rows = self._validated_diagnostic_trace(raw_trace)
+        results = self._rerank_validated_candidates(query, candidates, limit=limit)
+        selected_chunk_ids = {hit.chunk.chunk_id for hit in results}
+        preserved_rows = tuple(
+            RetrievalCandidateDiagnostic(
+                stage=row.stage,
+                rank=row.rank,
+                chunk=row.chunk,
+                score=row.score,
+                matched_terms=row.matched_terms,
+                rrf_contribution=row.rrf_contribution,
+                selected=row.chunk.chunk_id in selected_chunk_ids,
+            )
+            for row in base_rows
+        )
+        reranker_rows = tuple(
+            RetrievalCandidateDiagnostic(
+                stage=RetrievalStage.RERANKER,
+                rank=rank,
+                chunk=hit.chunk,
+                score=hit.score,
+                matched_terms=hit.matched_terms,
+                selected=True,
+            )
+            for rank, hit in enumerate(results, start=1)
+        )
+        return RetrievalDiagnostics(hits=results, candidates=preserved_rows + reranker_rows)
+
+    def _validate_request(self, query: str, limit: int) -> None:
         if type(query) is not str:
             raise TypeError("query must be a string")
         if type(limit) is not int:
@@ -118,15 +179,10 @@ class RerankedChunkIndex:
             raise RerankerLimitError("query exceeds max_query_chars")
         if limit > self._limits.max_results:
             raise RerankerLimitError("limit exceeds max_results")
-        try:
-            raw_candidates = self._base.search(query, limit=self._candidate_depth)
-        except Exception as exc:
-            raise RerankerError("base index search failed") from exc
-        candidates = self._validated_hits(
-            raw_candidates,
-            bound=self._candidate_depth,
-            source="base index",
-        )
+
+    def _rerank_validated_candidates(
+        self, query: str, candidates: tuple[SearchHit, ...], *, limit: int
+    ) -> tuple[SearchHit, ...]:
         total_chars = sum(len(hit.chunk.content) for hit in candidates)
         if total_chars > self._limits.max_total_candidate_chars:
             raise RerankerLimitError("candidates exceed max_total_candidate_chars")
@@ -168,6 +224,103 @@ class RerankedChunkIndex:
             )
         )
         return tuple(canonical)
+
+    def _validated_diagnostic_trace(
+        self, trace: object
+    ) -> tuple[tuple[SearchHit, ...], tuple[RetrievalCandidateDiagnostic, ...]]:
+        if type(trace) is not RetrievalDiagnostics:
+            raise RerankerCoherenceError("base diagnostic trace is invalid")
+        if type(trace.hits) is not tuple or type(trace.candidates) is not tuple:
+            raise RerankerCoherenceError("base diagnostic trace is invalid")
+        if any(type(row) is not RetrievalCandidateDiagnostic for row in trace.candidates):
+            raise RerankerCoherenceError("base diagnostic trace is invalid")
+        hits = self._validated_hits(
+            trace.hits,
+            bound=self._candidate_depth,
+            source="base diagnostic trace",
+        )
+        rows = trace.candidates
+        hit_chunk_ids = {hit.chunk.chunk_id for hit in hits}
+        canonical_by_id: dict[str, Chunk] = {}
+        blocks: list[tuple[RetrievalStage, list[RetrievalCandidateDiagnostic]]] = []
+        block_chunk_ids: list[set[str]] = []
+        block_matched_terms: list[dict[str, tuple[str, ...]]] = []
+        stage_positions = {
+            stage: position for position, stage in enumerate(RetrievalStage)
+        }
+        previous_stage_position = -1
+        for row in rows:
+            try:
+                RetrievalCandidateDiagnostic(
+                    stage=row.stage,
+                    rank=row.rank,
+                    chunk=row.chunk,
+                    score=row.score,
+                    matched_terms=row.matched_terms,
+                    rrf_contribution=row.rrf_contribution,
+                    selected=row.selected,
+                )
+                self._validated_hits(
+                    (SearchHit(row.chunk, row.score, row.matched_terms),),
+                    bound=1,
+                    source="base diagnostic trace",
+                )
+            except (TypeError, ValueError, RerankerCoherenceError) as exc:
+                raise RerankerCoherenceError("base diagnostic trace is invalid") from exc
+            stage_position = stage_positions[row.stage]
+            if row.stage is RetrievalStage.RERANKER and not blocks:
+                raise RerankerCoherenceError("base diagnostic trace is incoherent")
+            if not blocks or row.stage is not blocks[-1][0]:
+                if stage_position <= previous_stage_position:
+                    raise RerankerCoherenceError("base diagnostic trace is incoherent")
+                blocks.append((row.stage, []))
+                block_chunk_ids.append(set())
+                block_matched_terms.append({})
+                previous_stage_position = stage_position
+            elif row.stage is RetrievalStage.RERANKER and row.rank == 1:
+                blocks.append((row.stage, []))
+                block_chunk_ids.append(set())
+                block_matched_terms.append({})
+            block_rows = blocks[-1][1]
+            if row.rank != len(block_rows) + 1:
+                raise RerankerCoherenceError("base diagnostic trace is incoherent")
+            current_chunk_ids = block_chunk_ids[-1]
+            if row.chunk.chunk_id in current_chunk_ids:
+                raise RerankerCoherenceError("base diagnostic trace contains duplicates")
+            existing_chunk = canonical_by_id.setdefault(row.chunk.chunk_id, row.chunk)
+            if existing_chunk != row.chunk:
+                raise RerankerCoherenceError("base diagnostic trace is incoherent")
+            if row.selected != (row.chunk.chunk_id in hit_chunk_ids):
+                raise RerankerCoherenceError("base diagnostic trace is incoherent")
+            if (
+                row.stage is RetrievalStage.RERANKER
+                and len(block_chunk_ids) > 1
+                and row.chunk.chunk_id not in block_chunk_ids[-2]
+            ):
+                raise RerankerCoherenceError("base diagnostic trace is incoherent")
+            if (
+                row.stage is RetrievalStage.RERANKER
+                and len(block_matched_terms) > 1
+                and row.matched_terms
+                != block_matched_terms[-2][row.chunk.chunk_id]
+            ):
+                raise RerankerCoherenceError("base diagnostic trace is incoherent")
+            block_rows.append(row)
+            current_chunk_ids.add(row.chunk.chunk_id)
+            block_matched_terms[-1][row.chunk.chunk_id] = row.matched_terms
+        if rows:
+            final_rows = blocks[-1][1]
+            if hits and not all(row.selected for row in final_rows):
+                raise RerankerCoherenceError("base diagnostic trace is incoherent")
+            if tuple(
+                SearchHit(row.chunk, row.score, row.matched_terms)
+                for row in final_rows
+                if row.selected
+            ) != hits:
+                raise RerankerCoherenceError("base diagnostic trace is incoherent")
+        elif hits:
+            raise RerankerCoherenceError("base diagnostic trace is incoherent")
+        return hits, rows
 
     def _clone_base(self) -> CloneableChunkIndex:
         try:

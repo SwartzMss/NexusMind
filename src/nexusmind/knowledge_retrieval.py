@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from math import log
+from enum import Enum
+from math import isfinite, log
 from typing import Protocol
 
 from .knowledge_chunking import Chunk
@@ -38,6 +39,15 @@ class ChunkIdentityConflictError(ChunkIndexError):
 
 class DocumentReplacementError(ChunkIndexError):
     """A document replacement input is invalid."""
+
+
+class RetrievalStage(str, Enum):
+    """The retrieval pipeline stage represented by a diagnostic row."""
+
+    LEXICAL = "lexical"
+    SEMANTIC = "semantic"
+    FUSION = "fusion"
+    RERANKER = "reranker"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -87,6 +97,67 @@ class SearchHit:
     matched_terms: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class RetrievalCandidateDiagnostic:
+    """One candidate emitted by a retrieval pipeline stage."""
+
+    stage: RetrievalStage
+    rank: int
+    chunk: Chunk
+    score: float
+    matched_terms: tuple[str, ...] = ()
+    rrf_contribution: float | None = None
+    selected: bool = False
+
+    def __post_init__(self) -> None:
+        if type(self.stage) is not RetrievalStage:
+            raise TypeError("stage must be RetrievalStage")
+        if type(self.rank) is not int:
+            raise TypeError("rank must be an integer")
+        if self.rank <= 0:
+            raise ValueError("rank must be greater than zero")
+        if not isinstance(self.chunk, Chunk):
+            raise TypeError("chunk must be a Chunk")
+        if type(self.score) is not float:
+            raise TypeError("score must be a float")
+        if not isfinite(self.score):
+            raise ValueError("score must be finite")
+        if type(self.matched_terms) is not tuple:
+            raise TypeError("matched_terms must be a tuple")
+        if any(type(term) is not str for term in self.matched_terms):
+            raise TypeError("matched_terms must contain only strings")
+        if self.rrf_contribution is not None:
+            if type(self.rrf_contribution) is not float:
+                raise TypeError("rrf_contribution must be a float or None")
+            if not isfinite(self.rrf_contribution):
+                raise ValueError("rrf_contribution must be finite")
+            if self.rrf_contribution <= 0:
+                raise ValueError("rrf_contribution must be greater than zero")
+        if type(self.selected) is not bool:
+            raise TypeError("selected must be a boolean")
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalDiagnostics:
+    """Final hits and stage candidates captured for one retrieval request."""
+
+    hits: tuple[SearchHit, ...]
+    candidates: tuple[RetrievalCandidateDiagnostic, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.hits) is not tuple:
+            raise TypeError("hits must be a tuple")
+        if any(type(hit) is not SearchHit for hit in self.hits):
+            raise TypeError("hits must contain only SearchHit values")
+        if type(self.candidates) is not tuple:
+            raise TypeError("candidates must be a tuple")
+        if any(
+            type(candidate) is not RetrievalCandidateDiagnostic
+            for candidate in self.candidates
+        ):
+            raise TypeError("candidates must contain only RetrievalCandidateDiagnostic values")
+
+
 class ChunkIndex(Protocol):
     """Source-neutral contract implemented by chunk retrieval backends."""
 
@@ -97,6 +168,12 @@ class ChunkIndex(Protocol):
     def remove_document(self, document_id: str) -> None: ...
 
     def search(self, query: str, *, limit: int = 10) -> tuple[SearchHit, ...]: ...
+
+
+class DiagnosticChunkIndex(ChunkIndex, Protocol):
+    """Chunk retrieval contract that can expose final candidate diagnostics."""
+
+    def diagnose(self, query: str, *, limit: int = 10) -> RetrievalDiagnostics: ...
 
 
 class InMemoryChunkIndex:
@@ -246,6 +323,24 @@ class InMemoryChunkIndex:
         )
 
     def search(self, query: str, *, limit: int = 10) -> tuple[SearchHit, ...]:
+        return self._compute_hits(query, limit=limit)
+
+    def diagnose(self, query: str, *, limit: int = 10) -> RetrievalDiagnostics:
+        hits = self._compute_hits(query, limit=limit)
+        candidates = tuple(
+            RetrievalCandidateDiagnostic(
+                stage=RetrievalStage.LEXICAL,
+                rank=rank,
+                chunk=hit.chunk,
+                score=hit.score,
+                matched_terms=hit.matched_terms,
+                selected=True,
+            )
+            for rank, hit in enumerate(hits, start=1)
+        )
+        return RetrievalDiagnostics(hits=hits, candidates=candidates)
+
+    def _compute_hits(self, query: str, *, limit: int) -> tuple[SearchHit, ...]:
         if type(query) is not str:
             raise TypeError("query must be a string")
         if len(query) > self._limits.max_query_chars:
@@ -399,8 +494,12 @@ __all__ = [
     "ChunkIndexError",
     "ChunkIndexLimitError",
     "ChunkIndexLimits",
+    "DiagnosticChunkIndex",
     "DocumentReplacementError",
     "InMemoryChunkIndex",
     "LexicalAnalysisError",
     "SearchHit",
+    "RetrievalCandidateDiagnostic",
+    "RetrievalDiagnostics",
+    "RetrievalStage",
 ]

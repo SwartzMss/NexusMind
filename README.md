@@ -39,7 +39,7 @@ kb.close()
 
 kb = KnowledgeBase.open("./security-kb")
 results_after_restart = kb.search("密钥轮换", limit=5)
-kb.close()
+# Keep this reopened handle for the inspection and diagnostics examples below.
 ```
 
 `LocalDirectorySourceConfig` 是已注册的产品配置：它说明下次去哪里加载。Canonical `KnowledgeSource` 则是上次成功同步后已提交内容的 provenance，两者不是同一份状态。`add_source()` 只原子持久化注册；它不构造 adapter、不读取文件，也不调用 embedding 或 reranking provider。`sync()` 和 `sync_source()` 都是调用者显式发起的同步操作；`sync()` 按 `source_id` 排序处理全部注册，整批成功才提交，任一来源失败都不会留下部分新状态。
@@ -60,6 +60,113 @@ Chunk、embedding、lexical/semantic/hybrid index 和 reranker 状态都不持�
 `create()` 只接受不存在或已存在但为空的真实目录，并以 no-clobber 方式创建完整布局；manifest 更新使用同目录临时文件和原子替换。`open()` 严格要求三个 artifact 存在、类型和身份有效，不会将缺失状态补成空库。同一实例的 mutation 由进程内锁串行化；不同 handle/process 通过 `.knowledge-base.lock` 的 no-wait OS advisory lock 协调。进程崩溃会由 OS 释放锁，文件中的旧内容无害。协作进程不得删除、替换或链接该文件；缺失、symlink/reparse point 或 identity 替换都会 fail closed，运行时也不会 unlink 它。
 
 `status()` 只返回 ID、display name、注册数、canonical source 数和 document 数，不扫描文件系统 dirty state，也不虚构 last-sync 状态。`list_sources()` 按 `source_id` 返回 frozen config；`list_documents()` 返回与内部状态脱离的 canonical documents；`search()` 保留 retrieval backend 顺序和 canonical provenance。当前没有 KnowledgeBase CLI、watcher、后台同步、自动持久化 index 或 RAG 编排。
+
+### KnowledgeBase 检查与检索诊断
+
+`inspect()`、`inspect_document()` 和 `diagnose_search()` 是面向 Python 调用者的只读结构化 API；它们不提供 CLI 或 UI 的展示格式。`inspect()` 返回一个 coherent 的当前 manifest/canonical 状态视图。每个已注册来源的 `sync_status` 为 `"synced"`，仅表示 canonical state 中存在该来源（即使该次成功同步得到零份 document）；否则为 `"registered"`。这不是文件系统 dirty scan，也不说明来源路径此刻是否发生变化。
+
+```python
+inspection = kb.inspect()
+document_id = inspection.documents[0].document_id
+inspection_view = {
+    "status": {
+        "knowledge_base_id": inspection.status.knowledge_base_id,
+        "registered_source_count": inspection.status.registered_source_count,
+        "canonical_source_count": inspection.status.canonical_source_count,
+        "document_count": inspection.status.document_count,
+    },
+    "sources": [
+        {
+            "source_id": item.config.source_id,
+            "sync_status": item.sync_status.value,
+            "document_count": item.document_count,
+            "chunk_count": item.chunk_count,
+        }
+        for item in inspection.sources
+    ],
+    "documents": [
+        {
+            "document_id": item.document_id,
+            "source_id": item.source_id,
+            "logical_path": item.logical_path,
+            "content_hash": item.content_hash,
+            "character_count": item.character_count,
+            "chunk_count": item.chunk_count,
+        }
+        for item in inspection.documents
+    ],
+}
+```
+
+`inspect_document(document_id, *, preview_chars=160)` 返回 detached canonical `source`、`document` 和 derived chunk summaries。Chunk 不写入新的 cache：每次检查都用当前 collection 的 chunker 从 canonical Document 重新派生并校验。`preview` 最多为 `preview_chars` 个字符；`start_offset` / `end_offset` 是 canonical document 中的半开字符区间。
+
+```python
+document_inspection = kb.inspect_document(document_id, preview_chars=120)
+document_view = {
+    "source": {
+        "source_id": document_inspection.source.source_id,
+        "source_type": document_inspection.source.source_type,
+        "logical_location": document_inspection.source.logical_location,
+    },
+    "document": {
+        "document_id": document_inspection.document.document_id,
+        "logical_path": document_inspection.document.logical_path,
+        "content_hash": document_inspection.document.content_hash,
+        "content_type": document_inspection.document.content_type,
+    },
+    "chunks": [
+        {
+            "ordinal": chunk.ordinal,
+            "chunk_id": chunk.chunk_id,
+            "start_offset": chunk.start_offset,
+            "end_offset": chunk.end_offset,
+            "character_count": chunk.character_count,
+            "preview": chunk.preview,
+        }
+        for chunk in document_inspection.chunks
+    ],
+}
+```
+
+`diagnose_search(query, *, limit=10)` 返回 `KnowledgeRetrievalDiagnostics`。最终 `results` 和所有中间 `candidates` 都附带经过校验的 canonical `source` / `document` provenance；`candidate.diagnostic` 是 backend trace row。其 `stage` 是 `lexical`、`semantic`、`fusion` 或 `reranker`，`rank` 是该阶段的一基排名，`score` 是该 backend 的原始 score，`matched_terms` 为 backend 提供的命中词。Hybrid 的 lexical / semantic rows 还以 `rrf_contribution` 精确给出 `1 / (rrf_k + rank)`；fusion score 是这些贡献的和。Reranker rows 的 `score` 是 reranker provider score，`selected` 表示该 candidate 是否留在最终结果。
+
+```python
+diagnostics = kb.diagnose_search("密钥轮换", limit=5)
+diagnostics_view = {
+    "query": diagnostics.query,
+    "results": [
+        {
+            "source_id": result.source.source_id,
+            "document_id": result.document.document_id,
+            "logical_path": result.document.logical_path,
+            "chunk_id": result.hit.chunk.chunk_id,
+            "score": result.hit.score,
+            "matched_terms": result.hit.matched_terms,
+        }
+        for result in diagnostics.results
+    ],
+    "candidates": [
+        {
+            "source_id": candidate.source.source_id,
+            "document_id": candidate.document.document_id,
+            "logical_path": candidate.document.logical_path,
+            "stage": candidate.diagnostic.stage.value,
+            "rank": candidate.diagnostic.rank,
+            "chunk_id": candidate.diagnostic.chunk.chunk_id,
+            "score": candidate.diagnostic.score,
+            "matched_terms": candidate.diagnostic.matched_terms,
+            "rrf_contribution": candidate.diagnostic.rrf_contribution,
+            "selected": candidate.diagnostic.selected,
+        }
+        for candidate in diagnostics.candidates
+    ],
+}
+kb.close()
+```
+
+`diagnose_search()` 每次请求只执行一次已配置的诊断 backend/provider 路径（例如 semantic query embedding 或 reranker 各一次），不会先运行普通 `search()` 再重新计算 trace。只有实现可选 `DiagnosticChunkIndex.diagnose()` 协议的 backend 支持该 API；实现 `add()`、`replace_document()`、`remove_document()`、`search()` 和 `clone()` 的自定义 `CloneableChunkIndex` 即使不提供 `diagnose()`，仍可用于搜索、同步、恢复和持久化，但调用诊断会以受控的 `KnowledgeBaseSourceError` 失败。
+
+这三个 API 不读取来源路径、不保存 manifest/SQLite、不改变 index 或 canonical state，也不保留 query history。Inspection、chunk、diagnostic rows、scores 和 query 都不持久化，因此不引入 manifest、snapshot 或 SQLite schema 变更。现有本地 KnowledgeBase UI 在本 issue 中没有加入 diagnostics 展示或新的检查界面。
 
 ### KnowledgeBase 本地界面
 

@@ -14,6 +14,7 @@ from nexusmind import (
     HybridChunkIndexLimits,
     InMemoryChunkIndex,
     InMemorySemanticChunkIndex,
+    RetrievalStage,
     SearchHit,
 )
 
@@ -124,6 +125,92 @@ def test_hybrid_rrf_uses_ranks_preserves_lexical_terms_and_ties_by_id() -> None:
     assert hits[2].matched_terms == ()
 
 
+def test_hybrid_diagnose_emits_backend_and_fusion_trace() -> None:
+    a, b, c = _chunk("a"), _chunk("b"), _chunk("c")
+    lexical = _ScriptedIndex(
+        (SearchHit(a, 999.0, ("exact",)), SearchHit(b, 1.0, ("term",)))
+    )
+    semantic = _ScriptedIndex((SearchHit(c, 0.99), SearchHit(b, -1.0)))
+    index = _hybrid(lexical, semantic, rrf_k=60, candidate_depth=2)
+
+    diagnostics = index.diagnose("query", limit=2)
+
+    assert [hit.chunk.chunk_id for hit in diagnostics.hits] == ["b", "a"]
+    assert lexical.search_calls == [("query", 2)]
+    assert semantic.search_calls == [("query", 2)]
+    assert [candidate.stage for candidate in diagnostics.candidates] == [
+        RetrievalStage.LEXICAL,
+        RetrievalStage.LEXICAL,
+        RetrievalStage.SEMANTIC,
+        RetrievalStage.SEMANTIC,
+        RetrievalStage.FUSION,
+        RetrievalStage.FUSION,
+    ]
+    assert [candidate.rank for candidate in diagnostics.candidates] == [1, 2, 1, 2, 1, 2]
+    assert [candidate.chunk.chunk_id for candidate in diagnostics.candidates] == [
+        "a",
+        "b",
+        "c",
+        "b",
+        "b",
+        "a",
+    ]
+    assert [candidate.score for candidate in diagnostics.candidates] == [
+        999.0,
+        1.0,
+        0.99,
+        -1.0,
+        pytest.approx(2 / 62),
+        pytest.approx(1 / 61),
+    ]
+    assert [candidate.matched_terms for candidate in diagnostics.candidates] == [
+        ("exact",),
+        ("term",),
+        (),
+        (),
+        ("term",),
+        ("exact",),
+    ]
+    assert [candidate.rrf_contribution for candidate in diagnostics.candidates] == [
+        1 / 61,
+        1 / 62,
+        1 / 61,
+        1 / 62,
+        None,
+        None,
+    ]
+    assert [candidate.selected for candidate in diagnostics.candidates] == [
+        True,
+        True,
+        False,
+        True,
+        True,
+        True,
+    ]
+
+
+def test_hybrid_diagnose_preserves_empty_and_child_validation_behavior() -> None:
+    lexical = _ScriptedIndex()
+    semantic = _ScriptedIndex()
+    index = _hybrid(lexical, semantic)
+
+    diagnostics = index.diagnose("query")
+
+    assert diagnostics.hits == ()
+    assert diagnostics.candidates == ()
+    assert lexical.search_calls == [("query", 100)]
+    assert semantic.search_calls == [("query", 100)]
+
+    invalid = _hybrid(_ScriptedIndex((SearchHit(_chunk("x"), math.nan),)), _ScriptedIndex())
+    with pytest.raises(HybridBackendCoherenceError, match="invalid score"):
+        invalid.diagnose("query")
+
+    with pytest.raises(HybridChunkIndexLimitError, match="max_results"):
+        index.diagnose("query", limit=101)
+    assert lexical.search_calls == [("query", 100)]
+    assert semantic.search_calls == [("query", 100)]
+
+
 def test_hybrid_candidate_depth_exceeds_final_limit_and_is_bounded() -> None:
     lexical = _ScriptedIndex((SearchHit(_chunk("one"), 1.0),))
     semantic = _ScriptedIndex()
@@ -143,7 +230,10 @@ def test_hybrid_candidate_depth_exceeds_final_limit_and_is_bounded() -> None:
     assert len(lexical.search_calls) == 1
 
 
-def test_hybrid_rejects_duplicate_and_cross_backend_conflicting_chunks() -> None:
+@pytest.mark.parametrize("method", ["search", "diagnose"])
+def test_hybrid_rejects_duplicate_and_cross_backend_conflicting_chunks(
+    method: str,
+) -> None:
     chunk = _chunk("same")
     duplicate = _hybrid(
         _ScriptedIndex((SearchHit(chunk, 2.0), SearchHit(chunk, 1.0))),
@@ -151,7 +241,7 @@ def test_hybrid_rejects_duplicate_and_cross_backend_conflicting_chunks() -> None
         candidate_depth=2,
     )
     with pytest.raises(HybridBackendCoherenceError, match="duplicate"):
-        duplicate.search("query")
+        getattr(duplicate, method)("query")
 
     conflict = _hybrid(
         _ScriptedIndex((SearchHit(chunk, 1.0),)),
@@ -159,10 +249,13 @@ def test_hybrid_rejects_duplicate_and_cross_backend_conflicting_chunks() -> None
         candidate_depth=1,
     )
     with pytest.raises(HybridBackendCoherenceError, match="disagree"):
-        conflict.search("query")
+        getattr(conflict, method)("query")
 
 
-def test_hybrid_rejects_child_results_over_requested_candidate_limit_early() -> None:
+@pytest.mark.parametrize("method", ["search", "diagnose"])
+def test_hybrid_rejects_child_results_over_requested_candidate_limit_early(
+    method: str,
+) -> None:
     class UninspectableHit:
         @property
         def chunk(self) -> object:
@@ -186,12 +279,15 @@ def test_hybrid_rejects_child_results_over_requested_candidate_limit_early() -> 
         HybridBackendCoherenceError,
         match="exceeded requested candidate limit",
     ):
-        index.search("query", limit=1)
+        getattr(index, method)("query", limit=1)
 
     assert semantic.search_calls == []
 
 
-def test_hybrid_checks_combined_fusion_bound_before_hit_validation() -> None:
+@pytest.mark.parametrize("method", ["search", "diagnose"])
+def test_hybrid_checks_combined_fusion_bound_before_hit_validation(
+    method: str,
+) -> None:
     class UninspectableHit:
         @property
         def chunk(self) -> object:
@@ -209,9 +305,10 @@ def test_hybrid_checks_combined_fusion_bound_before_hit_validation() -> None:
     )
 
     with pytest.raises(HybridChunkIndexLimitError, match="max_fusion_entries"):
-        index.search("query", limit=1)
+        getattr(index, method)("query", limit=1)
 
 
+@pytest.mark.parametrize("method", ["search", "diagnose"])
 @pytest.mark.parametrize(
     "hits",
     [
@@ -221,11 +318,11 @@ def test_hybrid_checks_combined_fusion_bound_before_hit_validation() -> None:
         (SearchHit(_chunk("x"), 1.0, (1,)),),
     ],
 )
-def test_hybrid_rejects_malformed_child_hits(hits: object) -> None:
+def test_hybrid_rejects_malformed_child_hits(hits: object, method: str) -> None:
     index = _hybrid(_ScriptedIndex(hits), _ScriptedIndex())  # type: ignore[arg-type]
 
     with pytest.raises(HybridBackendCoherenceError):
-        index.search("query")
+        getattr(index, method)("query")
 
 
 def test_hybrid_mutations_commit_both_clones_and_clone_is_independent() -> None:

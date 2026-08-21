@@ -9,6 +9,7 @@ from nexusmind import (
     ChunkIndex,
     EmbeddingVector,
     InMemorySemanticChunkIndex,
+    RetrievalStage,
     SearchHit,
     SemanticChunkIndexLimitError,
     SemanticChunkIndexLimits,
@@ -150,7 +151,10 @@ def test_semantic_cosine_remains_finite_for_extreme_finite_values() -> None:
     assert hits[1].score == pytest.approx(1 / math.sqrt(2))
 
 
-def test_semantic_search_validates_query_and_limit_before_provider_call() -> None:
+@pytest.mark.parametrize("method", ["search", "diagnose"])
+def test_semantic_search_and_diagnose_validate_before_provider_call(
+    method: str,
+) -> None:
     provider = _RecordingProvider({"one": (1.0,), "q": (1.0,)})
     index = InMemorySemanticChunkIndex(
         embedding_provider=provider,
@@ -158,16 +162,17 @@ def test_semantic_search_validates_query_and_limit_before_provider_call() -> Non
     )
     index.add((_chunk("one", "one"),))
 
+    operation = getattr(index, method)
     with pytest.raises(TypeError, match="query"):
-        index.search(1)  # type: ignore[arg-type]
+        operation(1)  # type: ignore[arg-type]
     with pytest.raises(SemanticChunkIndexLimitError, match="max_query_chars"):
-        index.search("too long")
+        operation("too long")
     with pytest.raises(TypeError, match="limit"):
-        index.search("q", limit=True)
+        operation("q", limit=True)
     with pytest.raises(ValueError, match="greater than zero"):
-        index.search("q", limit=0)
+        operation("q", limit=0)
     with pytest.raises(SemanticChunkIndexLimitError, match="max_results"):
-        index.search("q", limit=2)
+        operation("q", limit=2)
     assert provider.query_calls == []
 
 
@@ -175,6 +180,66 @@ def test_search_hit_defaults_to_empty_backend_diagnostics() -> None:
     hit = SearchHit(chunk=_chunk("one", "one"), score=0.5)
 
     assert hit.matched_terms == ()
+
+
+def test_semantic_diagnose_matches_search_and_embeds_query_once() -> None:
+    provider = _RecordingProvider(
+        {
+            "alpha": (1.0, 0.0),
+            "beta": (0.0, 1.0),
+            "query": (1.0, 0.0),
+        }
+    )
+    index = InMemorySemanticChunkIndex(embedding_provider=provider)
+    index.add((_chunk("alpha", "alpha"), _chunk("beta", "beta")))
+
+    before_diagnose = len(provider.query_calls)
+    diagnostics = index.diagnose("query", limit=2)
+    assert len(provider.query_calls) == before_diagnose + 1
+    ordinary_hits = index.clone().search("query", limit=2)
+
+    assert diagnostics.hits == ordinary_hits
+    assert len(provider.query_calls) == before_diagnose + 2
+    assert [candidate.stage for candidate in diagnostics.candidates] == [
+        RetrievalStage.SEMANTIC,
+        RetrievalStage.SEMANTIC,
+    ]
+    assert [candidate.rank for candidate in diagnostics.candidates] == [1, 2]
+    assert [candidate.chunk for candidate in diagnostics.candidates] == [
+        hit.chunk for hit in diagnostics.hits
+    ]
+    assert [candidate.score for candidate in diagnostics.candidates] == [
+        hit.score for hit in diagnostics.hits
+    ]
+    assert [candidate.matched_terms for candidate in diagnostics.candidates] == [(), ()]
+    assert [candidate.rrf_contribution for candidate in diagnostics.candidates] == [
+        None,
+        None,
+    ]
+    assert [candidate.selected for candidate in diagnostics.candidates] == [True, True]
+
+
+def test_semantic_diagnose_returns_empty_diagnostics_without_a_corpus() -> None:
+    provider = _RecordingProvider({})
+    index = InMemorySemanticChunkIndex(embedding_provider=provider)
+
+    diagnostics = index.diagnose("query")
+
+    assert diagnostics.hits == ()
+    assert diagnostics.candidates == ()
+    assert provider.query_calls == []
+
+
+def test_semantic_diagnose_skips_embedding_for_a_blank_query() -> None:
+    provider = _RecordingProvider({"document": (1.0, 0.0)})
+    index = InMemorySemanticChunkIndex(embedding_provider=provider)
+    index.add((_chunk("one", "document"),))
+
+    diagnostics = index.diagnose(" \t\n")
+
+    assert diagnostics.hits == ()
+    assert diagnostics.candidates == ()
+    assert provider.query_calls == []
 
 
 def test_replace_document_batches_only_new_chunks_and_removes_stale_chunks() -> None:
