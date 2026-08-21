@@ -107,8 +107,8 @@ twice or drifting from the returned final result.
 - Hybrid retrieval preserves lexical and semantic child rows, records each
   child's one-based rank and exact `1 / (rrf_k + rank)` contribution, then emits
   a `fusion` row with the existing summed score and final fusion rank.
-- Reranking preserves all base diagnostics, records the fixed first-stage
-  candidate rank, and emits `reranker` rows with the provider score and final
+- Reranking preserves all base diagnostics while updating `selected` for the
+  final output, then emits `reranker` rows with the provider score and final
   rank. It never asks the base for candidates beyond the existing configured
   depth.
 
