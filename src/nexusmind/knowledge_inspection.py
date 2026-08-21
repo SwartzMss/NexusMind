@@ -35,6 +35,17 @@ class KnowledgeBaseStatus:
     canonical_source_count: int
     document_count: int
 
+    def __post_init__(self) -> None:
+        _require_nonblank_string(self.knowledge_base_id, "knowledge_base_id")
+        if self.display_name is not None:
+            _require_nonblank_string(self.display_name, "display_name")
+        for field_name in (
+            "registered_source_count",
+            "canonical_source_count",
+            "document_count",
+        ):
+            _require_nonnegative_integer(getattr(self, field_name), field_name)
+
 
 class KnowledgeSourceSyncStatus(str, Enum):
     """Whether a registered source has committed canonical state."""

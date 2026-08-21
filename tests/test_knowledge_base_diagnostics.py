@@ -25,6 +25,49 @@ from nexusmind import (
 from nexusmind.knowledge_base import KnowledgeBaseStatus as CompatibleKnowledgeBaseStatus
 
 
+class _TextSubclass(str):
+    pass
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value", "error_type"),
+    (
+        ("knowledge_base_id", None, TypeError),
+        ("knowledge_base_id", 1, TypeError),
+        ("knowledge_base_id", _TextSubclass("kb"), TypeError),
+        ("knowledge_base_id", "", ValueError),
+        ("knowledge_base_id", "  ", ValueError),
+        ("display_name", 1, TypeError),
+        ("display_name", _TextSubclass("Docs"), TypeError),
+        ("display_name", "", ValueError),
+        ("display_name", "\t", ValueError),
+        ("registered_source_count", True, TypeError),
+        ("registered_source_count", 1.0, TypeError),
+        ("registered_source_count", -1, ValueError),
+        ("canonical_source_count", True, TypeError),
+        ("canonical_source_count", 1.0, TypeError),
+        ("canonical_source_count", -1, ValueError),
+        ("document_count", True, TypeError),
+        ("document_count", 1.0, TypeError),
+        ("document_count", -1, ValueError),
+    ),
+)
+def test_knowledge_base_status_rejects_invalid_exact_public_fields(
+    field_name: str, invalid_value: object, error_type: type[Exception]
+) -> None:
+    values: dict[str, object] = {
+        "knowledge_base_id": "kb",
+        "display_name": None,
+        "registered_source_count": 0,
+        "canonical_source_count": 0,
+        "document_count": 0,
+    }
+    values[field_name] = invalid_value
+
+    with pytest.raises(error_type, match=field_name):
+        KnowledgeBaseStatus(**values)  # type: ignore[arg-type]
+
+
 def test_public_knowledge_base_inspection_values_are_strict_frozen_and_slotted(
     tmp_path: Path,
 ) -> None:
