@@ -6,6 +6,7 @@ import pytest
 
 from nexusmind import (
     Chunk,
+    HybridChunkIndex,
     RetrievalCandidateDiagnostic,
     RetrievalDiagnostics,
     RetrievalStage,
@@ -555,6 +556,32 @@ def test_diagnose_composes_nested_reranker_trace_blocks() -> None:
     ]
 
 
+def test_diagnose_accepts_hybrid_stage_specific_matched_terms() -> None:
+    chunk = _chunk("a", "term")
+    lexical = _Index((SearchHit(chunk, 2.0, ("term",)),))
+    semantic = _Index((SearchHit(chunk, 0.9),))
+    hybrid = HybridChunkIndex(
+        lexical_index_factory=lambda: lexical,
+        semantic_index_factory=lambda: semantic,
+        candidate_depth=1,
+    )
+    index = RerankedChunkIndex(
+        base_index_factory=lambda: hybrid,
+        reranker=_Reranker(),
+        candidate_depth=3,
+    )
+
+    trace = index.diagnose("term", limit=1)
+
+    assert trace.hits[0].matched_terms == ("term",)
+    assert [(row.stage, row.matched_terms) for row in trace.candidates] == [
+        (RetrievalStage.LEXICAL, ("term",)),
+        (RetrievalStage.SEMANTIC, ()),
+        (RetrievalStage.FUSION, ("term",)),
+        (RetrievalStage.RERANKER, ("term",)),
+    ]
+
+
 def test_diagnose_rejects_malformed_base_reranker_block_before_outer_reranking() -> None:
     hit = SearchHit(_chunk("a"), 1.0)
     base, reranker = _DiagnosticIndex(), _Reranker()
@@ -712,6 +739,37 @@ def test_diagnose_rejects_cross_block_canonical_conflict() -> None:
                 chunk=changed,
                 score=1.0,
                 matched_terms=("term",),
+                selected=True,
+            ),
+        ),
+    )
+
+    with pytest.raises(RerankerCoherenceError, match="diagnostic trace"):
+        _wrapper(base, reranker).diagnose("query", limit=1)
+    assert reranker.calls == []
+
+
+def test_diagnose_rejects_reranker_matched_term_drift() -> None:
+    chunk = _chunk("a")
+    hit = SearchHit(chunk, 1.0, ("outer",))
+    base, reranker = _DiagnosticIndex(), _Reranker()
+    base.trace = RetrievalDiagnostics(
+        hits=(hit,),
+        candidates=(
+            RetrievalCandidateDiagnostic(
+                stage=RetrievalStage.LEXICAL,
+                rank=1,
+                chunk=chunk,
+                score=2.0,
+                matched_terms=("inner",),
+                selected=True,
+            ),
+            RetrievalCandidateDiagnostic(
+                stage=RetrievalStage.RERANKER,
+                rank=1,
+                chunk=chunk,
+                score=1.0,
+                matched_terms=("outer",),
                 selected=True,
             ),
         ),
