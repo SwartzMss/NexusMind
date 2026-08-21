@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import FrozenInstanceError
 
 import pytest
 
@@ -15,6 +16,10 @@ from nexusmind import (
     LexicalAnalysisError,
     LexicalAnalyzer,
     SearchHit,
+    RetrievalCandidateDiagnostic,
+    RetrievalDiagnostics,
+    RetrievalStage,
+    DiagnosticChunkIndex,
     WhitespaceLexicalAnalyzer,
 )
 
@@ -37,6 +42,100 @@ def test_retrieval_contracts_are_available_from_package_root() -> None:
     assert hit.chunk == _chunk("chunk-1", "checkpoint resume")
     assert hit.score == pytest.approx(math.log(4 / 3))
     assert hit.matched_terms == ("checkpoint",)
+
+
+def test_retrieval_diagnostic_contracts_are_frozen_and_slotted() -> None:
+    chunk = _chunk("chunk-1", "checkpoint resume")
+    candidate = RetrievalCandidateDiagnostic(
+        stage=RetrievalStage.LEXICAL,
+        rank=1,
+        chunk=chunk,
+        score=1.25,
+        matched_terms=("checkpoint",),
+        selected=True,
+    )
+    diagnostics = RetrievalDiagnostics(hits=(SearchHit(chunk, 1.25, ("checkpoint",)),), candidates=(candidate,))
+
+    assert candidate.stage is RetrievalStage.LEXICAL
+    assert diagnostics.candidates == (candidate,)
+    with pytest.raises(FrozenInstanceError):
+        candidate.rank = 2  # type: ignore[misc]
+    assert hasattr(candidate, "__slots__")
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"stage": "lexical"},
+        {"rank": True},
+        {"rank": 0},
+        {"chunk": object()},
+        {"score": 1},
+        {"score": math.inf},
+        {"matched_terms": ["term"]},
+        {"matched_terms": (1,)},
+        {"rrf_contribution": 1},
+        {"rrf_contribution": 0.0},
+        {"rrf_contribution": math.nan},
+        {"selected": 1},
+    ],
+)
+def test_retrieval_candidate_diagnostic_rejects_malformed_fields(kwargs: dict[str, object]) -> None:
+    values: dict[str, object] = {
+        "stage": RetrievalStage.LEXICAL,
+        "rank": 1,
+        "chunk": _chunk("chunk-1", "term"),
+        "score": 1.0,
+        "matched_terms": ("term",),
+        "rrf_contribution": None,
+        "selected": False,
+    }
+    values.update(kwargs)
+    with pytest.raises((TypeError, ValueError)):
+        RetrievalCandidateDiagnostic(**values)  # type: ignore[arg-type]
+
+
+def test_retrieval_diagnostics_rejects_non_exact_tuples_and_elements() -> None:
+    candidate = RetrievalCandidateDiagnostic(
+        stage=RetrievalStage.LEXICAL,
+        rank=1,
+        chunk=_chunk("chunk-1", "term"),
+        score=1.0,
+    )
+    hit = SearchHit(candidate.chunk, 1.0)
+    for hits, candidates in (
+        ([hit], (candidate,)),
+        ((hit,), [candidate]),
+        ((object(),), (candidate,)),
+        ((hit,), (object(),)),
+    ):
+        with pytest.raises((TypeError, ValueError)):
+            RetrievalDiagnostics(hits=hits, candidates=candidates)  # type: ignore[arg-type]
+
+
+def test_diagnose_matches_search_and_traces_final_lexical_candidates() -> None:
+    chunks = (_chunk("chunk-b", "checkpoint resume"), _chunk("chunk-a", "checkpoint only"))
+    index: DiagnosticChunkIndex = InMemoryChunkIndex()
+    index.add(chunks)
+
+    diagnostics = index.diagnose("CHECKPOINT checkpoint resume", limit=10)
+
+    assert diagnostics.hits == index.search("CHECKPOINT checkpoint resume")
+    assert [(c.rank, c.chunk.chunk_id, c.score, c.matched_terms, c.rrf_contribution, c.selected) for c in diagnostics.candidates] == [
+        (1, "chunk-b", diagnostics.hits[0].score, ("checkpoint", "resume"), None, True),
+        (2, "chunk-a", diagnostics.hits[1].score, ("checkpoint",), None, True),
+    ]
+
+
+def test_diagnose_handles_empty_query_and_limit_one() -> None:
+    index = InMemoryChunkIndex()
+    index.add((_chunk("chunk-a", "term"), _chunk("chunk-b", "term")))
+
+    assert index.diagnose(" ") == RetrievalDiagnostics(hits=(), candidates=())
+    diagnostics = index.diagnose("term", limit=1)
+    assert len(diagnostics.hits) == 1
+    assert len(diagnostics.candidates) == 1
+    assert diagnostics.candidates[0].rank == 1
 
 
 def test_empty_index_non_match_and_blank_query_return_no_hits() -> None:
