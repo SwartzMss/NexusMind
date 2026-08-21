@@ -240,9 +240,10 @@ class RerankedChunkIndex:
             source="base diagnostic trace",
         )
         rows = trace.candidates
-        declared: set[SearchHit] = set()
-        selected_chunk_ids: set[str] = set()
+        hit_chunk_ids = {hit.chunk.chunk_id for hit in hits}
+        canonical_by_id: dict[str, tuple[Chunk, tuple[str, ...]]] = {}
         blocks: list[tuple[RetrievalStage, list[RetrievalCandidateDiagnostic]]] = []
+        block_chunk_ids: list[set[str]] = []
         stage_positions = {
             stage: position for position, stage in enumerate(RetrievalStage)
         }
@@ -266,25 +267,37 @@ class RerankedChunkIndex:
             except (TypeError, ValueError, RerankerCoherenceError) as exc:
                 raise RerankerCoherenceError("base diagnostic trace is invalid") from exc
             stage_position = stage_positions[row.stage]
+            if row.stage is RetrievalStage.RERANKER and not blocks:
+                raise RerankerCoherenceError("base diagnostic trace is incoherent")
             if not blocks or row.stage is not blocks[-1][0]:
                 if stage_position <= previous_stage_position:
                     raise RerankerCoherenceError("base diagnostic trace is incoherent")
                 blocks.append((row.stage, []))
+                block_chunk_ids.append(set())
                 previous_stage_position = stage_position
             elif row.stage is RetrievalStage.RERANKER and row.rank == 1:
                 blocks.append((row.stage, []))
+                block_chunk_ids.append(set())
             block_rows = blocks[-1][1]
             if row.rank != len(block_rows) + 1:
                 raise RerankerCoherenceError("base diagnostic trace is incoherent")
-            if any(existing.chunk.chunk_id == row.chunk.chunk_id for existing in block_rows):
+            current_chunk_ids = block_chunk_ids[-1]
+            if row.chunk.chunk_id in current_chunk_ids:
                 raise RerankerCoherenceError("base diagnostic trace contains duplicates")
+            canonical = (row.chunk, row.matched_terms)
+            existing_canonical = canonical_by_id.setdefault(row.chunk.chunk_id, canonical)
+            if existing_canonical != canonical:
+                raise RerankerCoherenceError("base diagnostic trace is incoherent")
+            if row.selected != (row.chunk.chunk_id in hit_chunk_ids):
+                raise RerankerCoherenceError("base diagnostic trace is incoherent")
+            if (
+                row.stage is RetrievalStage.RERANKER
+                and len(block_chunk_ids) > 1
+                and row.chunk.chunk_id not in block_chunk_ids[-2]
+            ):
+                raise RerankerCoherenceError("base diagnostic trace is incoherent")
             block_rows.append(row)
-            if row.selected:
-                selected_chunk_ids.add(row.chunk.chunk_id)
-                declared.add(SearchHit(row.chunk, row.score, row.matched_terms))
-        hit_chunk_ids = {hit.chunk.chunk_id for hit in hits}
-        if selected_chunk_ids != hit_chunk_ids or any(hit not in declared for hit in hits):
-            raise RerankerCoherenceError("base diagnostic trace is incoherent")
+            current_chunk_ids.add(row.chunk.chunk_id)
         if rows:
             final_rows = blocks[-1][1]
             if hits and not all(row.selected for row in final_rows):

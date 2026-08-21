@@ -576,6 +576,27 @@ def test_diagnose_rejects_malformed_base_reranker_block_before_outer_reranking()
     assert reranker.calls == []
 
 
+def test_diagnose_rejects_reranker_only_base_trace() -> None:
+    hit = SearchHit(_chunk("a"), 1.0)
+    base, reranker = _DiagnosticIndex(), _Reranker()
+    base.trace = RetrievalDiagnostics(
+        hits=(hit,),
+        candidates=(
+            RetrievalCandidateDiagnostic(
+                stage=RetrievalStage.RERANKER,
+                rank=1,
+                chunk=hit.chunk,
+                score=hit.score,
+                selected=True,
+            ),
+        ),
+    )
+
+    with pytest.raises(RerankerCoherenceError, match="diagnostic trace"):
+        _wrapper(base, reranker).diagnose("query", limit=1)
+    assert reranker.calls == []
+
+
 def test_diagnose_rejects_unselected_extra_in_final_reranker_block() -> None:
     a, b = _chunk("a"), _chunk("b")
     hit = SearchHit(a, 1.0)
@@ -603,6 +624,134 @@ def test_diagnose_rejects_unselected_extra_in_final_reranker_block() -> None:
     with pytest.raises(RerankerCoherenceError, match="diagnostic trace"):
         _wrapper(base, reranker).diagnose("query", limit=1)
     assert reranker.calls == []
+
+
+def test_diagnose_rejects_later_reranker_ghost_after_rank_reset() -> None:
+    a, b = _chunk("a"), _chunk("b")
+    hit = SearchHit(b, 1.0)
+    base, reranker = _DiagnosticIndex(), _Reranker()
+    base.trace = RetrievalDiagnostics(
+        hits=(hit,),
+        candidates=(
+            RetrievalCandidateDiagnostic(
+                stage=RetrievalStage.LEXICAL,
+                rank=1,
+                chunk=b,
+                score=2.0,
+                selected=True,
+            ),
+            RetrievalCandidateDiagnostic(
+                stage=RetrievalStage.RERANKER,
+                rank=1,
+                chunk=a,
+                score=1.5,
+                selected=False,
+            ),
+            RetrievalCandidateDiagnostic(
+                stage=RetrievalStage.RERANKER,
+                rank=1,
+                chunk=b,
+                score=1.0,
+                selected=True,
+            ),
+        ),
+    )
+
+    with pytest.raises(RerankerCoherenceError, match="diagnostic trace"):
+        _wrapper(base, reranker).diagnose("query", limit=1)
+    assert reranker.calls == []
+
+
+def test_diagnose_rejects_inconsistent_earlier_selected_flag() -> None:
+    b = _chunk("b")
+    hit = SearchHit(b, 1.0)
+    base, reranker = _DiagnosticIndex(), _Reranker()
+    base.trace = RetrievalDiagnostics(
+        hits=(hit,),
+        candidates=(
+            RetrievalCandidateDiagnostic(
+                stage=RetrievalStage.LEXICAL,
+                rank=1,
+                chunk=b,
+                score=2.0,
+                selected=False,
+            ),
+            RetrievalCandidateDiagnostic(
+                stage=RetrievalStage.RERANKER,
+                rank=1,
+                chunk=b,
+                score=1.0,
+                selected=True,
+            ),
+        ),
+    )
+
+    with pytest.raises(RerankerCoherenceError, match="diagnostic trace"):
+        _wrapper(base, reranker).diagnose("query", limit=1)
+    assert reranker.calls == []
+
+
+def test_diagnose_rejects_cross_block_canonical_conflict() -> None:
+    original, changed = _chunk("a", "original"), _chunk("a", "changed")
+    hit = SearchHit(changed, 1.0, ("term",))
+    base, reranker = _DiagnosticIndex(), _Reranker()
+    base.trace = RetrievalDiagnostics(
+        hits=(hit,),
+        candidates=(
+            RetrievalCandidateDiagnostic(
+                stage=RetrievalStage.LEXICAL,
+                rank=1,
+                chunk=original,
+                score=2.0,
+                matched_terms=("term",),
+                selected=True,
+            ),
+            RetrievalCandidateDiagnostic(
+                stage=RetrievalStage.RERANKER,
+                rank=1,
+                chunk=changed,
+                score=1.0,
+                matched_terms=("term",),
+                selected=True,
+            ),
+        ),
+    )
+
+    with pytest.raises(RerankerCoherenceError, match="diagnostic trace"):
+        _wrapper(base, reranker).diagnose("query", limit=1)
+    assert reranker.calls == []
+
+
+def test_diagnose_composes_three_reranker_levels() -> None:
+    a, b, c = _chunk("a"), _chunk("b"), _chunk("c")
+    base = _DiagnosticIndex((SearchHit(a, 3.0), SearchHit(b, 2.0), SearchHit(c, 1.0)))
+    first_reranker, second_reranker, third_reranker = _Reranker(), _Reranker(), _Reranker()
+    first_reranker.result = (SearchHit(a, 0.8), SearchHit(b, 0.7), SearchHit(c, 0.6))
+    second_reranker.result = (SearchHit(b, 0.9), SearchHit(c, 0.8))
+    third_reranker.result = (SearchHit(c, 1.0),)
+    first = _wrapper(base, first_reranker)
+    second = RerankedChunkIndex(
+        base_index_factory=lambda: first,
+        reranker=second_reranker,
+        candidate_depth=3,
+    )
+    third = RerankedChunkIndex(
+        base_index_factory=lambda: second,
+        reranker=third_reranker,
+        candidate_depth=3,
+    )
+
+    trace = third.diagnose("query", limit=3)
+
+    assert trace.hits == (SearchHit(c, 1.0),)
+    assert [(row.rank, row.chunk.chunk_id, row.selected) for row in trace.candidates if row.stage is RetrievalStage.RERANKER] == [
+        (1, "a", False),
+        (2, "b", False),
+        (3, "c", True),
+        (1, "b", False),
+        (2, "c", True),
+        (1, "c", True),
+    ]
 
 
 def test_failures_are_controlled_redacted_and_fail_closed() -> None:
