@@ -39,7 +39,7 @@ kb.close()
 
 kb = KnowledgeBase.open("./security-kb")
 results_after_restart = kb.search("密钥轮换", limit=5)
-kb.close()
+# Keep this reopened handle for the inspection and diagnostics examples below.
 ```
 
 `LocalDirectorySourceConfig` 是已注册的产品配置：它说明下次去哪里加载。Canonical `KnowledgeSource` 则是上次成功同步后已提交内容的 provenance，两者不是同一份状态。`add_source()` 只原子持久化注册；它不构造 adapter、不读取文件，也不调用 embedding 或 reranking provider。`sync()` 和 `sync_source()` 都是调用者显式发起的同步操作；`sync()` 按 `source_id` 排序处理全部注册，整批成功才提交，任一来源失败都不会留下部分新状态。
@@ -67,6 +67,7 @@ Chunk、embedding、lexical/semantic/hybrid index 和 reranker 状态都不持�
 
 ```python
 inspection = kb.inspect()
+document_id = inspection.documents[0].document_id
 inspection_view = {
     "status": {
         "knowledge_base_id": inspection.status.knowledge_base_id,
@@ -97,7 +98,7 @@ inspection_view = {
 }
 ```
 
-`inspect_document(document_id, preview_chars=160)` 返回 detached canonical `source`、`document` 和 derived chunk summaries。Chunk 不写入新的 cache：每次检查都用当前 collection 的 chunker 从 canonical Document 重新派生并校验。`preview` 最多为 `preview_chars` 个字符；`start_offset` / `end_offset` 是 canonical document 中的半开字符区间。
+`inspect_document(document_id, *, preview_chars=160)` 返回 detached canonical `source`、`document` 和 derived chunk summaries。Chunk 不写入新的 cache：每次检查都用当前 collection 的 chunker 从 canonical Document 重新派生并校验。`preview` 最多为 `preview_chars` 个字符；`start_offset` / `end_offset` 是 canonical document 中的半开字符区间。
 
 ```python
 document_inspection = kb.inspect_document(document_id, preview_chars=120)
@@ -127,7 +128,7 @@ document_view = {
 }
 ```
 
-`diagnose_search(query, limit=10)` 返回 `KnowledgeRetrievalDiagnostics`。最终 `results` 和所有中间 `candidates` 都附带经过校验的 canonical `source` / `document` provenance；`candidate.diagnostic` 是 backend trace row。其 `stage` 是 `lexical`、`semantic`、`fusion` 或 `reranker`，`rank` 是该阶段的一基排名，`score` 是该 backend 的原始 score，`matched_terms` 为 backend 提供的命中词。Hybrid 的 lexical / semantic rows 还以 `rrf_contribution` 精确给出 `1 / (rrf_k + rank)`；fusion score 是这些贡献的和。Reranker rows 的 `score` 是 reranker provider score，`selected` 表示该 candidate 是否留在最终结果。
+`diagnose_search(query, *, limit=10)` 返回 `KnowledgeRetrievalDiagnostics`。最终 `results` 和所有中间 `candidates` 都附带经过校验的 canonical `source` / `document` provenance；`candidate.diagnostic` 是 backend trace row。其 `stage` 是 `lexical`、`semantic`、`fusion` 或 `reranker`，`rank` 是该阶段的一基排名，`score` 是该 backend 的原始 score，`matched_terms` 为 backend 提供的命中词。Hybrid 的 lexical / semantic rows 还以 `rrf_contribution` 精确给出 `1 / (rrf_k + rank)`；fusion score 是这些贡献的和。Reranker rows 的 `score` 是 reranker provider score，`selected` 表示该 candidate 是否留在最终结果。
 
 ```python
 diagnostics = kb.diagnose_search("密钥轮换", limit=5)
@@ -160,9 +161,10 @@ diagnostics_view = {
         for candidate in diagnostics.candidates
     ],
 }
+kb.close()
 ```
 
-`diagnose_search()` 每次请求只执行一次已配置的诊断 backend/provider 路径（例如 semantic query embedding 或 reranker 各一次），不会先运行普通 `search()` 再重新计算 trace。只有实现可选 `DiagnosticChunkIndex.diagnose()` 协议的 backend 支持该 API；只实现普通 `ChunkIndex.search()` 的自定义 backend 仍可用于搜索、同步、恢复和持久化，但调用诊断会以受控的 `KnowledgeBaseSourceError` 失败。
+`diagnose_search()` 每次请求只执行一次已配置的诊断 backend/provider 路径（例如 semantic query embedding 或 reranker 各一次），不会先运行普通 `search()` 再重新计算 trace。只有实现可选 `DiagnosticChunkIndex.diagnose()` 协议的 backend 支持该 API；实现 `add()`、`replace_document()`、`remove_document()`、`search()` 和 `clone()` 的自定义 `CloneableChunkIndex` 即使不提供 `diagnose()`，仍可用于搜索、同步、恢复和持久化，但调用诊断会以受控的 `KnowledgeBaseSourceError` 失败。
 
 这三个 API 不读取来源路径、不保存 manifest/SQLite、不改变 index 或 canonical state，也不保留 query history。Inspection、chunk、diagnostic rows、scores 和 query 都不持久化，因此不引入 manifest、snapshot 或 SQLite schema 变更。现有本地 KnowledgeBase UI 在本 issue 中没有加入 diagnostics 展示或新的检查界面。
 

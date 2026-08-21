@@ -87,10 +87,12 @@ hits and every diagnostic candidate through the same canonical provenance rules
 as `search()`, and returns one coherent snapshot. `KnowledgeBase.diagnose_search()`
 is the public product wrapper and preserves controlled public error redaction.
 
-A custom index that only implements `ChunkIndex` remains valid for ordinary
-search, sync, restore, and persistence, but explicitly requesting diagnostics
-fails with a stable unsupported-diagnostics error. The protocol is optional so
-this feature does not break existing third-party index factories.
+A custom `CloneableChunkIndex` that implements `add()`, `replace_document()`,
+`remove_document()`, `search()`, and `clone()`, but not optional `diagnose()`,
+remains valid for ordinary search, sync, restore, and persistence. Explicitly
+requesting diagnostics fails with a stable unsupported-diagnostics error. The
+protocol is optional so this feature does not break existing third-party index
+factories.
 
 ## Backend Traces
 
