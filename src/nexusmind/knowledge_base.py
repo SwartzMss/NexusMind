@@ -645,8 +645,8 @@ class KnowledgeBase:
                 len(document_inspections),
             )
             return KnowledgeBaseInspection(status, sources, documents)
-        except Exception as exc:
-            raise KnowledgeBaseSourceError("unable to inspect knowledge base") from exc
+        except Exception:
+            raise KnowledgeBaseSourceError("unable to inspect knowledge base") from None
 
     def inspect_document(
         self, document_id: str, *, preview_chars: int = 160
@@ -699,8 +699,8 @@ class KnowledgeBase:
                 for item in inspection.chunks
             )
             return KnowledgeDocumentInspection(source, document, chunks)
-        except Exception as exc:
-            raise KnowledgeBaseSourceError("unable to inspect knowledge base") from exc
+        except Exception:
+            raise KnowledgeBaseSourceError("unable to inspect knowledge base") from None
 
     def list_sources(self) -> tuple[RegisteredSourceConfig, ...]:
         self._require_open()
@@ -749,10 +749,10 @@ class KnowledgeBase:
             if validated.query != query:
                 raise ValueError("collection returned diagnostics for another query")
             return validated
-        except Exception as exc:
+        except Exception:
             raise KnowledgeBaseSourceError(
                 "unable to diagnose knowledge search"
-            ) from exc
+            ) from None
 
     def add_source(self, config: RegisteredSourceConfig) -> None:
         """Persist a source registration without touching the source itself."""

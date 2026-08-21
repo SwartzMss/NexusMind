@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+import traceback
 
 import pytest
 import nexusmind
@@ -317,7 +318,14 @@ def test_inspect_document_wraps_collection_inspection_and_validates_arguments(
     with pytest.raises(KnowledgeBaseSourceError) as caught:
         kb.inspect_document(document.document_id)
     assert str(caught.value) == "unable to inspect knowledge base"
-    assert "secret" not in str(caught.value)
+    formatted = "".join(
+        traceback.format_exception(
+            type(caught.value), caught.value, caught.value.__traceback__
+        )
+    )
+    assert "unable to inspect knowledge base" in formatted
+    assert "secret" not in formatted
+    assert "/srv" not in formatted
 
     monkeypatch.setattr(kb._collection, "inspect_document", lambda *args, **kwargs: object())
     with pytest.raises(KnowledgeBaseSourceError, match="^unable to inspect knowledge base$"):
@@ -384,11 +392,18 @@ def test_product_diagnose_search_supports_bm25_reopen_and_stable_errors(
         knowledge_base_id="exploding",
         index_factory=ExplodingIndex,
     )
+    sensitive_query = "secret-query"
     with pytest.raises(KnowledgeBaseSourceError) as caught:
-        exploding.diagnose_search("secret-query")
+        exploding.diagnose_search(sensitive_query)
     assert str(caught.value) == "unable to diagnose knowledge search"
-    assert "private" not in str(caught.value)
-    assert "secret-query" not in str(caught.value)
+    formatted = "".join(
+        traceback.format_exception(
+            type(caught.value), caught.value, caught.value.__traceback__
+        )
+    )
+    assert "unable to diagnose knowledge search" in formatted
+    assert "private" not in formatted
+    assert sensitive_query not in formatted
 
 
 def test_diagnostic_methods_are_read_only_and_closed_handles_fail_first(
@@ -436,17 +451,33 @@ def test_wrappers_redact_unknown_and_malformed_lower_failures(
     with pytest.raises(KnowledgeBaseSourceError) as inspection_error:
         kb.inspect()
     assert str(inspection_error.value) == "unable to inspect knowledge base"
-    assert "secret" not in str(inspection_error.value)
-    assert "/srv" not in str(inspection_error.value)
+    formatted_inspection = "".join(
+        traceback.format_exception(
+            type(inspection_error.value),
+            inspection_error.value,
+            inspection_error.value.__traceback__,
+        )
+    )
+    assert "unable to inspect knowledge base" in formatted_inspection
+    assert "secret" not in formatted_inspection
+    assert "/srv" not in formatted_inspection
 
     def fail_diagnose(*args, **kwargs):
         raise RuntimeError("provider failure for private query and /private/path")
 
     monkeypatch.setattr(kb._collection, "diagnose_search", fail_diagnose)
+    sensitive_query = "private query"
     with pytest.raises(KnowledgeBaseSourceError) as caught:
-        kb.diagnose_search("private query")
+        kb.diagnose_search(sensitive_query)
     assert str(caught.value) == "unable to diagnose knowledge search"
-    assert "private" not in str(caught.value)
+    formatted_diagnosis = "".join(
+        traceback.format_exception(
+            type(caught.value), caught.value, caught.value.__traceback__
+        )
+    )
+    assert "unable to diagnose knowledge search" in formatted_diagnosis
+    assert sensitive_query not in formatted_diagnosis
+    assert "/private/path" not in formatted_diagnosis
 
     monkeypatch.setattr(kb._collection, "diagnose_search", lambda *args, **kwargs: object())
     with pytest.raises(
