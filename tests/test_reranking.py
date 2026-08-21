@@ -528,10 +528,12 @@ def test_diagnose_rejects_incoherent_base_pipeline_declarations(
     assert reranker.calls == []
 
 
-def test_diagnose_rejects_nested_reranked_base_before_provider_work() -> None:
-    hit = SearchHit(_chunk("a"), 1.0)
-    base = _DiagnosticIndex((hit,))
+def test_diagnose_composes_nested_reranker_trace_blocks() -> None:
+    a, b = _chunk("a"), _chunk("b")
+    base = _DiagnosticIndex((SearchHit(a, 2.0, ("a",)), SearchHit(b, 1.0, ("b",))))
     inner_reranker, outer_reranker = _Reranker(), _Reranker()
+    inner_reranker.result = (SearchHit(a, 0.8, ("a",)), SearchHit(b, 0.7, ("b",)))
+    outer_reranker.result = (SearchHit(b, 0.9, ("b",)),)
     inner = _wrapper(base, inner_reranker)
     outer = RerankedChunkIndex(
         base_index_factory=lambda: inner,
@@ -539,14 +541,21 @@ def test_diagnose_rejects_nested_reranked_base_before_provider_work() -> None:
         candidate_depth=3,
     )
 
-    with pytest.raises(RerankerError, match="reranked base"):
-        outer.diagnose("query", limit=1)
-    assert base.diagnose_calls == []
-    assert inner_reranker.calls == []
-    assert outer_reranker.calls == []
+    trace = outer.diagnose("query", limit=2)
+
+    assert base.diagnose_calls == [("query", 3)]
+    assert base.search_calls == []
+    assert trace.hits == (SearchHit(b, 0.9, ("b",)),)
+    assert [(row.stage, row.rank, row.chunk.chunk_id, row.selected) for row in trace.candidates] == [
+        (RetrievalStage.LEXICAL, 1, "a", False),
+        (RetrievalStage.LEXICAL, 2, "b", True),
+        (RetrievalStage.RERANKER, 1, "a", False),
+        (RetrievalStage.RERANKER, 2, "b", True),
+        (RetrievalStage.RERANKER, 1, "b", True),
+    ]
 
 
-def test_diagnose_rejects_base_reranker_stage_before_outer_reranking() -> None:
+def test_diagnose_rejects_malformed_base_reranker_block_before_outer_reranking() -> None:
     hit = SearchHit(_chunk("a"), 1.0)
     base, reranker = _DiagnosticIndex(), _Reranker()
     base.trace = RetrievalDiagnostics(
@@ -554,10 +563,39 @@ def test_diagnose_rejects_base_reranker_stage_before_outer_reranking() -> None:
         candidates=(
             RetrievalCandidateDiagnostic(
                 stage=RetrievalStage.RERANKER,
-                rank=1,
+                rank=2,
                 chunk=hit.chunk,
                 score=hit.score,
                 selected=True,
+            ),
+        ),
+    )
+
+    with pytest.raises(RerankerCoherenceError, match="diagnostic trace"):
+        _wrapper(base, reranker).diagnose("query", limit=1)
+    assert reranker.calls == []
+
+
+def test_diagnose_rejects_unselected_extra_in_final_reranker_block() -> None:
+    a, b = _chunk("a"), _chunk("b")
+    hit = SearchHit(a, 1.0)
+    base, reranker = _DiagnosticIndex(), _Reranker()
+    base.trace = RetrievalDiagnostics(
+        hits=(hit,),
+        candidates=(
+            RetrievalCandidateDiagnostic(
+                stage=RetrievalStage.RERANKER,
+                rank=1,
+                chunk=a,
+                score=1.0,
+                selected=True,
+            ),
+            RetrievalCandidateDiagnostic(
+                stage=RetrievalStage.RERANKER,
+                rank=2,
+                chunk=b,
+                score=0.5,
+                selected=False,
             ),
         ),
     )

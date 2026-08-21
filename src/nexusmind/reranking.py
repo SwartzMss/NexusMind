@@ -130,8 +130,6 @@ class RerankedChunkIndex:
         """Rerank one bounded base diagnostic trace without an extra search."""
 
         self._validate_request(query, limit)
-        if isinstance(self._base, RerankedChunkIndex):
-            raise RerankerError("reranked base diagnostics are not supported")
         try:
             diagnose = getattr(self._base, "diagnose", None)
         except Exception as exc:
@@ -236,8 +234,6 @@ class RerankedChunkIndex:
             raise RerankerCoherenceError("base diagnostic trace is invalid")
         if any(type(row) is not RetrievalCandidateDiagnostic for row in trace.candidates):
             raise RerankerCoherenceError("base diagnostic trace is invalid")
-        if any(row.stage is RetrievalStage.RERANKER for row in trace.candidates):
-            raise RerankerCoherenceError("base diagnostic trace is incoherent")
         hits = self._validated_hits(
             trace.hits,
             bound=self._candidate_depth,
@@ -246,9 +242,7 @@ class RerankedChunkIndex:
         rows = trace.candidates
         declared: set[SearchHit] = set()
         selected_chunk_ids: set[str] = set()
-        stage_ranks: set[tuple[RetrievalStage, int]] = set()
-        stage_chunk_ids: set[tuple[RetrievalStage, str]] = set()
-        stage_rows: dict[RetrievalStage, list[RetrievalCandidateDiagnostic]] = {}
+        blocks: list[tuple[RetrievalStage, list[RetrievalCandidateDiagnostic]]] = []
         stage_positions = {
             stage: position for position, stage in enumerate(RetrievalStage)
         }
@@ -271,34 +265,34 @@ class RerankedChunkIndex:
                 )
             except (TypeError, ValueError, RerankerCoherenceError) as exc:
                 raise RerankerCoherenceError("base diagnostic trace is invalid") from exc
-            rank_key = (row.stage, row.rank)
-            chunk_key = (row.stage, row.chunk.chunk_id)
-            if rank_key in stage_ranks or chunk_key in stage_chunk_ids:
-                raise RerankerCoherenceError("base diagnostic trace contains duplicates")
             stage_position = stage_positions[row.stage]
-            if stage_position < previous_stage_position:
+            if not blocks or row.stage is not blocks[-1][0]:
+                if stage_position <= previous_stage_position:
+                    raise RerankerCoherenceError("base diagnostic trace is incoherent")
+                blocks.append((row.stage, []))
+                previous_stage_position = stage_position
+            elif row.stage is RetrievalStage.RERANKER and row.rank == 1:
+                blocks.append((row.stage, []))
+            block_rows = blocks[-1][1]
+            if row.rank != len(block_rows) + 1:
                 raise RerankerCoherenceError("base diagnostic trace is incoherent")
-            previous_stage_position = stage_position
-            stage_ranks.add(rank_key)
-            stage_chunk_ids.add(chunk_key)
-            stage_rows.setdefault(row.stage, []).append(row)
+            if any(existing.chunk.chunk_id == row.chunk.chunk_id for existing in block_rows):
+                raise RerankerCoherenceError("base diagnostic trace contains duplicates")
+            block_rows.append(row)
             if row.selected:
                 selected_chunk_ids.add(row.chunk.chunk_id)
                 declared.add(SearchHit(row.chunk, row.score, row.matched_terms))
-        if any(
-            tuple(row.rank for row in rows_for_stage)
-            != tuple(range(1, len(rows_for_stage) + 1))
-            for rows_for_stage in stage_rows.values()
-        ):
-            raise RerankerCoherenceError("base diagnostic trace is incoherent")
         hit_chunk_ids = {hit.chunk.chunk_id for hit in hits}
         if selected_chunk_ids != hit_chunk_ids or any(hit not in declared for hit in hits):
             raise RerankerCoherenceError("base diagnostic trace is incoherent")
         if rows:
-            final_rows = tuple(stage_rows[rows[-1].stage])
-            if not all(row.selected for row in final_rows) or tuple(
+            final_rows = blocks[-1][1]
+            if hits and not all(row.selected for row in final_rows):
+                raise RerankerCoherenceError("base diagnostic trace is incoherent")
+            if tuple(
                 SearchHit(row.chunk, row.score, row.matched_terms)
                 for row in final_rows
+                if row.selected
             ) != hits:
                 raise RerankerCoherenceError("base diagnostic trace is incoherent")
         elif hits:
