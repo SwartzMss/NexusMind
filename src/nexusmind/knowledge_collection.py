@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+from math import isfinite
 from typing import Callable, Protocol
 
 from .knowledge import (
@@ -127,9 +128,9 @@ class KnowledgeRetrievalCandidateDiagnostic:
     diagnostic: RetrievalCandidateDiagnostic
 
     def __post_init__(self) -> None:
-        if not isinstance(self.source, KnowledgeSource):
+        if type(self.source) is not KnowledgeSource:
             raise TypeError("source must be a KnowledgeSource")
-        if not isinstance(self.document, Document):
+        if type(self.document) is not Document:
             raise TypeError("document must be a Document")
         if type(self.diagnostic) is not RetrievalCandidateDiagnostic:
             raise TypeError("diagnostic must be a RetrievalCandidateDiagnostic")
@@ -379,9 +380,7 @@ class KnowledgeCollection:
             raise KnowledgeSearchResolutionError(
                 "search hit chunk has invalid offsets outside canonical document"
             )
-        if type(chunk.content) is not str or (
-            chunk.content != document.content[chunk.start_offset : chunk.end_offset]
-        ):
+        if chunk.content != document.content[chunk.start_offset : chunk.end_offset]:
             raise KnowledgeSearchResolutionError(
                 "search hit chunk is incoherent with canonical document"
             )
@@ -420,13 +419,14 @@ class KnowledgeCollection:
 
         hit_ids: list[str] = []
         for hit in hits:
-            self._validate_diagnostic_chunk(hit.chunk)
+            self._validate_diagnostic_hit(hit)
             self._resolve_hit(hit)
             hit_ids.append(hit.chunk.chunk_id)
         if len(hit_ids) != len(set(hit_ids)):
             raise KnowledgeSearchResolutionError(
                 "index diagnostic trace contains duplicate final chunks"
             )
+        hit_id_set = set(hit_ids)
 
         stage_positions = {
             stage: position for position, stage in enumerate(RetrievalStage)
@@ -508,25 +508,46 @@ class KnowledgeCollection:
                     )
             blocks[-1].append(row)
             block_ids[-1].add(row.chunk.chunk_id)
+            if row.selected != (row.chunk.chunk_id in hit_id_set):
+                raise KnowledgeSearchResolutionError(
+                    "index diagnostic candidate selection is incoherent"
+                )
             if row.selected:
                 selected_ids.add(row.chunk.chunk_id)
 
         if hits and not rows:
             raise KnowledgeSearchResolutionError("index diagnostic trace is incoherent")
-        if selected_ids != set(hit_ids):
+        if selected_ids != hit_id_set:
             raise KnowledgeSearchResolutionError(
                 "index diagnostic selected candidates do not match final hits"
             )
         terminal_hits = tuple(
             SearchHit(row.chunk, row.score, row.matched_terms)
             for row in (blocks[-1] if blocks else ())
-            if row.selected
         )
         if terminal_hits != hits:
             raise KnowledgeSearchResolutionError(
                 "index diagnostic final candidate block does not match final hits"
             )
         return hits, rows
+
+    @classmethod
+    def _validate_diagnostic_hit(cls, hit: object) -> None:
+        if type(hit) is not SearchHit:
+            raise KnowledgeSearchResolutionError(
+                "index diagnostic final hit is invalid"
+            )
+        cls._validate_diagnostic_chunk(hit.chunk)
+        if type(hit.score) is not float or not isfinite(hit.score):
+            raise KnowledgeSearchResolutionError(
+                "index diagnostic final hit is invalid"
+            )
+        if type(hit.matched_terms) is not tuple or any(
+            type(term) is not str for term in hit.matched_terms
+        ):
+            raise KnowledgeSearchResolutionError(
+                "index diagnostic final hit is invalid"
+            )
 
     @staticmethod
     def _validate_diagnostic_chunk(chunk: object) -> None:
@@ -539,6 +560,18 @@ class KnowledgeCollection:
                 "index diagnostic chunk is invalid"
             )
         if type(chunk.chunk_id) is not str or not chunk.chunk_id.strip():
+            raise KnowledgeSearchResolutionError(
+                "index diagnostic chunk is invalid"
+            )
+        if type(chunk.content) is not str:
+            raise KnowledgeSearchResolutionError(
+                "index diagnostic chunk is invalid"
+            )
+        if type(chunk.start_offset) is not int or type(chunk.end_offset) is not int:
+            raise KnowledgeSearchResolutionError(
+                "index diagnostic chunk is invalid"
+            )
+        if chunk.start_offset < 0 or chunk.end_offset <= chunk.start_offset:
             raise KnowledgeSearchResolutionError(
                 "index diagnostic chunk is invalid"
             )
@@ -594,7 +627,7 @@ class KnowledgeCollection:
             ):
                 raise KnowledgeInspectionError("inspection chunk has invalid offsets")
             if (
-                chunk.start_offset < previous_start
+                chunk.start_offset <= previous_start
                 or chunk.end_offset <= previous_end
             ):
                 raise KnowledgeInspectionError(

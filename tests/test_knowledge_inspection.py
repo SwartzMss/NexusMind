@@ -12,6 +12,7 @@ from nexusmind import (
     KnowledgeCollectionError,
     KnowledgeDocumentInspection,
     KnowledgeSource,
+    TextChunker,
 )
 
 
@@ -121,6 +122,28 @@ def test_inspection_models_are_frozen_slotted_and_validate_public_fields() -> No
         KnowledgeDocumentInspection(source, document, (object(),))  # type: ignore[arg-type]
 
 
+def test_document_inspection_requires_exact_source_and_document_types() -> None:
+    class _SourceSubclass(KnowledgeSource):
+        pass
+
+    class _DocumentSubclass(Document):
+        pass
+
+    source = KnowledgeSource(source_id="docs", source_type="test", display_name="Docs")
+    document = _document()
+    source_subclass = _SourceSubclass(
+        source_id="docs", source_type="test", display_name="Docs"
+    )
+    document_subclass = _DocumentSubclass(
+        source_id="docs", logical_path="a.txt", content=document.content
+    )
+
+    with pytest.raises(TypeError, match="source"):
+        KnowledgeDocumentInspection(source_subclass, document, ())
+    with pytest.raises(TypeError, match="document"):
+        KnowledgeDocumentInspection(source, document_subclass, ())
+
+
 def test_inspect_document_returns_exact_offsets_previews_and_detached_metadata() -> None:
     chunker = _FixedChunker()
     document = _document()
@@ -167,6 +190,28 @@ def test_inspect_documents_is_stable_handles_empty_documents_and_calls_once_each
     assert first_calls == expected_ids
     assert tuple(chunker.calls) == expected_ids
     assert next(item for item in first if not item.document.content).chunks == ()
+
+
+def test_inspection_rejects_identical_consecutive_starts_but_accepts_real_overlap() -> None:
+    chunker = _FixedChunker()
+    document = _document(content="abcdefghij")
+    collection = _collection(chunker, document)
+    chunker.returned = (
+        Chunk(document.document_id, "one", "abc", 0, 3),
+        Chunk(document.document_id, "two", "abcde", 0, 5),
+    )
+
+    with pytest.raises(KnowledgeCollectionError, match="order"):
+        collection.inspect_document(document.document_id)
+
+    overlapping = KnowledgeCollection(chunker=TextChunker(chunk_size=5, overlap=2))
+    overlapping.sync(_Adapter("docs", (document,)))
+    inspection = overlapping.inspect_document(document.document_id)
+    assert [(chunk.start_offset, chunk.end_offset) for chunk in inspection.chunks] == [
+        (0, 5),
+        (3, 8),
+        (6, 10),
+    ]
 
 
 @pytest.mark.parametrize("document_id", [None, "", "  ", True, 1])

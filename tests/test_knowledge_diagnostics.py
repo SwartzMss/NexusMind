@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 import pytest
 
@@ -175,6 +176,31 @@ def test_diagnostic_models_are_frozen_slotted_and_require_exact_tuples_and_types
         KnowledgeRetrievalDiagnostics("q", (), [])  # type: ignore[arg-type]
 
 
+def test_candidate_provenance_requires_exact_source_and_document_types() -> None:
+    class _SourceSubclass(KnowledgeSource):
+        pass
+
+    class _DocumentSubclass(Document):
+        pass
+
+    collection, state, one, _ = _setup()
+    chunk = state.chunks[f"chunk:{one.document_id}"]
+    source = KnowledgeSource(
+        source_id="docs", source_type="test", display_name="Docs"
+    )
+    source_subclass = _SourceSubclass(
+        source_id="docs", source_type="test", display_name="Docs"
+    )
+    document_subclass = _DocumentSubclass(
+        source_id="docs", logical_path="one.txt", content="alpha"
+    )
+
+    with pytest.raises(TypeError, match="source"):
+        KnowledgeRetrievalCandidateDiagnostic(source_subclass, one, _row(chunk))
+    with pytest.raises(TypeError, match="document"):
+        KnowledgeRetrievalCandidateDiagnostic(source, document_subclass, _row(chunk))
+
+
 def test_diagnose_search_calls_backend_once_and_resolves_all_provenance() -> None:
     collection, state, one, two = _setup()
     first = state.chunks[f"chunk:{one.document_id}"]
@@ -269,6 +295,148 @@ def test_diagnose_search_accepts_hybrid_terms_and_repeated_reranker_blocks() -> 
 
     assert result.results[0].hit == hits[0]
     assert tuple(item.diagnostic for item in result.candidates) == rows
+
+
+@pytest.mark.parametrize("case", ["early_final_unselected", "terminal_extra"])
+def test_diagnose_search_requires_per_row_selection_and_exact_terminal_block(
+    case: str,
+) -> None:
+    collection, state, one, two = _setup()
+    first = state.chunks[f"chunk:{one.document_id}"]
+    second = state.chunks[f"chunk:{two.document_id}"]
+    hit = SearchHit(first, 2.0)
+    if case == "early_final_unselected":
+        rows = (
+            _row(first, selected=False),
+            _row(
+                first,
+                stage=RetrievalStage.FUSION,
+                score=2.0,
+                selected=True,
+            ),
+        )
+    else:
+        rows = (
+            _row(first, score=2.0, selected=True),
+            _row(second, rank=2, score=1.0, selected=False),
+        )
+    state.trace = RetrievalDiagnostics((hit,), rows)
+
+    with pytest.raises(KnowledgeSearchResolutionError):
+        collection.diagnose_search("q")
+
+
+@pytest.mark.parametrize(
+    "score",
+    [True, 1, math.nan, math.inf],
+)
+def test_diagnose_search_requires_exact_finite_float_final_scores(score: object) -> None:
+    collection, state, one, _ = _setup()
+    chunk = state.chunks[f"chunk:{one.document_id}"]
+    state.trace = RetrievalDiagnostics(
+        (SearchHit(chunk, score),),  # type: ignore[arg-type]
+        (_row(chunk, score=1.0),),
+    )
+
+    with pytest.raises(KnowledgeSearchResolutionError, match="final hit"):
+        collection.diagnose_search("q")
+
+
+def test_diagnose_search_requires_exact_final_terms_and_nonempty_exact_chunks() -> None:
+    class _Text(str):
+        pass
+
+    collection, state, one, _ = _setup()
+    canonical = state.chunks[f"chunk:{one.document_id}"]
+    malformed_values = (
+        SearchHit(canonical, 1.0, (_Text("alpha"),)),
+        SearchHit(
+            Chunk(canonical.document_id, canonical.chunk_id, "", 0, 0),
+            1.0,
+        ),
+        SearchHit(
+            Chunk(canonical.document_id, canonical.chunk_id, _Text("alpha"), 0, 5),
+            1.0,
+        ),
+    )
+    for hit in malformed_values:
+        row = _row(
+            hit.chunk,
+            score=1.0,
+            terms=tuple(str(term) for term in hit.matched_terms),
+        )
+        state.trace = RetrievalDiagnostics((hit,), (row,))
+        with pytest.raises(KnowledgeSearchResolutionError):
+            collection.diagnose_search("q")
+
+
+def test_diagnose_search_requires_exact_hit_chunk_and_row_shapes() -> None:
+    class _HitSubclass(SearchHit):
+        pass
+
+    class _ChunkSubclass(Chunk):
+        pass
+
+    collection, state, one, _ = _setup()
+    canonical = state.chunks[f"chunk:{one.document_id}"]
+    chunk_subclass = _ChunkSubclass(
+        canonical.document_id,
+        canonical.chunk_id,
+        canonical.content,
+        canonical.start_offset,
+        canonical.end_offset,
+    )
+    hit_subclass_trace = RetrievalDiagnostics(
+        (SearchHit(canonical, 1.0),), (_row(canonical),)
+    )
+    object.__setattr__(
+        hit_subclass_trace, "hits", (_HitSubclass(canonical, 1.0),)
+    )
+    malformed_traces = (
+        hit_subclass_trace,
+        RetrievalDiagnostics(
+            (SearchHit(chunk_subclass, 1.0),),
+            (_row(chunk_subclass),),
+        ),
+        RetrievalDiagnostics(
+            (SearchHit(canonical, 1.0),),
+            (
+                _row(chunk_subclass),
+                _row(canonical, stage=RetrievalStage.FUSION),
+            ),
+        ),
+    )
+    for trace in malformed_traces:
+        state.trace = trace
+        with pytest.raises(KnowledgeSearchResolutionError):
+            collection.diagnose_search("q")
+
+    forged_row = _row(canonical)
+    object.__setattr__(forged_row, "score", True)
+    state.trace = RetrievalDiagnostics((SearchHit(canonical, 1.0),), (forged_row,))
+    with pytest.raises(KnowledgeSearchResolutionError, match="invalid"):
+        collection.diagnose_search("q")
+
+
+def test_ordinary_search_still_accepts_equal_string_subclass_chunk_content() -> None:
+    class _Text(str):
+        pass
+
+    collection, state, one, _ = _setup(_SearchOnlyIndex)
+    canonical = state.chunks[f"chunk:{one.document_id}"]
+    compatible = Chunk(
+        canonical.document_id,
+        canonical.chunk_id,
+        _Text(canonical.content),
+        canonical.start_offset,
+        canonical.end_offset,
+    )
+    state.trace = RetrievalDiagnostics((SearchHit(compatible, 1.0),), ())
+
+    result = collection.search("alpha")
+
+    assert result[0].document == one
+    assert result[0].hit.chunk.content == "alpha"
 
 
 def test_diagnostics_unsupported_is_controlled_and_ordinary_search_still_works() -> None:

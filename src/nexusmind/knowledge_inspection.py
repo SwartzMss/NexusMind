@@ -56,9 +56,9 @@ class KnowledgeDocumentInspection:
     chunks: tuple[KnowledgeChunkInspection, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.source, KnowledgeSource):
+        if type(self.source) is not KnowledgeSource:
             raise TypeError("source must be a KnowledgeSource")
-        if not isinstance(self.document, Document):
+        if type(self.document) is not Document:
             raise TypeError("document must be a Document")
         if self.document.source_id != self.source.source_id:
             raise ValueError("document must belong to source")
@@ -73,7 +73,7 @@ class KnowledgeDocumentInspection:
                 raise ValueError("chunk ordinals must be consecutive and one-based")
             if chunk.end_offset > len(self.document.content):
                 raise ValueError("chunk offsets must be within document content")
-            if chunk.start_offset < previous_start or chunk.end_offset <= previous_end:
+            if chunk.start_offset <= previous_start or chunk.end_offset <= previous_end:
                 raise ValueError("chunks must follow stable offset order")
             previous_start = chunk.start_offset
             previous_end = chunk.end_offset
