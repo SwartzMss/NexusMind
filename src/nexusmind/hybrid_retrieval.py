@@ -8,7 +8,13 @@ from typing import Callable, cast
 
 from .knowledge_chunking import Chunk
 from .knowledge_collection import CloneableChunkIndex
-from .knowledge_retrieval import ChunkIndexError, SearchHit
+from .knowledge_retrieval import (
+    ChunkIndexError,
+    RetrievalCandidateDiagnostic,
+    RetrievalDiagnostics,
+    RetrievalStage,
+    SearchHit,
+)
 
 
 class HybridChunkIndexError(ChunkIndexError):
@@ -126,6 +132,53 @@ class HybridChunkIndex:
         return clone
 
     def search(self, query: str, *, limit: int = 10) -> tuple[SearchHit, ...]:
+        return self._compute_fusion(query, limit=limit)[0]
+
+    def diagnose(self, query: str, *, limit: int = 10) -> RetrievalDiagnostics:
+        hits, lexical, semantic = self._compute_fusion(query, limit=limit)
+        selected_chunk_ids = {hit.chunk.chunk_id for hit in hits}
+        candidates = (
+            tuple(
+                RetrievalCandidateDiagnostic(
+                    stage=RetrievalStage.LEXICAL,
+                    rank=rank,
+                    chunk=hit.chunk,
+                    score=hit.score,
+                    matched_terms=hit.matched_terms,
+                    rrf_contribution=1.0 / (self._rrf_k + rank),
+                    selected=hit.chunk.chunk_id in selected_chunk_ids,
+                )
+                for rank, hit in enumerate(lexical, start=1)
+            )
+            + tuple(
+                RetrievalCandidateDiagnostic(
+                    stage=RetrievalStage.SEMANTIC,
+                    rank=rank,
+                    chunk=hit.chunk,
+                    score=hit.score,
+                    matched_terms=hit.matched_terms,
+                    rrf_contribution=1.0 / (self._rrf_k + rank),
+                    selected=hit.chunk.chunk_id in selected_chunk_ids,
+                )
+                for rank, hit in enumerate(semantic, start=1)
+            )
+            + tuple(
+                RetrievalCandidateDiagnostic(
+                    stage=RetrievalStage.FUSION,
+                    rank=rank,
+                    chunk=hit.chunk,
+                    score=hit.score,
+                    matched_terms=hit.matched_terms,
+                    selected=True,
+                )
+                for rank, hit in enumerate(hits, start=1)
+            )
+        )
+        return RetrievalDiagnostics(hits=hits, candidates=candidates)
+
+    def _compute_fusion(
+        self, query: str, *, limit: int
+    ) -> tuple[tuple[SearchHit, ...], tuple[SearchHit, ...], tuple[SearchHit, ...]]:
         if type(limit) is not int:
             raise TypeError("limit must be an integer")
         if limit <= 0:
@@ -178,7 +231,7 @@ class HybridChunkIndex:
             for chunk_id, chunk in chunks.items()
         ]
         fused.sort(key=lambda hit: (-hit.score, hit.chunk.chunk_id))
-        return tuple(fused[:limit])
+        return tuple(fused[:limit]), lexical, semantic
 
     def _mutate(self, method: str, *args: object) -> None:
         try:
