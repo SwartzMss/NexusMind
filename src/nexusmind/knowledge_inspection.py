@@ -1,10 +1,118 @@
-"""Detached, read-only values for inspecting canonical knowledge chunks."""
+"""Detached, read-only values for inspecting canonical knowledge state."""
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
+from enum import Enum
+from typing import Any
 
 from .knowledge import Document, KnowledgeSource
+from .knowledge_base_manifest import LocalDirectorySourceConfig, LocalFileSourceConfig
+
+
+def _require_nonblank_string(value: object, field_name: str) -> None:
+    if type(value) is not str:
+        raise TypeError(f"{field_name} must be a string")
+    if not value.strip():
+        raise ValueError(f"{field_name} must be a non-empty string")
+
+
+def _require_nonnegative_integer(value: object, field_name: str) -> None:
+    if type(value) is not int:
+        raise TypeError(f"{field_name} must be an integer")
+    if value < 0:
+        raise ValueError(f"{field_name} must be non-negative")
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeBaseStatus:
+    """Bounded counters describing the current canonical knowledge state."""
+
+    knowledge_base_id: str
+    display_name: str | None
+    registered_source_count: int
+    canonical_source_count: int
+    document_count: int
+
+
+class KnowledgeSourceSyncStatus(str, Enum):
+    """Whether a registered source has committed canonical state."""
+
+    REGISTERED = "registered"
+    SYNCED = "synced"
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeSourceInspection:
+    """Detached registration state and canonical counters for one source."""
+
+    config: LocalFileSourceConfig | LocalDirectorySourceConfig
+    sync_status: KnowledgeSourceSyncStatus
+    document_count: int
+    chunk_count: int
+
+    def __post_init__(self) -> None:
+        if type(self.config) not in (LocalFileSourceConfig, LocalDirectorySourceConfig):
+            raise TypeError("config must be a supported local source config")
+        if type(self.sync_status) is not KnowledgeSourceSyncStatus:
+            raise TypeError("sync_status must be a KnowledgeSourceSyncStatus")
+        _require_nonnegative_integer(self.document_count, "document_count")
+        _require_nonnegative_integer(self.chunk_count, "chunk_count")
+        object.__setattr__(self, "config", deepcopy(self.config))
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeDocumentSummary:
+    """Detached document metadata and counts without canonical content."""
+
+    source_id: str
+    document_id: str
+    logical_path: str
+    content_type: str
+    content_hash: str
+    metadata: dict[str, Any]
+    character_count: int
+    chunk_count: int
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "source_id",
+            "document_id",
+            "logical_path",
+            "content_type",
+            "content_hash",
+        ):
+            _require_nonblank_string(getattr(self, field_name), field_name)
+        if type(self.metadata) is not dict:
+            raise TypeError("metadata must be a dict")
+        _require_nonnegative_integer(self.character_count, "character_count")
+        _require_nonnegative_integer(self.chunk_count, "chunk_count")
+        object.__setattr__(self, "metadata", deepcopy(self.metadata))
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeBaseInspection:
+    """Detached source and document summaries for one coherent knowledge state."""
+
+    status: KnowledgeBaseStatus
+    sources: tuple[KnowledgeSourceInspection, ...]
+    documents: tuple[KnowledgeDocumentSummary, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.status) is not KnowledgeBaseStatus:
+            raise TypeError("status must be a KnowledgeBaseStatus")
+        if type(self.sources) is not tuple:
+            raise TypeError("sources must be a tuple")
+        if any(type(source) is not KnowledgeSourceInspection for source in self.sources):
+            raise TypeError("sources must contain only KnowledgeSourceInspection values")
+        if type(self.documents) is not tuple:
+            raise TypeError("documents must be a tuple")
+        if any(
+            type(document) is not KnowledgeDocumentSummary
+            for document in self.documents
+        ):
+            raise TypeError("documents must contain only KnowledgeDocumentSummary values")
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,4 +187,12 @@ class KnowledgeDocumentInspection:
             previous_end = chunk.end_offset
 
 
-__all__ = ["KnowledgeChunkInspection", "KnowledgeDocumentInspection"]
+__all__ = [
+    "KnowledgeBaseInspection",
+    "KnowledgeBaseStatus",
+    "KnowledgeChunkInspection",
+    "KnowledgeDocumentInspection",
+    "KnowledgeDocumentSummary",
+    "KnowledgeSourceInspection",
+    "KnowledgeSourceSyncStatus",
+]
