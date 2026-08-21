@@ -29,6 +29,28 @@ class _TextSubclass(str):
     pass
 
 
+class _SearchOnlyIndex:
+    """Cloneable delegating index that intentionally has no diagnose method."""
+
+    def __init__(self, delegate: InMemoryChunkIndex | None = None) -> None:
+        self._delegate = InMemoryChunkIndex() if delegate is None else delegate
+
+    def add(self, chunks) -> None:
+        self._delegate.add(chunks)
+
+    def replace_document(self, document_id, chunks) -> None:
+        self._delegate.replace_document(document_id, chunks)
+
+    def remove_document(self, document_id) -> None:
+        self._delegate.remove_document(document_id)
+
+    def search(self, query: str, *, limit: int = 10):
+        return self._delegate.search(query, limit=limit)
+
+    def clone(self) -> _SearchOnlyIndex:
+        return _SearchOnlyIndex(self._delegate.clone())
+
+
 @pytest.mark.parametrize(
     ("field_name", "invalid_value", "error_type"),
     (
@@ -337,14 +359,17 @@ def test_product_diagnose_search_supports_bm25_reopen_and_stable_errors(
         with pytest.raises(ValueError, match="limit"):
             reopened.diagnose_search("alpha", limit=limit)
 
-    class SearchOnlyIndex(InMemoryChunkIndex):
-        diagnose = None  # type: ignore[assignment]
-
-    unsupported = KnowledgeBase.create(
-        str(tmp_path / "unsupported"),
-        knowledge_base_id="unsupported",
-        index_factory=SearchOnlyIndex,
+    unsupported_root = tmp_path / "unsupported-case"
+    unsupported_root.mkdir()
+    unsupported, _ = _create_synced_file_base(
+        unsupported_root, index_factory=_SearchOnlyIndex
     )
+    assert unsupported.search("alpha")
+    unsupported.close()
+    unsupported = KnowledgeBase.open(
+        str(unsupported_root / "kb"), index_factory=_SearchOnlyIndex
+    )
+    assert unsupported.search("alpha")
     with pytest.raises(
         KnowledgeBaseSourceError, match="^unable to diagnose knowledge search$"
     ):
@@ -403,6 +428,16 @@ def test_wrappers_redact_unknown_and_malformed_lower_failures(
         KnowledgeBaseSourceError, match="^unable to inspect knowledge base$"
     ):
         kb.inspect_document("missing-private-document")
+
+    def fail_inspect_documents(*args, **kwargs):
+        raise RuntimeError("private source /srv/secret/whole-base.txt")
+
+    monkeypatch.setattr(kb._collection, "inspect_documents", fail_inspect_documents)
+    with pytest.raises(KnowledgeBaseSourceError) as inspection_error:
+        kb.inspect()
+    assert str(inspection_error.value) == "unable to inspect knowledge base"
+    assert "secret" not in str(inspection_error.value)
+    assert "/srv" not in str(inspection_error.value)
 
     def fail_diagnose(*args, **kwargs):
         raise RuntimeError("provider failure for private query and /private/path")
