@@ -8,6 +8,7 @@ import pytest
 from nexusmind import (
     Chunk,
     Document,
+    InMemoryChunkIndex,
     KnowledgeCollection,
     KnowledgeRetrievalCandidateDiagnostic,
     KnowledgeRetrievalDiagnostics,
@@ -16,6 +17,7 @@ from nexusmind import (
     RetrievalCandidateDiagnostic,
     RetrievalDiagnostics,
     RetrievalStage,
+    RerankedChunkIndex,
     SearchHit,
 )
 
@@ -302,6 +304,127 @@ def test_diagnose_search_normalizes_subclasses_without_changing_ordinary_search(
     assert diagnostics.results[0].source.metadata == {
         "nested": {"owner": "canonical"}
     }
+
+
+def test_diagnose_search_accepts_real_reranker_with_empty_final_output() -> None:
+    class _EmptyReranker:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def rerank(
+            self,
+            query: str,
+            candidates: tuple[SearchHit, ...],
+            *,
+            limit: int,
+        ) -> tuple[SearchHit, ...]:
+            self.calls += 1
+            assert candidates
+            return ()
+
+    reranker = _EmptyReranker()
+    collection = KnowledgeCollection(
+        chunker=_OneChunker(),
+        index_factory=lambda: RerankedChunkIndex(
+            base_index_factory=InMemoryChunkIndex,
+            reranker=reranker,
+            candidate_depth=2,
+        ),
+    )
+    document = _document("docs", "empty-rerank.txt", "alpha")
+    collection.sync(_Adapter("docs", (document,)))
+
+    diagnostics = collection.diagnose_search("alpha", limit=1)
+
+    assert diagnostics.results == ()
+    assert diagnostics.candidates
+    assert all(not item.diagnostic.selected for item in diagnostics.candidates)
+    assert reranker.calls == 1
+
+
+def test_diagnose_search_rejects_selected_row_when_final_output_is_empty() -> None:
+    collection, state, one, _ = _setup()
+    chunk = state.chunks[f"chunk:{one.document_id}"]
+    state.trace = RetrievalDiagnostics((), (_row(chunk, selected=True),))
+
+    with pytest.raises(KnowledgeSearchResolutionError, match="selection"):
+        collection.diagnose_search("alpha")
+
+
+def test_diagnose_search_looks_up_once_and_detaches_once_per_output() -> None:
+    class _DeepcopyProbe:
+        def __init__(self, calls: list[int]) -> None:
+            self.calls = calls
+
+        def __deepcopy__(self, memo: dict[int, object]) -> _DeepcopyProbe:
+            self.calls[0] += 1
+            return _DeepcopyProbe(self.calls)
+
+    class _CountingCollection(KnowledgeCollection):
+        def __init__(self, **kwargs: object) -> None:
+            self.lookup_calls = 0
+            super().__init__(**kwargs)  # type: ignore[arg-type]
+
+        def _find_document(self, document_id: str) -> Document | None:
+            self.lookup_calls += 1
+            return super()._find_document(document_id)
+
+    class _ProbeAdapter(_Adapter):
+        def __init__(
+            self,
+            source_id: str,
+            documents: tuple[Document, ...],
+            source_probe: _DeepcopyProbe,
+        ) -> None:
+            super().__init__(source_id, documents)
+            self.source_probe = source_probe
+
+        def source(self) -> KnowledgeSource:
+            return KnowledgeSource(
+                source_id=self.source_id,
+                source_type="test",
+                display_name="Probe source",
+                metadata={"probe": self.source_probe},
+            )
+
+    source_copies = [0]
+    document_copies = [0]
+    state = _IndexState({})
+    collection = _CountingCollection(
+        chunker=_OneChunker(), index_factory=lambda: _DiagnosticIndex(state)
+    )
+    document = Document(
+        source_id="docs",
+        logical_path="probe.txt",
+        content="alpha",
+        metadata={"probe": _DeepcopyProbe(document_copies)},
+    )
+    collection.sync(
+        _ProbeAdapter(
+            "docs",
+            (document,),
+            _DeepcopyProbe(source_copies),
+        )
+    )
+    chunk = state.chunks[f"chunk:{document.document_id}"]
+    state.trace = RetrievalDiagnostics(
+        (SearchHit(chunk, 2.0),),
+        (
+            _row(chunk, score=1.0),
+            _row(chunk, stage=RetrievalStage.FUSION, score=2.0),
+        ),
+    )
+    source_copies[0] = 0
+    document_copies[0] = 0
+    collection.lookup_calls = 0
+
+    diagnostics = collection.diagnose_search("alpha")
+
+    assert len(diagnostics.results) == 1
+    assert len(diagnostics.candidates) == 2
+    assert collection.lookup_calls == 1
+    assert source_copies[0] == 3
+    assert document_copies[0] == 3
 
 
 def test_diagnose_search_accepts_hybrid_terms_and_repeated_reranker_blocks() -> None:

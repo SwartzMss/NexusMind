@@ -354,24 +354,46 @@ class KnowledgeCollection:
             raise
         except Exception as exc:
             raise KnowledgeSearchResolutionError("index diagnose failed") from exc
-        hits, rows = self._validate_diagnostic_trace(trace)
-        results = tuple(self._resolve_diagnostic_hit(hit) for hit in hits)
-        candidates = tuple(self._resolve_diagnostic_candidate(row) for row in rows)
+        hits, rows, hit_provenance, row_provenance = self._validate_diagnostic_trace(
+            trace
+        )
+        results = tuple(
+            self._detach_diagnostic_hit(hit, provenance)
+            for hit, provenance in zip(hits, hit_provenance, strict=True)
+        )
+        candidates = tuple(
+            self._detach_diagnostic_candidate(row, provenance)
+            for row, provenance in zip(rows, row_provenance, strict=True)
+        )
         return KnowledgeRetrievalDiagnostics(query, results, candidates)
 
     def _resolve_hit(self, hit: object) -> KnowledgeSearchResult:
+        source, document = self._canonical_hit_provenance(hit)
+        return KnowledgeSearchResult(
+            source=deepcopy(source), document=deepcopy(document), hit=hit
+        )
+
+    def _canonical_hit_provenance(
+        self,
+        hit: object,
+        cache: dict[str, tuple[KnowledgeSource, Document]] | None = None,
+    ) -> tuple[KnowledgeSource, Document]:
         if not isinstance(hit, SearchHit):
             raise KnowledgeSearchResolutionError(
                 "index search result must contain only SearchHit values"
             )
         if not isinstance(hit.chunk, Chunk):
             raise KnowledgeSearchResolutionError("SearchHit must contain a Chunk")
-        document = self._find_document(hit.chunk.document_id)
-        if document is None:
-            raise KnowledgeSearchResolutionError(
-                "search hit references an unknown document_id"
-            )
         chunk = hit.chunk
+        provenance = None if cache is None else cache.get(chunk.document_id)
+        if provenance is None:
+            document = self._find_document(chunk.document_id)
+            if document is None:
+                raise KnowledgeSearchResolutionError(
+                    "search hit references an unknown document_id"
+                )
+        else:
+            _, document = provenance
         if type(chunk.start_offset) is not int or type(chunk.end_offset) is not int:
             raise KnowledgeSearchResolutionError("search hit chunk has invalid offsets")
         if not (
@@ -384,31 +406,40 @@ class KnowledgeCollection:
             raise KnowledgeSearchResolutionError(
                 "search hit chunk is incoherent with canonical document"
             )
-        source = self._sources.get(document.source_id)
-        if source is None:
-            raise KnowledgeSearchResolutionError(
-                "search hit references a document with no canonical source"
-            )
-        return KnowledgeSearchResult(
-            source=deepcopy(source), document=deepcopy(document), hit=hit
-        )
+        if provenance is None:
+            source = self._sources.get(document.source_id)
+            if source is None:
+                raise KnowledgeSearchResolutionError(
+                    "search hit references a document with no canonical source"
+                )
+            provenance = (source, document)
+            if cache is not None:
+                cache[chunk.document_id] = provenance
+        source, document = provenance
+        return source, document
 
-    def _resolve_diagnostic_hit(self, hit: object) -> KnowledgeSearchResult:
-        resolved = self._resolve_hit(hit)
+    def _detach_diagnostic_hit(
+        self,
+        hit: SearchHit,
+        provenance: tuple[KnowledgeSource, Document],
+    ) -> KnowledgeSearchResult:
+        canonical_source, canonical_document = provenance
         try:
-            source = self._detached_exact_source(resolved.source)
-            document = self._detached_exact_document(resolved.document)
+            source = self._detached_exact_source(canonical_source)
+            document = self._detached_exact_document(canonical_document)
         except Exception as exc:
             raise KnowledgeSearchResolutionError(
                 "diagnostic provenance is invalid"
             ) from exc
-        return KnowledgeSearchResult(source, document, resolved.hit)
+        return KnowledgeSearchResult(source, document, hit)
 
-    def _resolve_diagnostic_candidate(
-        self, row: RetrievalCandidateDiagnostic
+    def _detach_diagnostic_candidate(
+        self,
+        row: RetrievalCandidateDiagnostic,
+        provenance: tuple[KnowledgeSource, Document],
     ) -> KnowledgeRetrievalCandidateDiagnostic:
-        resolved = self._resolve_diagnostic_hit(
-            SearchHit(row.chunk, row.score, row.matched_terms)
+        resolved = self._detach_diagnostic_hit(
+            SearchHit(row.chunk, row.score, row.matched_terms), provenance
         )
         return KnowledgeRetrievalCandidateDiagnostic(
             resolved.source, resolved.document, row
@@ -416,7 +447,12 @@ class KnowledgeCollection:
 
     def _validate_diagnostic_trace(
         self, trace: object
-    ) -> tuple[tuple[SearchHit, ...], tuple[RetrievalCandidateDiagnostic, ...]]:
+    ) -> tuple[
+        tuple[SearchHit, ...],
+        tuple[RetrievalCandidateDiagnostic, ...],
+        tuple[tuple[KnowledgeSource, Document], ...],
+        tuple[tuple[KnowledgeSource, Document], ...],
+    ]:
         if type(trace) is not RetrievalDiagnostics:
             raise KnowledgeSearchResolutionError("index diagnostic trace is invalid")
         if type(trace.hits) is not tuple or type(trace.candidates) is not tuple:
@@ -428,10 +464,14 @@ class KnowledgeCollection:
         if any(type(row) is not RetrievalCandidateDiagnostic for row in rows):
             raise KnowledgeSearchResolutionError("index diagnostic trace is invalid")
 
+        provenance_cache: dict[str, tuple[KnowledgeSource, Document]] = {}
         hit_ids: list[str] = []
+        hit_provenance: list[tuple[KnowledgeSource, Document]] = []
         for hit in hits:
             self._validate_diagnostic_hit(hit)
-            self._resolve_hit(hit)
+            hit_provenance.append(
+                self._canonical_hit_provenance(hit, provenance_cache)
+            )
             hit_ids.append(hit.chunk.chunk_id)
         if len(hit_ids) != len(set(hit_ids)):
             raise KnowledgeSearchResolutionError(
@@ -447,6 +487,7 @@ class KnowledgeCollection:
         block_ids: list[set[str]] = []
         canonical_by_id: dict[str, Chunk] = {}
         selected_ids: set[str] = set()
+        row_provenance: list[tuple[KnowledgeSource, Document]] = []
         previous_stage_position = -1
         for row in rows:
             self._validate_diagnostic_chunk(row.chunk)
@@ -464,7 +505,12 @@ class KnowledgeCollection:
                 raise KnowledgeSearchResolutionError(
                     "index diagnostic candidate is invalid"
                 ) from exc
-            self._resolve_diagnostic_candidate(row)
+            row_provenance.append(
+                self._canonical_hit_provenance(
+                    SearchHit(row.chunk, row.score, row.matched_terms),
+                    provenance_cache,
+                )
+            )
             stage_position = stage_positions[row.stage]
             repeated_reranker = (
                 bool(blocks)
@@ -536,11 +582,14 @@ class KnowledgeCollection:
             SearchHit(row.chunk, row.score, row.matched_terms)
             for row in (blocks[-1] if blocks else ())
         )
-        if terminal_hits != hits:
+        empty_final_trace = not hits and bool(rows) and all(
+            not row.selected for row in rows
+        )
+        if not empty_final_trace and terminal_hits != hits:
             raise KnowledgeSearchResolutionError(
                 "index diagnostic final candidate block does not match final hits"
             )
-        return hits, rows
+        return hits, rows, tuple(hit_provenance), tuple(row_provenance)
 
     @classmethod
     def _validate_diagnostic_hit(cls, hit: object) -> None:
@@ -620,7 +669,7 @@ class KnowledgeCollection:
             source_type=source.source_type,
             display_name=source.display_name,
             logical_location=source.logical_location,
-            metadata=deepcopy(source.metadata),
+            metadata=source.metadata,
         )
 
     @staticmethod
@@ -630,7 +679,7 @@ class KnowledgeCollection:
             logical_path=document.logical_path,
             content=document.content,
             content_type=document.content_type,
-            metadata=deepcopy(document.metadata),
+            metadata=document.metadata,
         )
         if (
             detached.document_id != document.document_id
