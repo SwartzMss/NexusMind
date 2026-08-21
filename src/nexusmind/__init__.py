@@ -35,6 +35,7 @@ from .hybrid_retrieval import (
     HybridChunkIndexLimits,
 )
 from .knowledge_chunking import Chunk, ChunkLimitError, TextChunker
+from .knowledge_inspection import KnowledgeChunkInspection, KnowledgeDocumentInspection
 from .knowledge_collection import (
     CloneableChunkIndex,
     DocumentChunker,
@@ -42,6 +43,9 @@ from .knowledge_collection import (
     KnowledgeCollectionError,
     KnowledgeCollectionLimitError,
     KnowledgeCollectionLimits,
+    KnowledgeInspectionError,
+    KnowledgeRetrievalCandidateDiagnostic,
+    KnowledgeRetrievalDiagnostics,
     KnowledgeRestoreError,
     KnowledgeRestoreResult,
     KnowledgeSearchResolutionError,
@@ -180,6 +184,11 @@ __all__ = [
     "KnowledgeCollectionError",
     "KnowledgeCollectionLimitError",
     "KnowledgeCollectionLimits",
+    "KnowledgeChunkInspection",
+    "KnowledgeDocumentInspection",
+    "KnowledgeInspectionError",
+    "KnowledgeRetrievalCandidateDiagnostic",
+    "KnowledgeRetrievalDiagnostics",
     "KnowledgeRestoreError",
     "KnowledgeRestoreResult",
     "KnowledgeSearchResolutionError",

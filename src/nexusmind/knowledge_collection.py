@@ -13,8 +13,17 @@ from .knowledge import (
     stable_document_id,
 )
 from .knowledge_chunking import Chunk, TextChunker
+from .knowledge_inspection import KnowledgeChunkInspection, KnowledgeDocumentInspection
 from .knowledge_ingestion import KnowledgeSourceAdapter
-from .knowledge_retrieval import ChunkIndex, InMemoryChunkIndex, SearchHit
+from .knowledge_retrieval import (
+    ChunkIndex,
+    ChunkIndexError,
+    InMemoryChunkIndex,
+    RetrievalCandidateDiagnostic,
+    RetrievalDiagnostics,
+    RetrievalStage,
+    SearchHit,
+)
 
 
 class KnowledgeCollectionError(Exception):
@@ -35,6 +44,10 @@ class KnowledgeRestoreError(KnowledgeCollectionError):
 
 class KnowledgeSearchResolutionError(KnowledgeCollectionError):
     """A retrieval hit cannot be resolved to committed canonical state."""
+
+
+class KnowledgeInspectionError(KnowledgeCollectionError):
+    """Canonical document chunks cannot be inspected coherently."""
 
 
 class DocumentChunker(Protocol):
@@ -103,6 +116,62 @@ class KnowledgeSearchResult:
     source: KnowledgeSource
     document: Document
     hit: SearchHit
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeRetrievalCandidateDiagnostic:
+    """One backend diagnostic row with detached canonical provenance."""
+
+    source: KnowledgeSource
+    document: Document
+    diagnostic: RetrievalCandidateDiagnostic
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source, KnowledgeSource):
+            raise TypeError("source must be a KnowledgeSource")
+        if not isinstance(self.document, Document):
+            raise TypeError("document must be a Document")
+        if type(self.diagnostic) is not RetrievalCandidateDiagnostic:
+            raise TypeError("diagnostic must be a RetrievalCandidateDiagnostic")
+        RetrievalCandidateDiagnostic(
+            stage=self.diagnostic.stage,
+            rank=self.diagnostic.rank,
+            chunk=self.diagnostic.chunk,
+            score=self.diagnostic.score,
+            matched_terms=self.diagnostic.matched_terms,
+            rrf_contribution=self.diagnostic.rrf_contribution,
+            selected=self.diagnostic.selected,
+        )
+        if self.document.source_id != self.source.source_id:
+            raise ValueError("document must belong to source")
+        if self.diagnostic.chunk.document_id != self.document.document_id:
+            raise ValueError("diagnostic chunk must belong to document")
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeRetrievalDiagnostics:
+    """One query's final results and fully provenance-resolved candidate trace."""
+
+    query: str
+    results: tuple[KnowledgeSearchResult, ...]
+    candidates: tuple[KnowledgeRetrievalCandidateDiagnostic, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.query) is not str:
+            raise TypeError("query must be a string")
+        if type(self.results) is not tuple:
+            raise TypeError("results must be a tuple")
+        if any(type(result) is not KnowledgeSearchResult for result in self.results):
+            raise TypeError("results must contain only KnowledgeSearchResult values")
+        if type(self.candidates) is not tuple:
+            raise TypeError("candidates must be a tuple")
+        if any(
+            type(candidate) is not KnowledgeRetrievalCandidateDiagnostic
+            for candidate in self.candidates
+        ):
+            raise TypeError(
+                "candidates must contain only KnowledgeRetrievalCandidateDiagnostic values"
+            )
 
 
 class KnowledgeCollection:
@@ -220,59 +289,347 @@ class KnowledgeCollection:
         hits = self._index.search(query, limit=limit)
         if type(hits) is not tuple:
             raise KnowledgeSearchResolutionError("index search result must be a tuple")
-        results: list[KnowledgeSearchResult] = []
-        for hit in hits:
-            if not isinstance(hit, SearchHit):
-                raise KnowledgeSearchResolutionError(
-                    "index search result must contain only SearchHit values"
-                )
-            if not isinstance(hit.chunk, Chunk):
-                raise KnowledgeSearchResolutionError(
-                    "SearchHit must contain a Chunk"
-                )
-            document = next(
-                (
-                    documents[hit.chunk.document_id]
-                    for documents in self._documents.values()
-                    if hit.chunk.document_id in documents
-                ),
-                None,
-            )
-            if document is None:
-                raise KnowledgeSearchResolutionError(
-                    "search hit references an unknown document_id"
-                )
-            chunk = hit.chunk
-            if type(chunk.start_offset) is not int or type(chunk.end_offset) is not int:
-                raise KnowledgeSearchResolutionError(
-                    "search hit chunk has invalid offsets"
-                )
-            if not (
-                0
-                <= chunk.start_offset
-                <= chunk.end_offset
-                <= len(document.content)
-            ):
-                raise KnowledgeSearchResolutionError(
-                    "search hit chunk has invalid offsets outside canonical document"
-                )
-            if chunk.content != document.content[chunk.start_offset : chunk.end_offset]:
-                raise KnowledgeSearchResolutionError(
-                    "search hit chunk is incoherent with canonical document"
-                )
-            source = self._sources.get(document.source_id)
+        return tuple(self._resolve_hit(hit) for hit in hits)
+
+    def inspect_document(
+        self, document_id: str, *, preview_chars: int = 160
+    ) -> KnowledgeDocumentInspection:
+        """Inspect one committed canonical document without changing state."""
+
+        if type(document_id) is not str or not document_id.strip():
+            raise ValueError("document_id must be a non-empty string")
+        self._validate_preview_chars(preview_chars)
+        canonical = self._find_document(document_id)
+        if canonical is None:
+            raise KnowledgeInspectionError("inspection references an unknown document_id")
+        source = self._sources.get(canonical.source_id)
+        if source is None:
+            raise KnowledgeInspectionError("inspection document has no canonical source")
+        return self._inspect_canonical_document(source, canonical, preview_chars)
+
+    def inspect_documents(
+        self, *, preview_chars: int = 160
+    ) -> tuple[KnowledgeDocumentInspection, ...]:
+        """Inspect every canonical document in stable source and identity order."""
+
+        self._validate_preview_chars(preview_chars)
+        inspections: list[KnowledgeDocumentInspection] = []
+        for source_id in sorted(self._documents):
+            source = self._sources.get(source_id)
             if source is None:
-                raise KnowledgeSearchResolutionError(
-                    "search hit references a document with no canonical source"
+                raise KnowledgeInspectionError("inspection document has no canonical source")
+            for document_id in sorted(self._documents[source_id]):
+                inspections.append(
+                    self._inspect_canonical_document(
+                        source,
+                        self._documents[source_id][document_id],
+                        preview_chars,
+                    )
                 )
-            results.append(
-                KnowledgeSearchResult(
-                    source=deepcopy(source),
-                    document=deepcopy(document),
-                    hit=hit,
+        return tuple(inspections)
+
+    def diagnose_search(
+        self, query: str, *, limit: int = 10
+    ) -> KnowledgeRetrievalDiagnostics:
+        """Return one validated backend trace resolved to canonical provenance."""
+
+        if type(query) is not str:
+            raise TypeError("query must be a string")
+        if type(limit) is not int:
+            raise TypeError("limit must be an integer")
+        if limit <= 0:
+            raise ValueError("limit must be greater than zero")
+        try:
+            diagnose = getattr(self._index, "diagnose", None)
+        except Exception as exc:
+            raise KnowledgeSearchResolutionError(
+                "index does not support diagnostics"
+            ) from exc
+        if not callable(diagnose):
+            raise KnowledgeSearchResolutionError("index does not support diagnostics")
+        try:
+            trace = diagnose(query, limit=limit)
+        except ChunkIndexError:
+            raise
+        except Exception as exc:
+            raise KnowledgeSearchResolutionError("index diagnose failed") from exc
+        hits, rows = self._validate_diagnostic_trace(trace)
+        results = tuple(self._resolve_hit(hit) for hit in hits)
+        candidates = tuple(self._resolve_diagnostic_candidate(row) for row in rows)
+        return KnowledgeRetrievalDiagnostics(query, results, candidates)
+
+    def _resolve_hit(self, hit: object) -> KnowledgeSearchResult:
+        if not isinstance(hit, SearchHit):
+            raise KnowledgeSearchResolutionError(
+                "index search result must contain only SearchHit values"
+            )
+        if not isinstance(hit.chunk, Chunk):
+            raise KnowledgeSearchResolutionError("SearchHit must contain a Chunk")
+        document = self._find_document(hit.chunk.document_id)
+        if document is None:
+            raise KnowledgeSearchResolutionError(
+                "search hit references an unknown document_id"
+            )
+        chunk = hit.chunk
+        if type(chunk.start_offset) is not int or type(chunk.end_offset) is not int:
+            raise KnowledgeSearchResolutionError("search hit chunk has invalid offsets")
+        if not (
+            0 <= chunk.start_offset <= chunk.end_offset <= len(document.content)
+        ):
+            raise KnowledgeSearchResolutionError(
+                "search hit chunk has invalid offsets outside canonical document"
+            )
+        if type(chunk.content) is not str or (
+            chunk.content != document.content[chunk.start_offset : chunk.end_offset]
+        ):
+            raise KnowledgeSearchResolutionError(
+                "search hit chunk is incoherent with canonical document"
+            )
+        source = self._sources.get(document.source_id)
+        if source is None:
+            raise KnowledgeSearchResolutionError(
+                "search hit references a document with no canonical source"
+            )
+        return KnowledgeSearchResult(
+            source=deepcopy(source), document=deepcopy(document), hit=hit
+        )
+
+    def _resolve_diagnostic_candidate(
+        self, row: RetrievalCandidateDiagnostic
+    ) -> KnowledgeRetrievalCandidateDiagnostic:
+        resolved = self._resolve_hit(
+            SearchHit(row.chunk, row.score, row.matched_terms)
+        )
+        return KnowledgeRetrievalCandidateDiagnostic(
+            resolved.source, resolved.document, row
+        )
+
+    def _validate_diagnostic_trace(
+        self, trace: object
+    ) -> tuple[tuple[SearchHit, ...], tuple[RetrievalCandidateDiagnostic, ...]]:
+        if type(trace) is not RetrievalDiagnostics:
+            raise KnowledgeSearchResolutionError("index diagnostic trace is invalid")
+        if type(trace.hits) is not tuple or type(trace.candidates) is not tuple:
+            raise KnowledgeSearchResolutionError("index diagnostic trace is invalid")
+        hits = trace.hits
+        rows = trace.candidates
+        if any(type(hit) is not SearchHit for hit in hits):
+            raise KnowledgeSearchResolutionError("index diagnostic trace is invalid")
+        if any(type(row) is not RetrievalCandidateDiagnostic for row in rows):
+            raise KnowledgeSearchResolutionError("index diagnostic trace is invalid")
+
+        hit_ids: list[str] = []
+        for hit in hits:
+            self._validate_diagnostic_chunk(hit.chunk)
+            self._resolve_hit(hit)
+            hit_ids.append(hit.chunk.chunk_id)
+        if len(hit_ids) != len(set(hit_ids)):
+            raise KnowledgeSearchResolutionError(
+                "index diagnostic trace contains duplicate final chunks"
+            )
+
+        stage_positions = {
+            stage: position for position, stage in enumerate(RetrievalStage)
+        }
+        blocks: list[list[RetrievalCandidateDiagnostic]] = []
+        block_stages: list[RetrievalStage] = []
+        block_ids: list[set[str]] = []
+        canonical_by_id: dict[str, Chunk] = {}
+        selected_ids: set[str] = set()
+        previous_stage_position = -1
+        for row in rows:
+            self._validate_diagnostic_chunk(row.chunk)
+            try:
+                RetrievalCandidateDiagnostic(
+                    stage=row.stage,
+                    rank=row.rank,
+                    chunk=row.chunk,
+                    score=row.score,
+                    matched_terms=row.matched_terms,
+                    rrf_contribution=row.rrf_contribution,
+                    selected=row.selected,
+                )
+            except (TypeError, ValueError) as exc:
+                raise KnowledgeSearchResolutionError(
+                    "index diagnostic candidate is invalid"
+                ) from exc
+            self._resolve_diagnostic_candidate(row)
+            stage_position = stage_positions[row.stage]
+            repeated_reranker = (
+                bool(blocks)
+                and row.stage is RetrievalStage.RERANKER
+                and block_stages[-1] is RetrievalStage.RERANKER
+                and row.rank == 1
+            )
+            new_stage = not blocks or row.stage is not block_stages[-1]
+            if new_stage:
+                if row.stage is RetrievalStage.RERANKER and not blocks:
+                    raise KnowledgeSearchResolutionError(
+                        "index diagnostic stage ordering is invalid"
+                    )
+                if stage_position <= previous_stage_position:
+                    raise KnowledgeSearchResolutionError(
+                        "index diagnostic stage ordering is invalid"
+                    )
+                blocks.append([])
+                block_stages.append(row.stage)
+                block_ids.append(set())
+                previous_stage_position = stage_position
+            elif repeated_reranker:
+                blocks.append([])
+                block_stages.append(row.stage)
+                block_ids.append(set())
+            if row.rank != len(blocks[-1]) + 1:
+                raise KnowledgeSearchResolutionError(
+                    "index diagnostic candidate rank ordering is invalid"
+                )
+            if row.chunk.chunk_id in block_ids[-1]:
+                raise KnowledgeSearchResolutionError(
+                    "index diagnostic block contains duplicate chunks"
+                )
+            existing = canonical_by_id.setdefault(row.chunk.chunk_id, row.chunk)
+            if existing != row.chunk:
+                raise KnowledgeSearchResolutionError(
+                    "index diagnostic chunk identity is incoherent"
+                )
+            if row.stage is RetrievalStage.RERANKER:
+                if len(blocks) < 2 or row.chunk.chunk_id not in block_ids[-2]:
+                    raise KnowledgeSearchResolutionError(
+                        "index diagnostic reranker lineage is invalid"
+                    )
+                previous_row = next(
+                    item
+                    for item in blocks[-2]
+                    if item.chunk.chunk_id == row.chunk.chunk_id
+                )
+                if row.matched_terms != previous_row.matched_terms:
+                    raise KnowledgeSearchResolutionError(
+                        "index diagnostic reranker lineage is invalid"
+                    )
+            blocks[-1].append(row)
+            block_ids[-1].add(row.chunk.chunk_id)
+            if row.selected:
+                selected_ids.add(row.chunk.chunk_id)
+
+        if hits and not rows:
+            raise KnowledgeSearchResolutionError("index diagnostic trace is incoherent")
+        if selected_ids != set(hit_ids):
+            raise KnowledgeSearchResolutionError(
+                "index diagnostic selected candidates do not match final hits"
+            )
+        terminal_hits = tuple(
+            SearchHit(row.chunk, row.score, row.matched_terms)
+            for row in (blocks[-1] if blocks else ())
+            if row.selected
+        )
+        if terminal_hits != hits:
+            raise KnowledgeSearchResolutionError(
+                "index diagnostic final candidate block does not match final hits"
+            )
+        return hits, rows
+
+    @staticmethod
+    def _validate_diagnostic_chunk(chunk: object) -> None:
+        if type(chunk) is not Chunk:
+            raise KnowledgeSearchResolutionError(
+                "index diagnostic chunk is invalid"
+            )
+        if type(chunk.document_id) is not str or not chunk.document_id.strip():
+            raise KnowledgeSearchResolutionError(
+                "index diagnostic chunk is invalid"
+            )
+        if type(chunk.chunk_id) is not str or not chunk.chunk_id.strip():
+            raise KnowledgeSearchResolutionError(
+                "index diagnostic chunk is invalid"
+            )
+
+    @staticmethod
+    def _validate_preview_chars(preview_chars: int) -> None:
+        if type(preview_chars) is not int:
+            raise TypeError("preview_chars must be an integer")
+        if preview_chars <= 0:
+            raise ValueError("preview_chars must be greater than zero")
+
+    def _inspect_canonical_document(
+        self, source: KnowledgeSource, document: Document, preview_chars: int
+    ) -> KnowledgeDocumentInspection:
+        try:
+            chunks = self._chunker.chunk(deepcopy(document))
+        except Exception as exc:
+            raise KnowledgeInspectionError("inspection chunker failed") from exc
+        validated = self._validated_inspection_chunks(document, chunks, preview_chars)
+        return KnowledgeDocumentInspection(
+            deepcopy(source), deepcopy(document), validated
+        )
+
+    @staticmethod
+    def _validated_inspection_chunks(
+        document: Document, chunks: object, preview_chars: int
+    ) -> tuple[KnowledgeChunkInspection, ...]:
+        if type(chunks) is not tuple:
+            raise KnowledgeInspectionError("inspection chunker must return a tuple")
+        inspections: list[KnowledgeChunkInspection] = []
+        chunk_ids: set[str] = set()
+        previous_start = -1
+        previous_end = -1
+        for ordinal, chunk in enumerate(chunks, start=1):
+            if type(chunk) is not Chunk:
+                raise KnowledgeInspectionError(
+                    "inspection chunker tuple must contain only Chunk values"
+                )
+            if type(chunk.document_id) is not str or chunk.document_id != document.document_id:
+                raise KnowledgeInspectionError(
+                    "inspection chunk has an invalid document_id"
+                )
+            if type(chunk.chunk_id) is not str or not chunk.chunk_id.strip():
+                raise KnowledgeInspectionError("inspection chunk has an invalid chunk_id")
+            if chunk.chunk_id in chunk_ids:
+                raise KnowledgeInspectionError(
+                    "inspection chunker returned duplicate chunk_id values"
+                )
+            if type(chunk.start_offset) is not int or type(chunk.end_offset) is not int:
+                raise KnowledgeInspectionError("inspection chunk has invalid offsets")
+            if not (
+                0 <= chunk.start_offset < chunk.end_offset <= len(document.content)
+            ):
+                raise KnowledgeInspectionError("inspection chunk has invalid offsets")
+            if (
+                chunk.start_offset < previous_start
+                or chunk.end_offset <= previous_end
+            ):
+                raise KnowledgeInspectionError(
+                    "inspection chunks have invalid stable order"
+                )
+            if type(chunk.content) is not str or chunk.content != document.content[
+                chunk.start_offset : chunk.end_offset
+            ]:
+                raise KnowledgeInspectionError(
+                    "inspection chunk content differs from canonical document"
+                )
+            inspections.append(
+                KnowledgeChunkInspection(
+                    ordinal,
+                    chunk.chunk_id,
+                    chunk.start_offset,
+                    chunk.end_offset,
+                    len(chunk.content),
+                    chunk.content[:preview_chars],
                 )
             )
-        return tuple(results)
+            chunk_ids.add(chunk.chunk_id)
+            previous_start = chunk.start_offset
+            previous_end = chunk.end_offset
+        return tuple(inspections)
+
+    def _find_document(self, document_id: str) -> Document | None:
+        return next(
+            (
+                documents[document_id]
+                for documents in self._documents.values()
+                if document_id in documents
+            ),
+            None,
+        )
 
     def snapshot(self) -> KnowledgeSnapshot:
         """Export only committed canonical state in stable identity order."""
@@ -394,6 +751,9 @@ __all__ = [
     "KnowledgeCollectionError",
     "KnowledgeCollectionLimitError",
     "KnowledgeCollectionLimits",
+    "KnowledgeInspectionError",
+    "KnowledgeRetrievalCandidateDiagnostic",
+    "KnowledgeRetrievalDiagnostics",
     "KnowledgeRestoreError",
     "KnowledgeRestoreResult",
     "KnowledgeSearchResolutionError",
