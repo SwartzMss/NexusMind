@@ -60,7 +60,10 @@ def test_retrieval_diagnostic_contracts_are_frozen_and_slotted() -> None:
     assert diagnostics.candidates == (candidate,)
     with pytest.raises(FrozenInstanceError):
         candidate.rank = 2  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        diagnostics.hits = ()  # type: ignore[misc]
     assert hasattr(candidate, "__slots__")
+    assert hasattr(diagnostics, "__slots__")
 
 
 @pytest.mark.parametrize(
@@ -136,6 +139,28 @@ def test_diagnose_handles_empty_query_and_limit_one() -> None:
     assert len(diagnostics.hits) == 1
     assert len(diagnostics.candidates) == 1
     assert diagnostics.candidates[0].rank == 1
+
+
+def test_diagnose_analyzes_query_once_and_preserves_bm25_score() -> None:
+    class RecordingAnalyzer:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def analyze(self, text: str) -> tuple[str, ...]:
+            self.calls.append(text)
+            return tuple(text.split())
+
+    analyzer = RecordingAnalyzer()
+    index = InMemoryChunkIndex(analyzer=analyzer)
+    index.add((_chunk("one", "shared"), _chunk("two", "other")))
+    analyzer.calls.clear()
+
+    diagnostics = index.diagnose("shared")
+
+    assert analyzer.calls == ["shared"]
+    assert len(diagnostics.hits) == 1
+    assert diagnostics.hits[0].score == pytest.approx(math.log(2))
+    assert diagnostics.candidates[0].score == diagnostics.hits[0].score
 
 
 def test_empty_index_non_match_and_blank_query_return_no_hits() -> None:
@@ -550,6 +575,64 @@ def test_query_and_result_limits_are_enforced() -> None:
         index.search("a b c")
     with pytest.raises(ChunkIndexLimitError, match="max_results"):
         index.search("a", limit=2)
+
+
+def test_diagnose_enforces_query_and_result_limits() -> None:
+    limits = ChunkIndexLimits(max_query_chars=3, max_query_terms=1, max_results=1)
+    index = InMemoryChunkIndex(limits=limits)
+    with pytest.raises(ChunkIndexLimitError, match="max_query_chars"):
+        index.diagnose("1234")
+    with pytest.raises(ChunkIndexLimitError, match="max_query_terms"):
+        index.diagnose("a b")
+    with pytest.raises(ChunkIndexLimitError, match="max_results"):
+        index.diagnose("a", limit=2)
+
+
+def test_invalid_diagnose_limit_is_controlled() -> None:
+    index = InMemoryChunkIndex()
+    with pytest.raises(TypeError):
+        index.diagnose("term", limit=True)
+    with pytest.raises(ValueError):
+        index.diagnose("term", limit=0)
+
+
+def test_diagnose_enforces_analyzed_query_character_limit() -> None:
+    class ExpandingAnalyzer:
+        def analyze(self, text: str) -> tuple[str, ...]:
+            return ("x" * 5,)
+
+    index = InMemoryChunkIndex(
+        analyzer=ExpandingAnalyzer(),
+        limits=ChunkIndexLimits(max_query_analyzed_chars=4),
+    )
+
+    with pytest.raises(ChunkIndexLimitError, match="max_query_analyzed_chars"):
+        index.diagnose("q")
+
+
+def test_diagnose_preserves_controlled_analyzer_failure_semantics() -> None:
+    class FailingAnalyzer:
+        def analyze(self, text: str) -> tuple[str, ...]:
+            raise RuntimeError(f"secret input: {text}")
+
+    index = InMemoryChunkIndex(analyzer=FailingAnalyzer())
+
+    with pytest.raises(LexicalAnalysisError, match="^lexical analysis failed$") as caught:
+        index.diagnose("private query")
+
+    assert isinstance(caught.value.__cause__, RuntimeError)
+    assert "private query" not in str(caught.value)
+
+
+def test_diagnose_rejects_malformed_analyzer_output() -> None:
+    class MalformedAnalyzer:
+        def analyze(self, text: str) -> tuple[str, ...]:
+            return [text]  # type: ignore[return-value]
+
+    index = InMemoryChunkIndex(analyzer=MalformedAnalyzer())
+
+    with pytest.raises(LexicalAnalysisError, match="^lexical analysis failed$"):
+        index.diagnose("query")
 
 
 def test_query_term_limit_counts_analyzed_repetitions_before_deduplication() -> None:
