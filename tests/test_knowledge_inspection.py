@@ -61,6 +61,25 @@ class _FixedChunker:
         )
 
 
+class _AlternatingChunker:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def chunk(self, document: Document) -> tuple[Chunk, ...]:
+        self.calls += 1
+        if not document.content:
+            return ()
+        return (
+            Chunk(
+                document.document_id,
+                f"chunk-{1 if self.calls % 2 else 2}",
+                document.content,
+                0,
+                len(document.content),
+            ),
+        )
+
+
 def _document(
     source_id: str = "docs", logical_path: str = "a.txt", content: str = "abcdefghijklmnopqrst"
 ) -> Document:
@@ -158,7 +177,7 @@ def test_inspect_document_returns_exact_offsets_previews_and_detached_metadata()
         for item in inspection.chunks
     ] == [(1, 0, 10, 10), (2, 10, 20, 10)]
     assert [item.preview for item in inspection.chunks] == ["abcdefgh", "klmnopqr"]
-    assert chunker.calls == [document.document_id]
+    assert chunker.calls == [document.document_id, document.document_id]
 
     inspection.source.metadata["owner"] = "external"
     inspection.document.metadata["tag"] = "external"
@@ -234,7 +253,7 @@ def test_inspect_document_normalizes_accepted_canonical_subclasses() -> None:
     assert again.document.metadata == {"nested": {"tag": "canonical"}}
 
 
-def test_inspect_documents_is_stable_handles_empty_documents_and_calls_once_each() -> None:
+def test_inspect_documents_is_stable_handles_empty_documents_and_verifies_each() -> None:
     chunker = _FixedChunker()
     documents = (
         _document("z", "b.txt", ""),
@@ -254,8 +273,11 @@ def test_inspect_documents_is_stable_handles_empty_documents_and_calls_once_each
     )
     assert tuple(item.document.document_id for item in first) == expected_ids
     assert first == second
-    assert first_calls == expected_ids
-    assert tuple(chunker.calls) == expected_ids
+    expected_calls = tuple(
+        document_id for document_id in expected_ids for _ in range(2)
+    )
+    assert first_calls == expected_calls
+    assert tuple(chunker.calls) == expected_calls
     assert next(item for item in first if not item.document.content).chunks == ()
 
 
@@ -279,6 +301,22 @@ def test_inspection_rejects_identical_consecutive_starts_but_accepts_real_overla
         (3, 8),
         (6, 10),
     ]
+
+
+@pytest.mark.parametrize("operation", ["inspect_document", "inspect_documents"])
+def test_inspection_rejects_nondeterministic_valid_chunk_tuples(operation: str) -> None:
+    chunker = _AlternatingChunker()
+    document = _document(content="alpha")
+    collection = KnowledgeCollection(chunker=chunker)
+    collection.sync(_Adapter("docs", (document,)))
+
+    with pytest.raises(KnowledgeCollectionError, match="deterministic"):
+        if operation == "inspect_document":
+            collection.inspect_document(document.document_id)
+        else:
+            collection.inspect_documents()
+
+    assert chunker.calls == 3
 
 
 @pytest.mark.parametrize("document_id", [None, "", "  ", True, 1])

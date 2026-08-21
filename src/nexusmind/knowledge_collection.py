@@ -465,13 +465,16 @@ class KnowledgeCollection:
             raise KnowledgeSearchResolutionError("index diagnostic trace is invalid")
 
         provenance_cache: dict[str, tuple[KnowledgeSource, Document]] = {}
+        derived_chunks_cache: dict[str, tuple[Chunk, ...]] = {}
         hit_ids: list[str] = []
         hit_provenance: list[tuple[KnowledgeSource, Document]] = []
         for hit in hits:
             self._validate_diagnostic_hit(hit)
-            hit_provenance.append(
-                self._canonical_hit_provenance(hit, provenance_cache)
+            provenance = self._canonical_hit_provenance(hit, provenance_cache)
+            self._require_derived_diagnostic_chunk(
+                hit.chunk, provenance[1], derived_chunks_cache
             )
+            hit_provenance.append(provenance)
             hit_ids.append(hit.chunk.chunk_id)
         if len(hit_ids) != len(set(hit_ids)):
             raise KnowledgeSearchResolutionError(
@@ -505,12 +508,14 @@ class KnowledgeCollection:
                 raise KnowledgeSearchResolutionError(
                     "index diagnostic candidate is invalid"
                 ) from exc
-            row_provenance.append(
-                self._canonical_hit_provenance(
-                    SearchHit(row.chunk, row.score, row.matched_terms),
-                    provenance_cache,
-                )
+            provenance = self._canonical_hit_provenance(
+                SearchHit(row.chunk, row.score, row.matched_terms),
+                provenance_cache,
             )
+            self._require_derived_diagnostic_chunk(
+                row.chunk, provenance[1], derived_chunks_cache
+            )
+            row_provenance.append(provenance)
             stage_position = stage_positions[row.stage]
             repeated_reranker = (
                 bool(blocks)
@@ -646,11 +651,12 @@ class KnowledgeCollection:
     def _inspect_canonical_document(
         self, source: KnowledgeSource, document: Document, preview_chars: int
     ) -> KnowledgeDocumentInspection:
-        try:
-            chunks = self._chunker.chunk(deepcopy(document))
-        except Exception as exc:
-            raise KnowledgeInspectionError("inspection chunker failed") from exc
-        validated = self._validated_inspection_chunks(document, chunks, preview_chars)
+        chunks = self._derive_verified_chunks(
+            document,
+            error_type=KnowledgeInspectionError,
+            context="inspection",
+        )
+        validated = self._inspection_chunk_values(chunks, preview_chars)
         try:
             detached_source = self._detached_exact_source(source)
             detached_document = self._detached_exact_document(document)
@@ -688,64 +694,117 @@ class KnowledgeCollection:
             raise ValueError("canonical document identity is incoherent")
         return detached
 
+    def _require_derived_diagnostic_chunk(
+        self,
+        chunk: Chunk,
+        document: Document,
+        cache: dict[str, tuple[Chunk, ...]],
+    ) -> None:
+        chunks = cache.get(document.document_id)
+        if chunks is None:
+            chunks = self._derive_verified_chunks(
+                document,
+                error_type=KnowledgeSearchResolutionError,
+                context="diagnostic",
+            )
+            cache[document.document_id] = chunks
+        if chunk not in chunks:
+            raise KnowledgeSearchResolutionError(
+                "diagnostic chunk is not a legitimately derived canonical chunk"
+            )
+
+    def _derive_verified_chunks(
+        self,
+        document: Document,
+        *,
+        error_type: type[KnowledgeCollectionError],
+        context: str,
+    ) -> tuple[Chunk, ...]:
+        derived: list[tuple[Chunk, ...]] = []
+        for _ in range(2):
+            try:
+                chunks = self._chunker.chunk(deepcopy(document))
+            except Exception as exc:
+                raise error_type(f"{context} chunker failed") from exc
+            derived.append(
+                self._validated_derived_chunks(
+                    document,
+                    chunks,
+                    error_type=error_type,
+                    context=context,
+                )
+            )
+        if derived[0] != derived[1]:
+            raise error_type(f"{context} chunker must be deterministic")
+        return derived[0]
+
     @staticmethod
-    def _validated_inspection_chunks(
-        document: Document, chunks: object, preview_chars: int
-    ) -> tuple[KnowledgeChunkInspection, ...]:
+    def _validated_derived_chunks(
+        document: Document,
+        chunks: object,
+        *,
+        error_type: type[KnowledgeCollectionError],
+        context: str,
+    ) -> tuple[Chunk, ...]:
         if type(chunks) is not tuple:
-            raise KnowledgeInspectionError("inspection chunker must return a tuple")
-        inspections: list[KnowledgeChunkInspection] = []
+            raise error_type(f"{context} chunker must return a tuple")
         chunk_ids: set[str] = set()
         previous_start = -1
         previous_end = -1
-        for ordinal, chunk in enumerate(chunks, start=1):
+        for chunk in chunks:
             if type(chunk) is not Chunk:
-                raise KnowledgeInspectionError(
-                    "inspection chunker tuple must contain only Chunk values"
+                raise error_type(
+                    f"{context} chunker tuple must contain only Chunk values"
                 )
             if type(chunk.document_id) is not str or chunk.document_id != document.document_id:
-                raise KnowledgeInspectionError(
-                    "inspection chunk has an invalid document_id"
+                raise error_type(
+                    f"{context} chunk has an invalid document_id"
                 )
             if type(chunk.chunk_id) is not str or not chunk.chunk_id.strip():
-                raise KnowledgeInspectionError("inspection chunk has an invalid chunk_id")
+                raise error_type(f"{context} chunk has an invalid chunk_id")
             if chunk.chunk_id in chunk_ids:
-                raise KnowledgeInspectionError(
-                    "inspection chunker returned duplicate chunk_id values"
+                raise error_type(
+                    f"{context} chunker returned duplicate chunk_id values"
                 )
             if type(chunk.start_offset) is not int or type(chunk.end_offset) is not int:
-                raise KnowledgeInspectionError("inspection chunk has invalid offsets")
+                raise error_type(f"{context} chunk has invalid offsets")
             if not (
                 0 <= chunk.start_offset < chunk.end_offset <= len(document.content)
             ):
-                raise KnowledgeInspectionError("inspection chunk has invalid offsets")
+                raise error_type(f"{context} chunk has invalid offsets")
             if (
                 chunk.start_offset <= previous_start
                 or chunk.end_offset <= previous_end
             ):
-                raise KnowledgeInspectionError(
-                    "inspection chunks have invalid stable order"
+                raise error_type(
+                    f"{context} chunks have invalid stable order"
                 )
             if type(chunk.content) is not str or chunk.content != document.content[
                 chunk.start_offset : chunk.end_offset
             ]:
-                raise KnowledgeInspectionError(
-                    "inspection chunk content differs from canonical document"
+                raise error_type(
+                    f"{context} chunk content differs from canonical document"
                 )
-            inspections.append(
-                KnowledgeChunkInspection(
-                    ordinal,
-                    chunk.chunk_id,
-                    chunk.start_offset,
-                    chunk.end_offset,
-                    len(chunk.content),
-                    chunk.content[:preview_chars],
-                )
-            )
             chunk_ids.add(chunk.chunk_id)
             previous_start = chunk.start_offset
             previous_end = chunk.end_offset
-        return tuple(inspections)
+        return chunks
+
+    @staticmethod
+    def _inspection_chunk_values(
+        chunks: tuple[Chunk, ...], preview_chars: int
+    ) -> tuple[KnowledgeChunkInspection, ...]:
+        return tuple(
+            KnowledgeChunkInspection(
+                ordinal,
+                chunk.chunk_id,
+                chunk.start_offset,
+                chunk.end_offset,
+                len(chunk.content),
+                chunk.content[:preview_chars],
+            )
+            for ordinal, chunk in enumerate(chunks, start=1)
+        )
 
     def _find_document(self, document_id: str) -> Document | None:
         return next(

@@ -351,6 +351,64 @@ def test_diagnose_search_rejects_selected_row_when_final_output_is_empty() -> No
         collection.diagnose_search("alpha")
 
 
+def test_diagnose_search_rejects_valid_slice_with_ghost_chunk_id() -> None:
+    collection, state, one, _ = _setup()
+    canonical = state.chunks[f"chunk:{one.document_id}"]
+    ghost = Chunk(
+        canonical.document_id,
+        "ghost-id",
+        canonical.content,
+        canonical.start_offset,
+        canonical.end_offset,
+    )
+    state.trace = RetrievalDiagnostics(
+        (SearchHit(ghost, 1.0),), (_row(ghost),)
+    )
+
+    with pytest.raises(KnowledgeSearchResolutionError, match="derived"):
+        collection.diagnose_search("alpha")
+
+
+def test_diagnose_search_accepts_real_builtin_trace_with_derived_chunks() -> None:
+    collection = KnowledgeCollection(chunker=_OneChunker())
+    document = _document("docs", "builtin.txt", "alpha")
+    collection.sync(_Adapter("docs", (document,)))
+
+    diagnostics = collection.diagnose_search("alpha")
+
+    assert len(diagnostics.results) == 1
+    assert len(diagnostics.candidates) == 1
+    assert diagnostics.results[0].hit.chunk == diagnostics.candidates[0].diagnostic.chunk
+
+
+def test_diagnose_search_rejects_nondeterministic_chunk_derivation() -> None:
+    class _AlternatingChunker:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chunk(self, document: Document) -> tuple[Chunk, ...]:
+            self.calls += 1
+            return (
+                Chunk(
+                    document.document_id,
+                    f"chunk-{1 if self.calls % 2 else 2}",
+                    document.content,
+                    0,
+                    len(document.content),
+                ),
+            )
+
+    chunker = _AlternatingChunker()
+    collection = KnowledgeCollection(chunker=chunker)
+    document = _document("docs", "alternating.txt", "alpha")
+    collection.sync(_Adapter("docs", (document,)))
+
+    with pytest.raises(KnowledgeSearchResolutionError, match="deterministic"):
+        collection.diagnose_search("alpha")
+
+    assert chunker.calls == 3
+
+
 def test_diagnose_search_looks_up_once_and_detaches_once_per_output() -> None:
     class _DeepcopyProbe:
         def __init__(self, calls: list[int]) -> None:
@@ -368,6 +426,14 @@ def test_diagnose_search_looks_up_once_and_detaches_once_per_output() -> None:
         def _find_document(self, document_id: str) -> Document | None:
             self.lookup_calls += 1
             return super()._find_document(document_id)
+
+    class _CountingChunker(_OneChunker):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chunk(self, document: Document) -> tuple[Chunk, ...]:
+            self.calls += 1
+            return super().chunk(document)
 
     class _ProbeAdapter(_Adapter):
         def __init__(
@@ -390,8 +456,9 @@ def test_diagnose_search_looks_up_once_and_detaches_once_per_output() -> None:
     source_copies = [0]
     document_copies = [0]
     state = _IndexState({})
+    chunker = _CountingChunker()
     collection = _CountingCollection(
-        chunker=_OneChunker(), index_factory=lambda: _DiagnosticIndex(state)
+        chunker=chunker, index_factory=lambda: _DiagnosticIndex(state)
     )
     document = Document(
         source_id="docs",
@@ -417,14 +484,16 @@ def test_diagnose_search_looks_up_once_and_detaches_once_per_output() -> None:
     source_copies[0] = 0
     document_copies[0] = 0
     collection.lookup_calls = 0
+    chunker.calls = 0
 
     diagnostics = collection.diagnose_search("alpha")
 
     assert len(diagnostics.results) == 1
     assert len(diagnostics.candidates) == 2
     assert collection.lookup_calls == 1
+    assert chunker.calls == 2
     assert source_copies[0] == 3
-    assert document_copies[0] == 3
+    assert document_copies[0] == 5  # two derivations plus three detached outputs
 
 
 def test_diagnose_search_accepts_hybrid_terms_and_repeated_reranker_blocks() -> None:
