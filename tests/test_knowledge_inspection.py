@@ -167,6 +167,73 @@ def test_inspect_document_returns_exact_offsets_previews_and_detached_metadata()
     assert again.document.metadata == {"tag": "canonical"}
 
 
+def test_inspect_document_normalizes_accepted_canonical_subclasses() -> None:
+    class _SourceSubclass(KnowledgeSource):
+        pass
+
+    class _DocumentSubclass(Document):
+        pass
+
+    class _SubclassAdapter(_Adapter):
+        def source(self) -> KnowledgeSource:
+            return _SourceSubclass(
+                source_id=self.source_id,
+                source_type="test",
+                display_name="Subclass source",
+                logical_location="memory://docs",
+                metadata={"nested": {"owner": "canonical"}},
+            )
+
+    document = _DocumentSubclass(
+        source_id="docs",
+        logical_path="subclass.txt",
+        content="abcdefghijklmnopqrst",
+        content_type="text/custom",
+        metadata={"nested": {"tag": "canonical"}},
+    )
+    chunker = _FixedChunker()
+    collection = KnowledgeCollection(chunker=chunker)
+    collection.sync(_SubclassAdapter("docs", (document,)))
+
+    inspection = collection.inspect_document(document.document_id)
+
+    assert type(inspection.source) is KnowledgeSource
+    assert type(inspection.document) is Document
+    assert (
+        inspection.source.source_id,
+        inspection.source.display_name,
+        inspection.source.logical_location,
+        inspection.source.metadata,
+    ) == (
+        "docs",
+        "Subclass source",
+        "memory://docs",
+        {"nested": {"owner": "canonical"}},
+    )
+    assert (
+        inspection.document.source_id,
+        inspection.document.logical_path,
+        inspection.document.content,
+        inspection.document.content_type,
+        inspection.document.metadata,
+        inspection.document.document_id,
+        inspection.document.content_hash,
+    ) == (
+        document.source_id,
+        document.logical_path,
+        document.content,
+        document.content_type,
+        document.metadata,
+        document.document_id,
+        document.content_hash,
+    )
+    inspection.source.metadata["nested"]["owner"] = "external"
+    inspection.document.metadata["nested"]["tag"] = "external"
+    again = collection.inspect_document(document.document_id)
+    assert again.source.metadata == {"nested": {"owner": "canonical"}}
+    assert again.document.metadata == {"nested": {"tag": "canonical"}}
+
+
 def test_inspect_documents_is_stable_handles_empty_documents_and_calls_once_each() -> None:
     chunker = _FixedChunker()
     documents = (

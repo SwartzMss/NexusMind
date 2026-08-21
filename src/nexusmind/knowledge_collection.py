@@ -355,7 +355,7 @@ class KnowledgeCollection:
         except Exception as exc:
             raise KnowledgeSearchResolutionError("index diagnose failed") from exc
         hits, rows = self._validate_diagnostic_trace(trace)
-        results = tuple(self._resolve_hit(hit) for hit in hits)
+        results = tuple(self._resolve_diagnostic_hit(hit) for hit in hits)
         candidates = tuple(self._resolve_diagnostic_candidate(row) for row in rows)
         return KnowledgeRetrievalDiagnostics(query, results, candidates)
 
@@ -393,10 +393,21 @@ class KnowledgeCollection:
             source=deepcopy(source), document=deepcopy(document), hit=hit
         )
 
+    def _resolve_diagnostic_hit(self, hit: object) -> KnowledgeSearchResult:
+        resolved = self._resolve_hit(hit)
+        try:
+            source = self._detached_exact_source(resolved.source)
+            document = self._detached_exact_document(resolved.document)
+        except Exception as exc:
+            raise KnowledgeSearchResolutionError(
+                "diagnostic provenance is invalid"
+            ) from exc
+        return KnowledgeSearchResult(source, document, resolved.hit)
+
     def _resolve_diagnostic_candidate(
         self, row: RetrievalCandidateDiagnostic
     ) -> KnowledgeRetrievalCandidateDiagnostic:
-        resolved = self._resolve_hit(
+        resolved = self._resolve_diagnostic_hit(
             SearchHit(row.chunk, row.score, row.matched_terms)
         )
         return KnowledgeRetrievalCandidateDiagnostic(
@@ -591,9 +602,42 @@ class KnowledgeCollection:
         except Exception as exc:
             raise KnowledgeInspectionError("inspection chunker failed") from exc
         validated = self._validated_inspection_chunks(document, chunks, preview_chars)
-        return KnowledgeDocumentInspection(
-            deepcopy(source), deepcopy(document), validated
+        try:
+            detached_source = self._detached_exact_source(source)
+            detached_document = self._detached_exact_document(document)
+            return KnowledgeDocumentInspection(
+                detached_source, detached_document, validated
+            )
+        except Exception as exc:
+            raise KnowledgeInspectionError(
+                "inspection canonical provenance is invalid"
+            ) from exc
+
+    @staticmethod
+    def _detached_exact_source(source: KnowledgeSource) -> KnowledgeSource:
+        return KnowledgeSource(
+            source_id=source.source_id,
+            source_type=source.source_type,
+            display_name=source.display_name,
+            logical_location=source.logical_location,
+            metadata=deepcopy(source.metadata),
         )
+
+    @staticmethod
+    def _detached_exact_document(document: Document) -> Document:
+        detached = Document(
+            source_id=document.source_id,
+            logical_path=document.logical_path,
+            content=document.content,
+            content_type=document.content_type,
+            metadata=deepcopy(document.metadata),
+        )
+        if (
+            detached.document_id != document.document_id
+            or detached.content_hash != document.content_hash
+        ):
+            raise ValueError("canonical document identity is incoherent")
+        return detached
 
     @staticmethod
     def _validated_inspection_chunks(

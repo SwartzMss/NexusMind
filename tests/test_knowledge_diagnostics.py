@@ -248,6 +248,62 @@ def test_diagnose_search_calls_backend_once_and_resolves_all_provenance() -> Non
     assert again.candidates[0].document.metadata == {"tag": "canonical"}
 
 
+def test_diagnose_search_normalizes_subclasses_without_changing_ordinary_search() -> None:
+    class _SourceSubclass(KnowledgeSource):
+        pass
+
+    class _DocumentSubclass(Document):
+        pass
+
+    class _SubclassAdapter(_Adapter):
+        def source(self) -> KnowledgeSource:
+            return _SourceSubclass(
+                source_id=self.source_id,
+                source_type="test",
+                display_name="Subclass source",
+                logical_location="memory://docs",
+                metadata={"nested": {"owner": "canonical"}},
+            )
+
+    state = _IndexState({})
+    collection = KnowledgeCollection(
+        chunker=_OneChunker(), index_factory=lambda: _DiagnosticIndex(state)
+    )
+    document = _DocumentSubclass(
+        source_id="docs",
+        logical_path="subclass.txt",
+        content="alpha",
+        content_type="text/custom",
+        metadata={"nested": {"tag": "canonical"}},
+    )
+    collection.sync(_SubclassAdapter("docs", (document,)))
+    chunk = state.chunks[f"chunk:{document.document_id}"]
+    hit = SearchHit(chunk, 1.0, ("alpha",))
+    state.trace = RetrievalDiagnostics(
+        (hit,), (_row(chunk, terms=("alpha",)),)
+    )
+
+    ordinary = collection.search("alpha")
+    diagnostics = collection.diagnose_search("alpha")
+
+    assert type(ordinary[0].source) is _SourceSubclass
+    assert type(ordinary[0].document) is _DocumentSubclass
+    assert type(diagnostics.results[0].source) is KnowledgeSource
+    assert type(diagnostics.results[0].document) is Document
+    assert type(diagnostics.candidates[0].source) is KnowledgeSource
+    assert type(diagnostics.candidates[0].document) is Document
+    assert diagnostics.results[0].document.document_id == document.document_id
+    assert diagnostics.results[0].document.content_hash == document.content_hash
+    assert diagnostics.results[0].document.content_type == "text/custom"
+    assert diagnostics.results[0].document.metadata == {
+        "nested": {"tag": "canonical"}
+    }
+    assert diagnostics.results[0].source.logical_location == "memory://docs"
+    assert diagnostics.results[0].source.metadata == {
+        "nested": {"owner": "canonical"}
+    }
+
+
 def test_diagnose_search_accepts_hybrid_terms_and_repeated_reranker_blocks() -> None:
     collection, state, one, two = _setup()
     first = state.chunks[f"chunk:{one.document_id}"]
