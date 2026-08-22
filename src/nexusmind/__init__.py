@@ -16,6 +16,7 @@ from .knowledge import (
     compute_content_hash,
 )
 from .context_assembly import (
+    ContextAssemblyLimitError,
     ContextPackage,
     ContextPassage,
     assemble_context,
@@ -157,6 +158,7 @@ from .knowledge_ingestion import (
 )
 
 __all__ = [
+    "ContextAssemblyLimitError",
     "ContextPackage",
     "ContextPassage",
     "Chunk",

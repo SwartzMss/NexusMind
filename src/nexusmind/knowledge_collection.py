@@ -309,6 +309,7 @@ class KnowledgeCollection:
             query,
             results,
             max_passages=limit,
+            max_candidates=limit,
             max_chars=max_chars,
             max_tokens=max_tokens,
         )

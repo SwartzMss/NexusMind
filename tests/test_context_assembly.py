@@ -6,12 +6,14 @@ import pytest
 
 from nexusmind import (
     Chunk,
+    ContextAssemblyLimitError,
     ContextPackage,
     Document,
     KnowledgeCollection,
     KnowledgeSource,
     SearchHit,
     assemble_context,
+    estimate_token_count,
 )
 
 
@@ -112,7 +114,7 @@ def test_context_detaches_provenance_from_collection_state() -> None:
     assert second.passages[0].document.metadata == {"tag": "original"}
 
 
-def test_assembly_removes_duplicates_and_overlaps_first_wins() -> None:
+def test_assembly_removes_duplicates_and_preserves_non_overlapping_content() -> None:
     document = Document("docs", "a.txt", "abcdefghij")
     results = (
         _result(document, chunk_id="best", start=0, end=6, score=3.0),
@@ -123,9 +125,48 @@ def test_assembly_removes_duplicates_and_overlaps_first_wins() -> None:
 
     context = assemble_context("term", results, max_passages=4)
 
-    assert [passage.chunk_id for passage in context.passages] == ["best", "separate"]
+    assert [(passage.chunk_id, passage.content) for passage in context.passages] == [
+        ("best", "abcdef"),
+        ("overlap", "ghi"),
+        ("separate", "j"),
+    ]
     assert context.metadata["duplicates_removed"] == 1
-    assert context.metadata["overlaps_removed"] == 1
+    assert context.metadata["overlap_characters_removed"] == 4
+
+
+def test_default_chunk_overlap_keeps_the_new_suffix() -> None:
+    document = Document("docs", "a.txt", "x" * 1900)
+    results = (
+        _result(document, chunk_id="first", start=0, end=1000, score=2.0),
+        _result(document, chunk_id="second", start=900, end=1900, score=1.0),
+    )
+
+    context = assemble_context("term", results, max_passages=2, max_chars=1900)
+
+    assert [(p.start_offset, p.end_offset) for p in context.passages] == [
+        (0, 1000),
+        (1000, 1900),
+    ]
+    assert context.metadata["character_count"] == 1900
+
+
+def test_token_estimator_counts_each_cjk_character_conservatively() -> None:
+    assert estimate_token_count("knowledge retrieval") == 2
+    assert estimate_token_count("知识库安全检索") == 7
+    assert estimate_token_count("知识库, retrieval!") == 6
+
+
+def test_assembly_rejects_unbounded_or_excess_candidate_inputs() -> None:
+    def forever():
+        while True:
+            yield object()
+
+    with pytest.raises(TypeError, match="tuple"):
+        assemble_context("term", forever(), max_passages=1)  # type: ignore[arg-type]
+    with pytest.raises(ContextAssemblyLimitError, match="candidates"):
+        assemble_context(
+            "term", (object(), object()), max_passages=1, max_candidates=1
+        )
 
 
 def test_assembly_applies_character_and_token_limits_without_truncating_provenance() -> None:
@@ -144,7 +185,9 @@ def test_assembly_applies_character_and_token_limits_without_truncating_provenan
     assert by_tokens.metadata["estimated_token_count"] == 2
 
 
-@pytest.mark.parametrize("name", ["max_passages", "max_chars", "max_tokens"])
+@pytest.mark.parametrize(
+    "name", ["max_passages", "max_candidates", "max_chars", "max_tokens"]
+)
 def test_assembly_limits_require_positive_plain_integers(name: str) -> None:
     kwargs = {"max_passages": 1, name: True}
     with pytest.raises(TypeError):
