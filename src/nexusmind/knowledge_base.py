@@ -14,6 +14,14 @@ from typing import Callable
 from uuid import uuid4
 
 from .knowledge import Document, KnowledgeSource, KnowledgeSourceType
+from .knowledge_answer import (
+    AnswerGenerationLimitError,
+    AnswerGenerationLimits,
+    AnswerGenerator,
+    AnswerGeneratorError,
+    KnowledgeAnswer,
+    generate_knowledge_answer,
+)
 from .knowledge_base_manifest import (
     KnowledgeBaseClosedError,
     KnowledgeBaseConfigError,
@@ -173,12 +181,14 @@ class KnowledgeBase:
         collection: KnowledgeCollection,
         index_factory: Callable[[], CloneableChunkIndex],
         limits: KnowledgeBaseLimits,
+        answer_generator: AnswerGenerator | None = None,
     ) -> None:
         self._root = root
         self._manifest = manifest
         self._collection = collection
         self._index_factory = index_factory
         self._limits = limits
+        self._answer_generator = answer_generator
         self._closed = False
         self._mutation_mutex = RLock()
 
@@ -191,6 +201,7 @@ class KnowledgeBase:
         display_name: str | None = None,
         index_factory: Callable[[], CloneableChunkIndex] | None = None,
         limits: KnowledgeBaseLimits | None = None,
+        answer_generator: AnswerGenerator | None = None,
     ) -> "KnowledgeBase":
         active_limits = _limits(limits)
         root = _root(path)
@@ -253,6 +264,7 @@ class KnowledgeBase:
             collection=collection,
             index_factory=factory,
             limits=active_limits,
+            answer_generator=answer_generator,
         )
 
     @classmethod
@@ -262,6 +274,7 @@ class KnowledgeBase:
         *,
         index_factory: Callable[[], CloneableChunkIndex] | None = None,
         limits: KnowledgeBaseLimits | None = None,
+        answer_generator: AnswerGenerator | None = None,
     ) -> "KnowledgeBase":
         active_limits = _limits(limits)
         root = _root(path)
@@ -319,6 +332,7 @@ class KnowledgeBase:
             collection=collection,
             index_factory=factory,
             limits=active_limits,
+            answer_generator=answer_generator,
         )
 
     @staticmethod
@@ -724,6 +738,53 @@ class KnowledgeBase:
             return self._collection.search(query, limit=limit)
         except Exception as exc:
             raise KnowledgeBaseSourceError("unable to search knowledge base") from exc
+
+    def answer(
+        self,
+        question: str,
+        *,
+        generator: AnswerGenerator | None = None,
+        retrieval_limit: int = 8,
+        limits: AnswerGenerationLimits | None = None,
+    ) -> KnowledgeAnswer:
+        """Retrieve, assemble, and generate one bounded answer without a tool loop."""
+
+        self._require_open()
+        if type(question) is not str:
+            raise TypeError("question must be a string")
+        if not question.strip():
+            raise ValueError("question must be a non-empty string")
+        if type(retrieval_limit) is not int:
+            raise TypeError("retrieval_limit must be an integer")
+        if retrieval_limit <= 0:
+            raise ValueError("retrieval_limit must be greater than zero")
+        active_limits = AnswerGenerationLimits() if limits is None else limits
+        if type(active_limits) is not AnswerGenerationLimits:
+            raise TypeError("limits must be AnswerGenerationLimits")
+        if len(question) > active_limits.max_question_chars:
+            raise AnswerGenerationLimitError("question exceeds max_question_chars")
+        active_generator = self._answer_generator if generator is None else generator
+        if active_generator is None:
+            raise AnswerGeneratorError("no answer generator is configured")
+        try:
+            context = self._collection.build_context(
+                question,
+                limit=min(retrieval_limit, active_limits.max_passages),
+                max_chars=active_limits.max_context_chars,
+                max_tokens=active_limits.max_context_tokens,
+            )
+        except Exception:
+            raise KnowledgeBaseSourceError("unable to assemble knowledge context") from None
+        if not context.passages:
+            if context.metadata.get("candidate_count") == 0:
+                raise KnowledgeBaseSourceError("knowledge retrieval returned no evidence")
+            raise AnswerGenerationLimitError("context limits exclude all evidence passages")
+        return generate_knowledge_answer(
+            question,
+            context,
+            active_generator,
+            limits=active_limits,
+        )
 
     def diagnose_search(
         self, query: str, *, limit: int = 10
