@@ -10,7 +10,12 @@ from uuid import uuid4
 
 from nexusmind.commands import CommandConfig, CommandConfigError, RunCommandTool, command_profile_summary, load_command_config
 from nexusmind.config import ConfigError, ModelConfig, load_model_config_from_env
+from nexusmind.knowledge_answer import KnowledgeAnswerError
+from nexusmind.knowledge_base import KnowledgeBase
+from nexusmind.knowledge_base_manifest import KnowledgeBaseError
+from nexusmind.knowledge_query import knowledge_query_result_dict
 from nexusmind.mcp import MCPClientGroup, MCPError, MCPStdioClient, load_mcp_server_config, load_mcp_server_configs, register_mcp_tools
+from nexusmind.models.knowledge_answer import ChatModelAnswerGenerator
 from nexusmind.models.openai_compatible import OpenAICompatibleChatModel
 from nexusmind.runtime.chat import AgentLoopLimits
 from nexusmind.runtime.policy import ApprovalDecision, ApprovalRequest, DefaultToolApprovalSummarizer
@@ -107,6 +112,11 @@ def main(argv: list[str] | None = None) -> int:
     chat_parser.add_argument("--lease-run-id")
     chat_parser.add_argument("--no-terminal-checkpoint", action="store_true")
     chat_parser.add_argument("message", nargs="?")
+    query_parser = subparsers.add_parser("query")
+    query_parser.add_argument("question")
+    query_parser.add_argument("--knowledge-base", default=".")
+    query_parser.add_argument("--debug", action="store_true")
+    query_parser.add_argument("--json", action="store_true")
     tools_parser = subparsers.add_parser("tools")
     tools_subparsers = tools_parser.add_subparsers(dest="tools_command", required=True)
     tools_subparsers.add_parser("list")
@@ -181,6 +191,8 @@ def main(argv: list[str] | None = None) -> int:
                 save_terminal_checkpoint=not args.no_terminal_checkpoint,
             )
         )
+    if args.command == "query":
+        return _query(args)
     if args.command == "tools":
         return asyncio.run(_tools(args))
     if args.command == "runs":
@@ -190,6 +202,62 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "skill":
         return asyncio.run(_skill(args))
     return 2
+
+
+def _query(args: argparse.Namespace) -> int:
+    try:
+        model_config = load_model_config_from_env()
+        model = OpenAICompatibleChatModel(model_config)
+        generator = ChatModelAnswerGenerator(
+            model,
+            config_identity=f"openai-compatible/{model_config.model}",
+        )
+        knowledge = KnowledgeBase.open(
+            args.knowledge_base,
+            answer_generator=generator,
+        )
+        try:
+            result = knowledge.query(args.question)
+        finally:
+            knowledge.close()
+    except ConfigError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        return 2
+    except (KnowledgeBaseError, KnowledgeAnswerError, TypeError, ValueError):
+        print("Knowledge query failed.", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(
+            json.dumps(
+                knowledge_query_result_dict(result, include_debug=args.debug),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    print("Answer:")
+    print(result.answer.text)
+    print("\nSources:")
+    for citation in result.citations:
+        print(f"[{citation.citation_id.removeprefix('K')}] {citation.logical_path}")
+    if args.debug:
+        trace = result.trace
+        print("\nRetrieval:")
+        print(f"  backend: {trace.retrieval_backend}")
+        print("\nTop passages:")
+        for index, passage in enumerate(trace.passages, start=1):
+            print(f"  {index}. {passage.logical_path} {passage.chunk_id}")
+        print("\nContext:")
+        print(f"  {trace.context_character_count} chars")
+        print("\nCitation:")
+        print(f"  {len(result.citations)}")
+        print("\nTrace:")
+        print(f"  {result.trace_id}")
+    return 0
 
 
 async def _chat(

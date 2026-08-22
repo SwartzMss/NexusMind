@@ -208,6 +208,12 @@ class KnowledgeCollection:
         self._sources: dict[str, KnowledgeSource] = {}
         self._documents: dict[str, dict[str, Document]] = {}
 
+    @property
+    def retrieval_backend_name(self) -> str:
+        """Return the active process-local retrieval backend type for diagnostics."""
+
+        return type(self._index).__name__
+
     def sync(self, adapter: KnowledgeSourceAdapter) -> KnowledgeSyncResult:
         if not callable(getattr(adapter, "source", None)) or not callable(
             getattr(adapter, "load_documents", None)

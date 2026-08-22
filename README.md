@@ -71,6 +71,27 @@ NexusMind 按 `ContextPackage.passages` 的稳定顺序分配 handles，确定�
 
 `AnswerGenerationLimits` 显式限制 question、rendered context、passages、answer 和 citations 的字符/token/数量。retrieval、context assembly、provider 或 citation validation 任一失败都不会返回部分可信答案；provider 异常会映射为不含密钥、私有文档或原始请求/响应的受控错误。生成答案和 replay record 只是 derived runtime output，不写入 `KnowledgeSnapshot`、manifest 或 SQLite，也不产生聊天历史、工具循环、自动规划或隐藏搜索。现有 provider-neutral `ChatModel` 可由具体 `AnswerGenerator` adapter 复用，但知识问答 API 不依赖 coding-agent runtime。
 
+### 统一 Knowledge Query API 与 CLI
+
+`KnowledgeBase.query()` 是稳定的一次性入口，仅编排已有 retrieval、context assembly、answer generation 和 citation validation。它返回 frozen `KnowledgeQueryResult`，其中 `answer` 与 `citations` 已完成 provenance 校验，`trace_id` 标识本次运行，bounded `trace` 提供 retrieval backend、top passages 和 context size；原有 `answer()` 保持兼容并委托同一条 query pipeline。
+
+```python
+from nexusmind import KnowledgeBase
+
+knowledge = KnowledgeBase.open("./security-kb", answer_generator=generator)
+result = knowledge.query("Binder caller UID 是如何获取的?")
+print(result.answer.text)
+print(result.citations)
+```
+
+CLI 默认把当前目录作为 KnowledgeBase，也可显式传入 `--knowledge-base`。模型配置继续使用 `NEXUSMIND_MODEL_BASE_URL`、`NEXUSMIND_MODEL_API_KEY` 和 `NEXUSMIND_MODEL_NAME`；CLI adapter 要求模型返回严格的 answer/citation-handle JSON，最终 citation 仍由既有 allowlist 验证。
+
+```console
+nexusmind query "Binder caller UID 是如何获取的?" --knowledge-base ./security-kb
+nexusmind query "Binder caller UID 是如何获取的?" --knowledge-base ./security-kb --debug
+nexusmind query "Binder caller UID 是如何获取的?" --knowledge-base ./security-kb --json
+```
+
 ### KnowledgeBase 检查与检索诊断
 
 `inspect()`、`inspect_document()` 和 `diagnose_search()` 是面向 Python 调用者的只读结构化 API；它们不提供 CLI 或 UI 的展示格式。`inspect()` 返回一个 coherent 的当前 manifest/canonical 状态视图。每个已注册来源的 `sync_status` 为 `"synced"`，仅表示 canonical state 中存在该来源（即使该次成功同步得到零份 document）；否则为 `"registered"`。这不是文件系统 dirty scan，也不说明来源路径此刻是否发生变化。
