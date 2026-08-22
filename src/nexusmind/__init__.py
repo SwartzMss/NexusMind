@@ -15,6 +15,22 @@ from .knowledge import (
     KnowledgeSourceType,
     compute_content_hash,
 )
+from .knowledge_answer import (
+    AnswerGenerationLimitError,
+    AnswerGenerationLimits,
+    AnswerGenerator,
+    AnswerGeneratorError,
+    CitationValidationError,
+    ContextConfigurationRecord,
+    GeneratedAnswer,
+    KnowledgeAnswer,
+    KnowledgeAnswerError,
+    KnowledgeCitation,
+    ModelContextPassage,
+    ModelContextRecord,
+    generate_knowledge_answer,
+    render_model_context,
+)
 from .context_assembly import (
     ContextAssemblyLimitError,
     ContextPackage,
@@ -158,9 +174,15 @@ from .knowledge_ingestion import (
 )
 
 __all__ = [
+    "AnswerGenerationLimitError",
+    "AnswerGenerationLimits",
+    "AnswerGenerator",
+    "AnswerGeneratorError",
     "ContextAssemblyLimitError",
     "ContextPackage",
     "ContextPassage",
+    "CitationValidationError",
+    "ContextConfigurationRecord",
     "Chunk",
     "ChunkLimitError",
     "CloneableChunkIndex",
@@ -178,6 +200,7 @@ __all__ = [
     "EmbeddingProviderError",
     "EmbeddingValidationError",
     "EmbeddingVector",
+    "GeneratedAnswer",
     "OpenAICompatibleEmbeddingProvider",
     "InMemoryChunkIndex",
     "HybridBackendCoherenceError",
@@ -199,6 +222,9 @@ __all__ = [
     "KnowledgeBasePersistenceError",
     "KnowledgeBaseSourceError",
     "KnowledgeBaseStatus",
+    "KnowledgeAnswer",
+    "KnowledgeAnswerError",
+    "KnowledgeCitation",
     "KnowledgeCollectionError",
     "KnowledgeCollectionLimitError",
     "KnowledgeCollectionLimits",
@@ -265,6 +291,8 @@ __all__ = [
     "RetrievalTarget",
     "MAX_EVALUATION_K",
     "MAX_EVALUATION_K_VALUES",
+    "ModelContextPassage",
+    "ModelContextRecord",
     "SourceNotFoundError",
     "SourceTypeError",
     "SearchHit",
@@ -284,10 +312,12 @@ __all__ = [
     "UnsupportedFileTypeError",
     "WhitespaceLexicalAnalyzer",
     "evaluate_retrieval",
+    "generate_knowledge_answer",
     "evaluate_retrieval_multi_k",
     "classify_retrieval_failure",
     "compare_retrieval_backends",
     "load_retrieval_evaluation_cases",
+    "render_model_context",
     "__version__",
 ]
 

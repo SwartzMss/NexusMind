@@ -59,7 +59,15 @@ Chunk、embedding、lexical/semantic/hybrid index 和 reranker 状态都不持�
 
 `create()` 只接受不存在或已存在但为空的真实目录，并以 no-clobber 方式创建完整布局；manifest 更新使用同目录临时文件和原子替换。`open()` 严格要求三个 artifact 存在、类型和身份有效，不会将缺失状态补成空库。同一实例的 mutation 由进程内锁串行化；不同 handle/process 通过 `.knowledge-base.lock` 的 no-wait OS advisory lock 协调。进程崩溃会由 OS 释放锁，文件中的旧内容无害。协作进程不得删除、替换或链接该文件；缺失、symlink/reparse point 或 identity 替换都会 fail closed，运行时也不会 unlink 它。
 
-`status()` 只返回 ID、display name、注册数、canonical source 数和 document 数，不扫描文件系统 dirty state，也不虚构 last-sync 状态。`list_sources()` 按 `source_id` 返回 frozen config；`list_documents()` 返回与内部状态脱离的 canonical documents；`search()` 保留 retrieval backend 顺序和 canonical provenance。当前没有 KnowledgeBase CLI、watcher、后台同步、自动持久化 index 或 RAG 编排。
+`status()` 只返回 ID、display name、注册数、canonical source 数和 document 数，不扫描文件系统 dirty state，也不虚构 last-sync 状态。`list_sources()` 按 `source_id` 返回 frozen config；`list_documents()` 返回与内部状态脱离的 canonical documents；`search()` 保留 retrieval backend 顺序和 canonical provenance。当前没有 KnowledgeBase CLI、watcher、后台同步或自动持久化 index。
+
+### 一次性知识问答与引用
+
+`KnowledgeBase.answer()` 提供一次性 question → retrieval → `ContextPackage` → `AnswerGenerator` → `KnowledgeAnswer` 组合。`AnswerGenerator` 是知识域 capability seam：它不执行检索，也不进入 Agent Tool Loop；可以在 `KnowledgeBase.create()` / `open()` 时作为纯运行时配置注入，或在单次 `answer(..., generator=...)` 调用中覆盖。生成器只返回未信任的答案文本和 `K1`、`K2` 等 citation handles，不能直接创建可信 provenance。
+
+NexusMind 按 `ContextPackage.passages` 的稳定顺序分配 handles，确定性渲染 model-visible knowledge context，并在 `ModelContextRecord` 中记录 question、passage identities、canonical document content hashes、offsets、原文、limits 和 generator config identity。最终 `KnowledgeCitation` 只能由这份 allowlist 构造；未知、重复、格式错误或未提供给模型的 handle 都会 fail closed。`KnowledgeAnswer` 同时返回答案、验证后的 citations 和可检查/重放的 model-context record。
+
+`AnswerGenerationLimits` 显式限制 question、rendered context、passages、answer 和 citations 的字符/token/数量。retrieval、context assembly、provider 或 citation validation 任一失败都不会返回部分可信答案；provider 异常会映射为不含密钥、私有文档或原始请求/响应的受控错误。生成答案和 replay record 只是 derived runtime output，不写入 `KnowledgeSnapshot`、manifest 或 SQLite，也不产生聊天历史、工具循环、自动规划或隐藏搜索。现有 provider-neutral `ChatModel` 可由具体 `AnswerGenerator` adapter 复用，但知识问答 API 不依赖 coding-agent runtime。
 
 ### KnowledgeBase 检查与检索诊断
 
@@ -262,7 +270,7 @@ CJK analyzer 对比评估的语料、labels、固定配置、复现命令和当�
 
 `ChunkIndex.search()` 返回 retrieval-layer `SearchHit`，只描述匹配 Chunk、分数和命中词。`KnowledgeCollection.search()` 会按 backend 原始顺序把每个 hit 的 `document_id` 解析到当前已提交的 canonical `Document` 和所属 `KnowledgeSource`，并验证 Chunk offsets 合法且内容等于 canonical Document 的对应字符切片，然后返回 `KnowledgeSearchResult(source, document, hit)`；Source 和 Document 是深拷贝，调用方修改嵌套 metadata 不会影响 collection 状态。无法解析的 ghost/malformed/stale hit 会以受控的 `KnowledgeSearchResolutionError` fail closed，不会伪造 provenance 或返回部分结果。
 
-collection 和 index 仍只存在于当前进程；canonical source/document snapshot 可由显式 store 保存并在重启后加载，但 derived Chunk/Index（包括语义 vectors、hybrid fusion 与 reranking composition）会重新构建。当前没有向量数据库、持久化 retrieval index 或 RAG/LLM 答案生成。
+collection 和 index 仍只存在于当前进程；canonical source/document snapshot 可由显式 store 保存并在重启后加载，但 derived Chunk/Index（包括语义 vectors、hybrid fusion 与 reranking composition）会重新构建。当前没有向量数据库或持久化 retrieval index；一次性答案生成同样是非持久化 derived runtime state。
 
 `KnowledgeCollection.snapshot()` 可按稳定 identity 顺序导出 frozen container 形式的 `KnowledgeSnapshot`，其中包含与 collection 内部状态脱离的 canonical `KnowledgeSource` / `Document` 副本；嵌套 metadata 仍是普通可变 mapping，因此它不是递归 deep-immutable 对象。`restore()` 把 snapshot 视为完整 authoritative replacement，先验证 source/document 图和 collection limits，再使用当前 chunker 与 `index_factory` 创建的全新空 index 重建所有 derived `Chunk` / retrieval state，全部成功后才原子交换 collection 状态。Snapshot 不包含 Chunk、Index 或 SearchHit；使用不同 chunker 或 retrieval backend 恢复同一 canonical snapshot 时，可以得到不同的 derived state。
 
@@ -322,7 +330,7 @@ future                                       -> Persistent Chunk / Index
                                              -> RAG
 ```
 
-第二阶段 reranking 仍停留在 retrieval backend 内，不改变 collection provenance 层。当前不包含 citation 编号/格式化、token-based / semantic chunking、持久化 Index、query rewriting、答案生成或 RAG 编排等能力。
+第二阶段 reranking 仍停留在 retrieval backend 内，不改变 collection provenance 层。一次性知识问答在 context assembly 之后分配 citation handles 并验证 provenance；当前仍不包含 token-based / semantic chunking、持久化 Index、query rewriting、多轮对话或 Agent 式 RAG 编排。
 
 执行关系可以概括为：
 
