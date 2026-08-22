@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from math import isfinite
 from typing import Callable, Protocol
 
+from .context_assembly import ContextPackage, assemble_context
+
 from .knowledge import (
     Document,
     KnowledgeSource,
@@ -291,6 +293,26 @@ class KnowledgeCollection:
         if type(hits) is not tuple:
             raise KnowledgeSearchResolutionError("index search result must be a tuple")
         return tuple(self._resolve_hit(hit) for hit in hits)
+
+    def build_context(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        max_chars: int | None = None,
+        max_tokens: int | None = None,
+    ) -> ContextPackage:
+        """Retrieve and assemble a bounded, provenance-preserving context."""
+
+        results = self.search(query, limit=limit)
+        return assemble_context(
+            query,
+            results,
+            max_passages=limit,
+            max_candidates=limit,
+            max_chars=max_chars,
+            max_tokens=max_tokens,
+        )
 
     def inspect_document(
         self, document_id: str, *, preview_chars: int = 160

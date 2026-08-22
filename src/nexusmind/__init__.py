@@ -15,6 +15,13 @@ from .knowledge import (
     KnowledgeSourceType,
     compute_content_hash,
 )
+from .context_assembly import (
+    ContextAssemblyLimitError,
+    ContextPackage,
+    ContextPassage,
+    assemble_context,
+    estimate_token_count,
+)
 from .knowledge_base_manifest import (
     KnowledgeBaseClosedError,
     KnowledgeBaseConfigError,
@@ -151,6 +158,9 @@ from .knowledge_ingestion import (
 )
 
 __all__ = [
+    "ContextAssemblyLimitError",
+    "ContextPackage",
+    "ContextPassage",
     "Chunk",
     "ChunkLimitError",
     "CloneableChunkIndex",
@@ -210,6 +220,8 @@ __all__ = [
     "KnowledgeSnapshotStoreError",
     "KnowledgeSyncResult",
     "compute_content_hash",
+    "assemble_context",
+    "estimate_token_count",
     "DEFAULT_MAX_DIRECTORY_DEPTH",
     "DEFAULT_MAX_DOCUMENTS",
     "DEFAULT_MAX_ENTRIES_SCANNED",
