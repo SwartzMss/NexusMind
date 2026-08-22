@@ -243,7 +243,7 @@ def _query(args: argparse.Namespace) -> int:
     print(result.answer.text)
     print("\nSources:")
     for citation in result.citations:
-        print(f"[{citation.citation_id.removeprefix('K')}] {citation.logical_path}")
+        print(f"[{citation.citation_id}] {citation.logical_path}")
     if args.debug:
         trace = result.trace
         print("\nRetrieval:")

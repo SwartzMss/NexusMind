@@ -64,7 +64,7 @@ def test_query_cli_outputs_answer_sources_and_debug_trace(monkeypatch, capsys) -
 
     captured = capsys.readouterr()
     assert "Answer:\nKernel credentials [K1]" in captured.out
-    assert "[1] binder.md" in captured.out
+    assert "[K1] binder.md" in captured.out
     assert "backend: HybridChunkIndex" in captured.out
     assert "3200 chars" in captured.out
     assert "trace-1" in captured.out

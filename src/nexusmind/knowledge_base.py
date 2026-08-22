@@ -793,7 +793,8 @@ class KnowledgeBase:
         try:
             context = self._collection.build_context(
                 question,
-                limit=min(active_options.retrieval_limit, active_limits.max_passages),
+                retrieval_limit=active_options.retrieval_limit,
+                max_passages=active_limits.max_passages,
                 max_chars=active_limits.max_context_chars,
                 max_tokens=active_limits.max_context_tokens,
             )
