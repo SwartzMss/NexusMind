@@ -67,6 +67,8 @@ Chunk、embedding、lexical/semantic/hybrid index 和 reranker 状态都不持�
 
 NexusMind 按 `ContextPackage.passages` 的稳定顺序分配 handles，确定性渲染 model-visible knowledge context，并在 `ModelContextRecord` 中记录 question、passage identities、canonical document content hashes、offsets、原文、limits 和 generator config identity。最终 `KnowledgeCitation` 只能由这份 allowlist 构造；未知、重复、格式错误或未提供给模型的 handle 都会 fail closed。`KnowledgeAnswer` 同时返回答案、验证后的 citations 和可检查/重放的 model-context record。
 
+`ContextPassage` 是紧凑的 immutable provenance reference：只保留 source/document/chunk IDs、logical path、canonical document hash、原 chunk 与选中区间、选中文本、score 和 matched terms。Assembly 在构造它之前仍以 canonical `Document` 验证 chunk 内容和 offsets，但不会把完整 `KnowledgeSource`、`Document` 或 `Chunk` 对象复制进每个 passage；因此多个 passage 来自同一大文档时，内存只随实际选中的 bounded content 增长。
+
 `AnswerGenerationLimits` 显式限制 question、rendered context、passages、answer 和 citations 的字符/token/数量。retrieval、context assembly、provider 或 citation validation 任一失败都不会返回部分可信答案；provider 异常会映射为不含密钥、私有文档或原始请求/响应的受控错误。生成答案和 replay record 只是 derived runtime output，不写入 `KnowledgeSnapshot`、manifest 或 SQLite，也不产生聊天历史、工具循环、自动规划或隐藏搜索。现有 provider-neutral `ChatModel` 可由具体 `AnswerGenerator` adapter 复用，但知识问答 API 不依赖 coding-agent runtime。
 
 ### KnowledgeBase 检查与检索诊断

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
+from math import isfinite
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -20,77 +21,62 @@ class ContextAssemblyLimitError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class ContextPassage:
-    """One selected retrieval passage with its complete knowledge lineage."""
+    """One compact canonical provenance reference plus selected content."""
 
-    source: KnowledgeSource
-    document: Document
-    chunk: Chunk
+    source_id: str
+    document_id: str
+    logical_path: str
+    document_content_hash: str
+    chunk_id: str
+    chunk_start_offset: int
+    chunk_end_offset: int
+    start_offset: int
+    end_offset: int
+    content: str
     score: float
     matched_terms: tuple[str, ...] = ()
-    start_offset: int | None = None
-    end_offset: int | None = None
 
     def __post_init__(self) -> None:
-        if type(self.source) is not KnowledgeSource:
-            raise TypeError("source must be a KnowledgeSource")
-        if type(self.document) is not Document:
-            raise TypeError("document must be a Document")
-        if type(self.chunk) is not Chunk:
-            raise TypeError("chunk must be a Chunk")
+        for name in (
+            "source_id",
+            "document_id",
+            "logical_path",
+            "document_content_hash",
+            "chunk_id",
+        ):
+            value = getattr(self, name)
+            if type(value) is not str or not value.strip():
+                raise ValueError(f"{name} must be a non-empty string")
+        if re.fullmatch(r"[0-9a-f]{64}", self.document_content_hash) is None:
+            raise ValueError("document_content_hash must be a lowercase SHA-256 digest")
+        for name in (
+            "chunk_start_offset",
+            "chunk_end_offset",
+            "start_offset",
+            "end_offset",
+        ):
+            if type(getattr(self, name)) is not int:
+                raise TypeError(f"{name} must be an integer")
+        if not (
+            0
+            <= self.chunk_start_offset
+            <= self.start_offset
+            < self.end_offset
+            <= self.chunk_end_offset
+        ):
+            raise ValueError("passage offsets must be contained by the original chunk")
+        if type(self.content) is not str:
+            raise TypeError("content must be a string")
+        if len(self.content) != self.end_offset - self.start_offset:
+            raise ValueError("content length must match passage offsets")
         if type(self.score) is not float:
             raise TypeError("score must be a float")
+        if not isfinite(self.score):
+            raise ValueError("score must be finite")
         if type(self.matched_terms) is not tuple or any(
             type(term) is not str for term in self.matched_terms
         ):
             raise TypeError("matched_terms must be a tuple of strings")
-        if self.document.source_id != self.source.source_id:
-            raise ValueError("document must belong to source")
-        if self.chunk.document_id != self.document.document_id:
-            raise ValueError("chunk must belong to document")
-        start_offset = (
-            self.chunk.start_offset if self.start_offset is None else self.start_offset
-        )
-        end_offset = self.chunk.end_offset if self.end_offset is None else self.end_offset
-        if type(start_offset) is not int or type(end_offset) is not int:
-            raise TypeError("passage offsets must be integers")
-        if not (
-            self.chunk.start_offset
-            <= start_offset
-            <= end_offset
-            <= self.chunk.end_offset
-        ):
-            raise ValueError("passage offsets must be contained by the original chunk")
-        if not (0 <= start_offset <= end_offset <= len(self.document.content)):
-            raise ValueError("chunk offsets must reference the document content")
-        if (
-            self.document.content[self.chunk.start_offset : self.chunk.end_offset]
-            != self.chunk.content
-        ):
-            raise ValueError("chunk content must match the referenced document slice")
-        object.__setattr__(self, "start_offset", start_offset)
-        object.__setattr__(self, "end_offset", end_offset)
-
-    @property
-    def content(self) -> str:
-        """Return the exact canonical document slice referenced by the chunk."""
-
-        return self.document.content[self.start_offset : self.end_offset]
-
-    @property
-    def source_id(self) -> str:
-        return self.source.source_id
-
-    @property
-    def document_id(self) -> str:
-        return self.document.document_id
-
-    @property
-    def logical_path(self) -> str:
-        return self.document.logical_path
-
-    @property
-    def chunk_id(self) -> str:
-        return self.chunk.chunk_id
 
 @dataclass(frozen=True, slots=True)
 class ContextPackage:
@@ -175,6 +161,7 @@ def assemble_context(
             raise TypeError("results must contain provenance-resolved search results")
         if not isinstance(chunk, Chunk):
             raise TypeError("results must contain search hits with chunks")
+        _validate_result_provenance(source, document, chunk)
 
         identity = (chunk.document_id, chunk.start_offset, chunk.end_offset, chunk.content)
         if identity in identities:
@@ -207,13 +194,18 @@ def assemble_context(
 
             selected.append(
                 ContextPassage(
-                    source=deepcopy(source),
-                    document=deepcopy(document),
-                    chunk=deepcopy(chunk),
-                    score=hit.score,
-                    matched_terms=hit.matched_terms,
+                    source_id=source.source_id,
+                    document_id=document.document_id,
+                    logical_path=document.logical_path,
+                    document_content_hash=document.content_hash,
+                    chunk_id=chunk.chunk_id,
+                    chunk_start_offset=chunk.start_offset,
+                    chunk_end_offset=chunk.end_offset,
                     start_offset=start_offset,
                     end_offset=end_offset,
+                    content=content,
+                    score=hit.score,
+                    matched_terms=hit.matched_terms,
                 )
             )
             intervals.setdefault(chunk.document_id, []).append(
@@ -251,6 +243,21 @@ def _validate_optional_limit(name: str, value: int | None) -> None:
         raise TypeError(f"{name} must be an integer or None")
     if value <= 0:
         raise ValueError(f"{name} must be greater than zero")
+
+
+def _validate_result_provenance(
+    source: KnowledgeSource, document: Document, chunk: Chunk
+) -> None:
+    if document.source_id != source.source_id:
+        raise ValueError("result document must belong to source")
+    if chunk.document_id != document.document_id:
+        raise ValueError("result chunk must belong to document")
+    if type(chunk.start_offset) is not int or type(chunk.end_offset) is not int:
+        raise TypeError("result chunk offsets must be integers")
+    if not (0 <= chunk.start_offset < chunk.end_offset <= len(document.content)):
+        raise ValueError("result chunk offsets must reference canonical content")
+    if document.content[chunk.start_offset : chunk.end_offset] != chunk.content:
+        raise ValueError("result chunk content must match canonical document slice")
 
 
 def _subtract_intervals(
