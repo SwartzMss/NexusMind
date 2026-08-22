@@ -162,7 +162,7 @@ def assemble_context(
     used_tokens = 0
     candidates = 0
     duplicates_removed = 0
-    overlaps_removed = 0
+    overlap_characters_removed = 0
     limited = False
 
     for result in results:
@@ -187,7 +187,9 @@ def assemble_context(
             intervals.get(chunk.document_id, ()),
         )
         if uncovered != ((chunk.start_offset, chunk.end_offset),):
-            overlaps_removed += (chunk.end_offset - chunk.start_offset) - sum(
+            overlap_characters_removed += (
+                chunk.end_offset - chunk.start_offset
+            ) - sum(
                 end - start for start, end in uncovered
             )
         for start_offset, end_offset in uncovered:
@@ -235,7 +237,7 @@ def assemble_context(
             "max_chars": max_chars,
             "max_tokens": max_tokens,
             "duplicates_removed": duplicates_removed,
-            "overlap_characters_removed": overlaps_removed,
+            "overlap_characters_removed": overlap_characters_removed,
             "limited": limited,
             "token_count_method": "provider_neutral_estimate",
         },
