@@ -50,6 +50,12 @@ from .knowledge_base_manifest import (
     LocalFileSourceConfig,
 )
 from .knowledge_base import KnowledgeBase, KnowledgeBaseStatus
+from .knowledge_query import (
+    KnowledgeQueryOptions,
+    KnowledgeQueryResult,
+    KnowledgeQueryTrace,
+    knowledge_query_result_dict,
+)
 from .hybrid_retrieval import (
     HybridBackendCoherenceError,
     HybridChunkIndex,
@@ -225,6 +231,9 @@ __all__ = [
     "KnowledgeAnswer",
     "KnowledgeAnswerError",
     "KnowledgeCitation",
+    "KnowledgeQueryOptions",
+    "KnowledgeQueryResult",
+    "KnowledgeQueryTrace",
     "KnowledgeCollectionError",
     "KnowledgeCollectionLimitError",
     "KnowledgeCollectionLimits",
@@ -318,6 +327,7 @@ __all__ = [
     "compare_retrieval_backends",
     "load_retrieval_evaluation_cases",
     "render_model_context",
+    "knowledge_query_result_dict",
     "__version__",
 ]
 

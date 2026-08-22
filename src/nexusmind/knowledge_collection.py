@@ -208,6 +208,12 @@ class KnowledgeCollection:
         self._sources: dict[str, KnowledgeSource] = {}
         self._documents: dict[str, dict[str, Document]] = {}
 
+    @property
+    def retrieval_backend_name(self) -> str:
+        """Return the active process-local retrieval backend type for diagnostics."""
+
+        return type(self._index).__name__
+
     def sync(self, adapter: KnowledgeSourceAdapter) -> KnowledgeSyncResult:
         if not callable(getattr(adapter, "source", None)) or not callable(
             getattr(adapter, "load_documents", None)
@@ -299,17 +305,33 @@ class KnowledgeCollection:
         query: str,
         *,
         limit: int = 10,
+        retrieval_limit: int | None = None,
+        max_passages: int | None = None,
         max_chars: int | None = None,
         max_tokens: int | None = None,
     ) -> ContextPackage:
-        """Retrieve and assemble a bounded, provenance-preserving context."""
+        """Retrieve candidates and assemble a bounded, provenance-preserving context.
 
-        results = self.search(query, limit=limit)
+        ``limit`` remains the backward-compatible default for both retrieval depth
+        and passage count. Explicit limits separate those two pipeline controls.
+        """
+
+        active_retrieval_limit = limit if retrieval_limit is None else retrieval_limit
+        active_max_passages = limit if max_passages is None else max_passages
+        for name, value in (
+            ("retrieval_limit", active_retrieval_limit),
+            ("max_passages", active_max_passages),
+        ):
+            if type(value) is not int:
+                raise TypeError(f"{name} must be an integer")
+            if value <= 0:
+                raise ValueError(f"{name} must be greater than zero")
+        results = self.search(query, limit=active_retrieval_limit)
         return assemble_context(
             query,
             results,
-            max_passages=limit,
-            max_candidates=limit,
+            max_passages=active_max_passages,
+            max_candidates=active_retrieval_limit,
             max_chars=max_chars,
             max_tokens=max_tokens,
         )

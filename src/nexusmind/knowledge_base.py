@@ -56,6 +56,11 @@ from .knowledge_collection import (
     KnowledgeSyncResult,
 )
 from .knowledge_retrieval import InMemoryChunkIndex
+from .knowledge_query import (
+    KnowledgeQueryOptions,
+    KnowledgeQueryResult,
+    KnowledgeQueryTrace,
+)
 from .knowledge_ingestion import LocalDirectoryAdapter, LocalFileAdapter
 from .knowledge_store import KnowledgeSnapshotStoreError, SQLiteKnowledgeSnapshotStore
 from .lexical_analysis import UnicodeCJKLexicalAnalyzer
@@ -747,29 +752,49 @@ class KnowledgeBase:
         retrieval_limit: int = 8,
         limits: AnswerGenerationLimits | None = None,
     ) -> KnowledgeAnswer:
-        """Retrieve, assemble, and generate one bounded answer without a tool loop."""
+        """Backward-compatible answer API delegated to the unified query pipeline."""
+
+        self._require_open()
+        return self.query(
+            question,
+            options=KnowledgeQueryOptions(
+                retrieval_limit=retrieval_limit,
+                limits=AnswerGenerationLimits() if limits is None else limits,
+                generator=generator,
+            ),
+        ).answer
+
+    def query(
+        self,
+        question: str,
+        *,
+        options: KnowledgeQueryOptions | None = None,
+    ) -> KnowledgeQueryResult:
+        """Run retrieval, context assembly, answer generation, and citation validation."""
 
         self._require_open()
         if type(question) is not str:
             raise TypeError("question must be a string")
         if not question.strip():
             raise ValueError("question must be a non-empty string")
-        if type(retrieval_limit) is not int:
-            raise TypeError("retrieval_limit must be an integer")
-        if retrieval_limit <= 0:
-            raise ValueError("retrieval_limit must be greater than zero")
-        active_limits = AnswerGenerationLimits() if limits is None else limits
-        if type(active_limits) is not AnswerGenerationLimits:
-            raise TypeError("limits must be AnswerGenerationLimits")
+        active_options = KnowledgeQueryOptions() if options is None else options
+        if type(active_options) is not KnowledgeQueryOptions:
+            raise TypeError("options must be KnowledgeQueryOptions")
+        active_limits = active_options.limits
         if len(question) > active_limits.max_question_chars:
             raise AnswerGenerationLimitError("question exceeds max_question_chars")
-        active_generator = self._answer_generator if generator is None else generator
+        active_generator = (
+            self._answer_generator
+            if active_options.generator is None
+            else active_options.generator
+        )
         if active_generator is None:
             raise AnswerGeneratorError("no answer generator is configured")
         try:
             context = self._collection.build_context(
                 question,
-                limit=min(retrieval_limit, active_limits.max_passages),
+                retrieval_limit=active_options.retrieval_limit,
+                max_passages=active_limits.max_passages,
                 max_chars=active_limits.max_context_chars,
                 max_tokens=active_limits.max_context_tokens,
             )
@@ -779,11 +804,25 @@ class KnowledgeBase:
             if context.metadata.get("candidate_count") == 0:
                 raise KnowledgeBaseSourceError("knowledge retrieval returned no evidence")
             raise AnswerGenerationLimitError("context limits exclude all evidence passages")
-        return generate_knowledge_answer(
+        answer = generate_knowledge_answer(
             question,
             context,
             active_generator,
             limits=active_limits,
+        )
+        config = answer.model_context.context_config
+        trace = KnowledgeQueryTrace(
+            retrieval_backend=self._collection.retrieval_backend_name,
+            passages=answer.model_context.passages,
+            candidate_count=config.candidate_count,
+            context_character_count=config.character_count,
+            context_estimated_token_count=config.estimated_token_count,
+        )
+        return KnowledgeQueryResult(
+            answer=answer,
+            citations=answer.citations,
+            trace_id=str(uuid4()),
+            trace=trace,
         )
 
     def diagnose_search(

@@ -96,6 +96,44 @@ def test_collection_build_context_preserves_complete_provenance() -> None:
     assert context.metadata["character_count"] == len(document.content)
 
 
+def test_collection_build_context_separates_retrieval_depth_from_passage_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = Document("docs", "a.txt", "abcdefghij")
+    candidates = (
+        _result(document, chunk_id="best", start=0, end=5, score=10.0),
+        *(
+            _result(
+                document,
+                chunk_id=f"duplicate-{index}",
+                start=0,
+                end=5,
+                score=float(9 - index),
+            )
+            for index in range(1, 5)
+        ),
+        _result(document, chunk_id="later", start=5, end=10, score=1.0),
+    )
+    collection = KnowledgeCollection()
+    requested_limits: list[int] = []
+
+    def search(query: str, *, limit: int = 10):
+        requested_limits.append(limit)
+        return candidates[:limit]
+
+    monkeypatch.setattr(collection, "search", search)
+
+    context = collection.build_context(
+        "term", retrieval_limit=6, max_passages=2
+    )
+
+    assert requested_limits == [6]
+    assert [passage.chunk_id for passage in context.passages] == ["best", "later"]
+    assert context.metadata["candidate_count"] == 6
+    assert context.metadata["max_candidates"] == 6
+    assert context.metadata["max_passages"] == 2
+
+
 def test_context_passage_is_a_compact_immutable_provenance_reference() -> None:
     document = Document(
         "docs",
