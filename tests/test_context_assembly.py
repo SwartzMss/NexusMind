@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 import pytest
 
@@ -90,28 +90,54 @@ def test_collection_build_context_preserves_complete_provenance() -> None:
     assert passage.chunk_id
     assert (passage.start_offset, passage.end_offset) == (0, len(document.content))
     assert passage.content == document.content
-    assert passage.document.content[passage.start_offset : passage.end_offset] == passage.content
+    assert passage.document_content_hash == document.content_hash
+    assert passage.chunk_start_offset == 0
+    assert passage.chunk_end_offset == len(document.content)
     assert context.metadata["character_count"] == len(document.content)
 
 
-def test_context_detaches_provenance_from_collection_state() -> None:
-    document = Document("docs", "a.txt", "search term", metadata={"tag": "original"})
-    source = KnowledgeSource(
-        source_id="docs",
-        source_type="test",
-        display_name="Docs",
-        metadata={"owner": "original"},
+def test_context_passage_is_a_compact_immutable_provenance_reference() -> None:
+    document = Document(
+        "docs",
+        "large.txt",
+        "search term " + ("x" * 1_000_000),
+        metadata={"tag": "original"},
     )
-    collection = KnowledgeCollection()
-    collection.sync(FakeAdapter(source, (document,)))
+    results = tuple(
+        _result(
+            document,
+            chunk_id=f"chunk-{index}",
+            start=index * 20,
+            end=(index * 20) + 10,
+            score=float(5 - index),
+        )
+        for index in range(5)
+    )
+    context = assemble_context(
+        "term", results, max_passages=5, max_chars=50, max_candidates=5
+    )
+    passage = context.passages[0]
 
-    first = collection.build_context("term")
-    first.passages[0].source.metadata["owner"] = "changed"
-    first.passages[0].document.metadata["tag"] = "changed"
-
-    second = collection.build_context("term")
-    assert second.passages[0].source.metadata == {"owner": "original"}
-    assert second.passages[0].document.metadata == {"tag": "original"}
+    assert [item.name for item in fields(type(passage))] == [
+        "source_id",
+        "document_id",
+        "logical_path",
+        "document_content_hash",
+        "chunk_id",
+        "chunk_start_offset",
+        "chunk_end_offset",
+        "start_offset",
+        "end_offset",
+        "content",
+        "score",
+        "matched_terms",
+    ]
+    assert not hasattr(passage, "source")
+    assert not hasattr(passage, "document")
+    assert not hasattr(passage, "chunk")
+    assert len(context.passages) == 5
+    assert sum(len(item.content) for item in context.passages) == 50
+    assert passage.document_content_hash == document.content_hash
 
 
 def test_assembly_removes_duplicates_and_preserves_non_overlapping_content() -> None:

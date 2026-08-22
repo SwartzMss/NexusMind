@@ -433,7 +433,7 @@ def _record_passage(index: int, passage: ContextPassage) -> ModelContextPassage:
         source_id=passage.source_id,
         document_id=passage.document_id,
         logical_path=passage.logical_path,
-        document_content_hash=passage.document.content_hash,
+        document_content_hash=passage.document_content_hash,
         chunk_id=passage.chunk_id,
         start_offset=passage.start_offset,
         end_offset=passage.end_offset,
