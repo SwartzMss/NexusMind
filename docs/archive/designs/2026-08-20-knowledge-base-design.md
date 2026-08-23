@@ -1,5 +1,7 @@
 # User-Facing KnowledgeBase and Source Registry Design
 
+> Historical design record. It describes the scope and assumptions at implementation time and is not the current product specification. See [the current architecture](../../architecture.md).
+
 ## Objective
 
 Add a narrow product API that lets callers create or open one knowledge base, register local sources, explicitly synchronize them, inspect canonical state, and search without assembling chunkers or retrieval indexes. The product layer composes the existing Knowledge Runtime and does not alter retrieval, provenance, snapshot, or SQLite canonical schemas.

@@ -1,5 +1,7 @@
 # Embedding-Backed Semantic Retrieval Design
 
+> Historical design record. It describes the scope and assumptions at implementation time and is not the current product specification. See [the current architecture](../../architecture.md).
+
 ## Context and scope
 
 NexusMind already has a synchronous `KnowledgeCollection` lifecycle and a

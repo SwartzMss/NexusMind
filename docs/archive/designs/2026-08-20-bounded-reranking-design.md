@@ -1,5 +1,7 @@
 # Bounded Second-Stage Reranking Design
 
+> Historical design record. It describes the scope and assumptions at implementation time and is not the current product specification. See [the current architecture](../../architecture.md).
+
 ## Objective
 
 Add a provider-neutral, deterministic, resource-bounded second retrieval stage that reranks only a fixed first-stage candidate set. The feature composes with every cloneable `ChunkIndex` without changing BM25, semantic retrieval, hybrid RRF, canonical knowledge state, or persistence formats.

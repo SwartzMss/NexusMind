@@ -1,5 +1,7 @@
 # Categorized Retrieval Evaluation and Backend Comparison
 
+> Historical design record. It describes the scope and assumptions at implementation time and is not the current product specification. See [the current architecture](../../architecture.md).
+
 ## Goal and boundaries
 
 Extend NexusMind's deterministic offline retrieval evaluation so one authored

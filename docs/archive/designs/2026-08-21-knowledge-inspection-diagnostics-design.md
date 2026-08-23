@@ -1,5 +1,7 @@
 # Knowledge Inspection and Retrieval Diagnostics Design
 
+> Historical design record. It describes the scope and assumptions at implementation time and is not the current product specification. See [the current architecture](../../architecture.md).
+
 ## Goal and Boundary
 
 Add structured, read-only inspection and retrieval diagnostics to the public

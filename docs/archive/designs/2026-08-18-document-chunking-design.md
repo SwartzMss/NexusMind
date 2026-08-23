@@ -1,5 +1,7 @@
 # Document Chunking Design
 
+> Historical design record. It describes the scope and assumptions at implementation time and is not the current product specification. See [the current architecture](../../architecture.md).
+
 ## Goal
 
 Extend the provider-neutral Knowledge Runtime from `KnowledgeSource -> Document`

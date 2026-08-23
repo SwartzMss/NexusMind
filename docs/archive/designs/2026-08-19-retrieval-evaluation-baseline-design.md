@@ -1,5 +1,7 @@
 # Retrieval Evaluation Baseline Design
 
+> Historical design record. It describes the scope and assumptions at implementation time and is not the current product specification. See [the current architecture](../../architecture.md).
+
 ## Goal
 
 Add a deterministic offline evaluation boundary that measures the real provenance-resolved Knowledge search path over a small checked-in corpus, without changing retrieval or chunking behavior.

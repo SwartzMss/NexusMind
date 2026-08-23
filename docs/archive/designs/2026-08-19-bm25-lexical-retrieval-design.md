@@ -1,5 +1,7 @@
 # BM25 Lexical Retrieval Design
 
+> Historical design record. It describes the scope and assumptions at implementation time and is not the current product specification. See [the current architecture](../../architecture.md).
+
 ## Goal
 
 Upgrade `InMemoryChunkIndex` from distinct substring-match counting to deterministic, dependency-free BM25 lexical ranking while preserving the `ChunkIndex`, Knowledge provenance, and canonical persistence boundaries.

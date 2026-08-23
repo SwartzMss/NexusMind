@@ -192,4 +192,4 @@ python -m nexusmind.retrieval_benchmark --write evals/knowledge/benchmark.md
 | `knowledge_inspection.py` | inspection 与 diagnostics view |
 | `cli.py` / `knowledge_base_ui.py` | 产品入口 |
 
-设计演进记录位于 [`docs/superpowers/specs/`](superpowers/specs/)。
+已完成的历史设计记录位于[设计归档](archive/designs/README.md)。这些记录用于解释实现演进，不代表当前产品规范。

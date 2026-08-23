@@ -1,5 +1,7 @@
 # Resolved Knowledge Search Design
 
+> Historical design record. It describes the scope and assumptions at implementation time and is not the current product specification. See [the current architecture](../../architecture.md).
+
 ## Goal
 
 Make `KnowledgeCollection.search()` return Knowledge-layer results whose retrieval hit is resolved to the collection's committed canonical `KnowledgeSource` and `Document`. This adds trustworthy provenance without changing ranking, chunking, persistence schemas, or retrieval backends.

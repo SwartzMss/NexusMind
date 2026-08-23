@@ -1,5 +1,7 @@
 # Unicode/CJK Lexical Analyzer Design
 
+> Historical design record. It describes the scope and assumptions at implementation time and is not the current product specification. See [the current architecture](../../architecture.md).
+
 ## Context
 
 NexusMind's in-memory BM25 backend currently embeds whitespace splitting and
