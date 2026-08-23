@@ -269,7 +269,7 @@ CI 在 `windows-latest` 上运行离线测试，不依赖真实 API Key、模型
 
 ## 项目文档
 
-- [从 0.1 迁移到 0.2](docs/migration-0.2.md)
+- [KnowledgeBase-only 迁移说明](docs/knowledgebase-only-migration.md)
 - [KnowledgeBase 技术架构](docs/architecture.md#knowledge-runtime)
 - [检索 Benchmark 说明与结果](evals/knowledge/benchmark.md)
 - [KnowledgeBase 设计记录](docs/superpowers/specs/2026-08-20-knowledge-base-design.md)

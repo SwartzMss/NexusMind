@@ -1,6 +1,6 @@
-# 从 NexusMind 0.1 迁移到 0.2
+# 迁移到 KnowledgeBase-only NexusMind
 
-NexusMind 0.2 将产品范围收敛为 KnowledgeBase。这是一次有意的 breaking change。
+NexusMind 将产品范围收敛为 KnowledgeBase。这是一次有意的 breaking change，但本次收敛不调整包版本号。
 
 ## 已删除的入口
 
@@ -18,7 +18,7 @@ Python 包不再包含 Agent Runtime、Harness、Tool Registry、Workspace、命
 
 ## KnowledgeBase CLI
 
-0.2 的 CLI 只包含：
+收敛后的 CLI 只包含：
 
 ```text
 nexusmind create
