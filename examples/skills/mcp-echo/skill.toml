@@ -1,9 +1,0 @@
-schema_version = 1
-name = "mcp-echo"
-description = "Call the demo MCP echo tool and summarize its result"
-instructions_file = "instructions.md"
-allowed_tools = ["mcp:demo:remote_echo"]
-
-[limits]
-max_model_turns = 4
-max_tool_calls_total = 4

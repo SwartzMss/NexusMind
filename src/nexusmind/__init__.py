@@ -1,5 +1,7 @@
 """NexusMind public package exports."""
 
+from .answer_provider import OpenAICompatibleAnswerProvider
+
 from .embeddings import (
     EmbeddingError,
     EmbeddingProvider,
@@ -180,6 +182,7 @@ from .knowledge_ingestion import (
 )
 
 __all__ = [
+    "OpenAICompatibleAnswerProvider",
     "AnswerGenerationLimitError",
     "AnswerGenerationLimits",
     "AnswerGenerator",
