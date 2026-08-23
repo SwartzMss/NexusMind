@@ -272,7 +272,6 @@ CI 在 `windows-latest` 上运行离线测试，不依赖真实 API Key、模型
 - [KnowledgeBase-only 迁移说明](docs/knowledgebase-only-migration.md)
 - [KnowledgeBase 技术架构](docs/architecture.md#knowledge-runtime)
 - [检索 Benchmark 说明与结果](evals/knowledge/benchmark.md)
-- [历史设计归档](docs/archive/designs/README.md)
 
 当前版本已移除早期 Agent Runtime、Tool、Workspace、MCP 和 Agent Skill 实现。未来可以在不引入 Agent Tool Loop 的前提下增加 Knowledge-native Skill 和 Knowledge persistence。
 
