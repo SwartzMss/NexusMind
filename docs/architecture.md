@@ -191,4 +191,3 @@ python -m nexusmind.retrieval_benchmark --write evals/knowledge/benchmark.md
 | `knowledge_answer.py` / `knowledge_query.py` | 引用验证与统一 query pipeline |
 | `knowledge_inspection.py` | inspection 与 diagnostics view |
 | `cli.py` / `knowledge_base_ui.py` | 产品入口 |
-
