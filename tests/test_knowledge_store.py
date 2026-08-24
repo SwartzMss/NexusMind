@@ -87,7 +87,10 @@ def test_sqlite_restart_restores_canonical_state_and_rebuilds_embeddings(tmp_pat
     )
     collection.restore(loaded)
 
-    assert collection.snapshot() == snapshot
+    restored_snapshot = collection.snapshot()
+    assert restored_snapshot.sources == snapshot.sources
+    assert restored_snapshot.documents == snapshot.documents
+    assert len(restored_snapshot.document_versions) == 1
     result = collection.search("meaning")[0]
     assert result.document == snapshot.documents[0]
     assert result.hit.chunk.content == snapshot.documents[0].content
@@ -238,6 +241,37 @@ def test_snapshot_store_restart_restore_and_search_round_trip(tmp_path) -> None:
     assert result.hit.matched_terms == ("checkpoint", "resume")
 
 
+def test_sqlite_round_trip_preserves_version_history_and_current_only_search(
+    tmp_path,
+) -> None:
+    path = tmp_path / "versions.db"
+    original = KnowledgeCollection()
+
+    class Adapter:
+        def __init__(self, content: str) -> None:
+            self._content = content
+
+        def source(self):
+            return _source("docs")
+
+        def load_documents(self):
+            return (_document("docs", "notes.md", self._content),)
+
+    original.sync(Adapter("obsolete"))
+    original.sync(Adapter("current-term"))
+    snapshot = original.snapshot()
+
+    store = SQLiteKnowledgeSnapshotStore(path)
+    store.save(snapshot)
+    loaded = store.load()
+
+    assert loaded == snapshot
+    restarted = KnowledgeCollection()
+    restarted.restore(loaded)
+    assert restarted.search("obsolete") == ()
+    assert restarted.search("current-term")
+
+
 def test_sqlite_restart_rebuilds_chinese_search_state_from_canonical_data(tmp_path) -> None:
     path = tmp_path / "knowledge.db"
     source = _source("docs")
@@ -249,7 +283,10 @@ def test_sqlite_restart_rebuilds_chinese_search_state_from_canonical_data(tmp_pa
     restarted.restore(SQLiteKnowledgeSnapshotStore(path).load())
     result = restarted.search("语义检索")[0]
 
-    assert restarted.snapshot() == snapshot
+    restored_snapshot = restarted.snapshot()
+    assert restored_snapshot.sources == snapshot.sources
+    assert restored_snapshot.documents == snapshot.documents
+    assert len(restored_snapshot.document_versions) == 1
     assert result.source == source
     assert result.document == document
     assert result.hit.chunk.document_id == document.document_id
@@ -331,6 +368,61 @@ def test_unsupported_and_malformed_schema_fail_closed(tmp_path) -> None:
         SQLiteKnowledgeSnapshotStore(malformed)
 
 
+def test_schema_v1_database_migrates_without_changing_canonical_rows(tmp_path) -> None:
+    path = tmp_path / "v1.db"
+    source = _source("docs")
+    document = _document("docs", "notes.md", "legacy persisted")
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "CREATE TABLE knowledge_store_metadata "
+            "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        db.execute(
+            "CREATE TABLE sources (source_id TEXT PRIMARY KEY, source_type TEXT NOT NULL, "
+            "display_name TEXT NOT NULL, logical_location TEXT, metadata_json TEXT NOT NULL)"
+        )
+        db.execute(
+            "CREATE TABLE documents (document_id TEXT PRIMARY KEY, source_id TEXT NOT NULL, "
+            "logical_path TEXT NOT NULL, content TEXT NOT NULL, content_type TEXT NOT NULL, "
+            "metadata_json TEXT NOT NULL, content_hash TEXT NOT NULL, "
+            "FOREIGN KEY(source_id) REFERENCES sources(source_id) ON DELETE CASCADE)"
+        )
+        db.execute(
+            "INSERT INTO knowledge_store_metadata VALUES ('schema_version', '1')"
+        )
+        db.execute(
+            "INSERT INTO sources VALUES (?, ?, ?, ?, ?)",
+            (
+                source.source_id,
+                source.source_type,
+                source.display_name,
+                source.logical_location,
+                "{}",
+            ),
+        )
+        db.execute(
+            "INSERT INTO documents VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                document.document_id,
+                document.source_id,
+                document.logical_path,
+                document.content,
+                document.content_type,
+                "{}",
+                document.content_hash,
+            ),
+        )
+
+    loaded = SQLiteKnowledgeSnapshotStore(path).load()
+
+    assert loaded == KnowledgeSnapshot((source,), (document,))
+    with sqlite3.connect(path) as db:
+        assert db.execute(
+            "SELECT value FROM knowledge_store_metadata WHERE key = 'schema_version'"
+        ).fetchone() == ("2",)
+        assert db.execute("SELECT count(*) FROM document_versions").fetchone() == (0,)
+
+
 def test_orphan_database_row_fails_closed(tmp_path) -> None:
     path = tmp_path / "knowledge.db"
     store = SQLiteKnowledgeSnapshotStore(path)
@@ -392,7 +484,12 @@ def test_schema_persists_no_derived_retrieval_state(tmp_path) -> None:
             for table in tables
         }
 
-    assert tables == {"knowledge_store_metadata", "sources", "documents"}
+    assert tables == {
+        "knowledge_store_metadata",
+        "sources",
+        "documents",
+        "document_versions",
+    }
     assert columns == {
         "knowledge_store_metadata": {"key", "value"},
         "sources": {
@@ -410,6 +507,17 @@ def test_schema_persists_no_derived_retrieval_state(tmp_path) -> None:
             "content_type",
             "metadata_json",
             "content_hash",
+        },
+        "document_versions": {
+            "version_id",
+            "document_id",
+            "source_id",
+            "logical_path",
+            "content",
+            "content_hash",
+            "created_at",
+            "previous_version_id",
+            "sync_context",
         },
     }
 

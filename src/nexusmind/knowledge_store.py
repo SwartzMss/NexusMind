@@ -11,11 +11,11 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Protocol
 
-from .knowledge import Document, KnowledgeSource
+from .knowledge import Document, DocumentVersion, KnowledgeSource
 from .knowledge_collection import KnowledgeSnapshot
 
 
-_SCHEMA_VERSION = "1"
+_SCHEMA_VERSION = "2"
 
 
 class KnowledgeSnapshotStoreError(RuntimeError):
@@ -31,7 +31,7 @@ class KnowledgeSnapshotStore(Protocol):
 
 
 class SQLiteKnowledgeSnapshotStore:
-    """SQLite v1 storage for canonical Source/Document snapshots only."""
+    """SQLite v2 storage for canonical snapshots and document history."""
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
         try:
@@ -48,11 +48,12 @@ class SQLiteKnowledgeSnapshotStore:
         self._initialize()
 
     def save(self, snapshot: KnowledgeSnapshot) -> None:
-        sources, documents = self._encode_snapshot(snapshot)
+        sources, documents, versions = self._encode_snapshot(snapshot)
         try:
             with closing(self._connect()) as db:
                 db.execute("BEGIN IMMEDIATE")
                 self._validate_schema(db)
+                db.execute("DELETE FROM document_versions")
                 db.execute("DELETE FROM documents")
                 db.execute("DELETE FROM sources")
                 db.executemany(
@@ -66,6 +67,13 @@ class SQLiteKnowledgeSnapshotStore:
                     "(document_id, source_id, logical_path, content, content_type, metadata_json, content_hash) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     documents,
+                )
+                db.executemany(
+                    "INSERT INTO document_versions "
+                    "(version_id, document_id, source_id, logical_path, content, content_hash, "
+                    "created_at, previous_version_id, sync_context) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    versions,
                 )
                 db.commit()
         except KnowledgeSnapshotStoreError:
@@ -87,6 +95,11 @@ class SQLiteKnowledgeSnapshotStore:
                 document_rows = db.execute(
                     "SELECT document_id, source_id, logical_path, content, content_type, "
                     "metadata_json, content_hash FROM documents ORDER BY source_id, document_id"
+                ).fetchall()
+                version_rows = db.execute(
+                    "SELECT version_id, document_id, source_id, logical_path, content, "
+                    "content_hash, created_at, previous_version_id, sync_context "
+                    "FROM document_versions ORDER BY document_id, version_id"
                 ).fetchall()
                 db.commit()
         except KnowledgeSnapshotStoreError:
@@ -135,7 +148,31 @@ class SQLiteKnowledgeSnapshotStore:
                 raise KnowledgeSnapshotStoreError("stored snapshot contains duplicate document IDs")
             document_ids.add(document.document_id)
             documents.append(document)
-        return KnowledgeSnapshot(sources=tuple(sources), documents=tuple(documents))
+        versions: list[DocumentVersion] = []
+        for row in version_rows:
+            try:
+                versions.append(
+                    DocumentVersion(
+                        version_id=row[0],
+                        document_id=row[1],
+                        source_id=row[2],
+                        logical_path=row[3],
+                        content=row[4],
+                        content_hash=row[5],
+                        created_at=row[6],
+                        previous_version_id=row[7],
+                        sync_context=row[8],
+                    )
+                )
+            except (TypeError, ValueError) as exc:
+                raise KnowledgeSnapshotStoreError(
+                    "stored DocumentVersion is invalid"
+                ) from exc
+        return KnowledgeSnapshot(
+            sources=tuple(sources),
+            documents=tuple(documents),
+            document_versions=self._order_versions(versions),
+        )
 
     def _initialize(self) -> None:
         try:
@@ -162,16 +199,31 @@ class SQLiteKnowledgeSnapshotStore:
                         "metadata_json TEXT NOT NULL, content_hash TEXT NOT NULL, "
                         "FOREIGN KEY(source_id) REFERENCES sources(source_id) ON DELETE CASCADE)"
                     )
+                    self._create_versions_table(db)
                     db.execute(
                         "INSERT INTO knowledge_store_metadata (key, value) VALUES ('schema_version', ?)",
                         (_SCHEMA_VERSION,),
                     )
+                else:
+                    row = db.execute(
+                        "SELECT value FROM knowledge_store_metadata WHERE key = 'schema_version'"
+                    ).fetchone()
+                    if row is not None and row[0] == "1":
+                        self._validate_schema_v1(db)
+                        self._create_versions_table(db)
+                        db.execute(
+                            "UPDATE knowledge_store_metadata SET value = ? "
+                            "WHERE key = 'schema_version'",
+                            (_SCHEMA_VERSION,),
+                        )
                 self._validate_schema(db)
                 db.commit()
         except KnowledgeSnapshotStoreError:
             raise
         except sqlite3.Error as exc:
-            raise KnowledgeSnapshotStoreError("SQLite snapshot store initialization failed") from exc
+            raise KnowledgeSnapshotStoreError(
+                "knowledge snapshot schema initialization failed"
+            ) from exc
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self._path, timeout=10, isolation_level=None)
@@ -211,6 +263,17 @@ class SQLiteKnowledgeSnapshotStore:
                 "metadata_json": ("TEXT", 1, 0),
                 "content_hash": ("TEXT", 1, 0),
             },
+            "document_versions": {
+                "version_id": ("TEXT", 0, 1),
+                "document_id": ("TEXT", 1, 0),
+                "source_id": ("TEXT", 1, 0),
+                "logical_path": ("TEXT", 1, 0),
+                "content": ("TEXT", 1, 0),
+                "content_hash": ("TEXT", 1, 0),
+                "created_at": ("TEXT", 1, 0),
+                "previous_version_id": ("TEXT", 0, 0),
+                "sync_context": ("TEXT", 1, 0),
+            },
         }
         for table, columns in expected.items():
             actual = {
@@ -229,14 +292,53 @@ class SQLiteKnowledgeSnapshotStore:
         ):
             raise KnowledgeSnapshotStoreError("knowledge snapshot schema has an invalid foreign key")
 
+    @staticmethod
+    def _validate_schema_v1(db: sqlite3.Connection) -> None:
+        expected_tables = {"knowledge_store_metadata", "sources", "documents"}
+        tables = {
+            row[0]
+            for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        if tables != expected_tables:
+            raise KnowledgeSnapshotStoreError(
+                "knowledge snapshot schema is incomplete or incompatible"
+            )
+
+    @staticmethod
+    def _create_versions_table(db: sqlite3.Connection) -> None:
+        db.execute(
+            "CREATE TABLE document_versions ("
+            "version_id TEXT PRIMARY KEY, document_id TEXT NOT NULL, "
+            "source_id TEXT NOT NULL, logical_path TEXT NOT NULL, content TEXT NOT NULL, "
+            "content_hash TEXT NOT NULL, created_at TEXT NOT NULL, "
+            "previous_version_id TEXT, sync_context TEXT NOT NULL)"
+        )
+        db.execute(
+            "CREATE INDEX document_versions_document_id "
+            "ON document_versions(document_id)"
+        )
+
     @classmethod
     def _encode_snapshot(
         cls, snapshot: KnowledgeSnapshot
-    ) -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]]]:
+    ) -> tuple[
+        list[tuple[Any, ...]],
+        list[tuple[Any, ...]],
+        list[tuple[Any, ...]],
+    ]:
         if not isinstance(snapshot, KnowledgeSnapshot):
             raise KnowledgeSnapshotStoreError("snapshot must be a KnowledgeSnapshot")
-        if type(snapshot.sources) is not tuple or type(snapshot.documents) is not tuple:
-            raise KnowledgeSnapshotStoreError("snapshot sources and documents must be tuples")
+        if (
+            type(snapshot.sources) is not tuple
+            or type(snapshot.documents) is not tuple
+            or type(snapshot.document_versions) is not tuple
+        ):
+            raise KnowledgeSnapshotStoreError(
+                "snapshot sources, documents, and document_versions must be tuples"
+            )
         sources: list[tuple[Any, ...]] = []
         source_ids: set[str] = set()
         for source in snapshot.sources:
@@ -308,7 +410,79 @@ class SQLiteKnowledgeSnapshotStore:
             )
         sources.sort(key=lambda row: row[0])
         documents.sort(key=lambda row: row[0])
-        return sources, documents
+        versions: list[tuple[Any, ...]] = []
+        version_ids: set[str] = set()
+        for version in snapshot.document_versions:
+            if type(version) is not DocumentVersion:
+                raise KnowledgeSnapshotStoreError(
+                    "snapshot contains an invalid DocumentVersion"
+                )
+            try:
+                validated = DocumentVersion(
+                    version_id=version.version_id,
+                    document_id=version.document_id,
+                    source_id=version.source_id,
+                    logical_path=version.logical_path,
+                    content=version.content,
+                    content_hash=version.content_hash,
+                    created_at=version.created_at,
+                    previous_version_id=version.previous_version_id,
+                    sync_context=version.sync_context,
+                )
+            except (TypeError, ValueError) as exc:
+                raise KnowledgeSnapshotStoreError(
+                    "snapshot contains an invalid DocumentVersion"
+                ) from exc
+            if validated.version_id in version_ids:
+                raise KnowledgeSnapshotStoreError(
+                    "snapshot contains duplicate DocumentVersion IDs"
+                )
+            version_ids.add(validated.version_id)
+            versions.append(
+                (
+                    validated.version_id,
+                    validated.document_id,
+                    validated.source_id,
+                    validated.logical_path,
+                    validated.content,
+                    validated.content_hash,
+                    validated.created_at,
+                    validated.previous_version_id,
+                    validated.sync_context,
+                )
+            )
+        return sources, documents, versions
+
+    @staticmethod
+    def _order_versions(
+        versions: list[DocumentVersion],
+    ) -> tuple[DocumentVersion, ...]:
+        grouped: dict[str, list[DocumentVersion]] = {}
+        for version in versions:
+            grouped.setdefault(version.document_id, []).append(version)
+        ordered: list[DocumentVersion] = []
+        for document_id in sorted(grouped):
+            candidates = grouped[document_id]
+            children = {
+                version.previous_version_id: version
+                for version in candidates
+                if version.previous_version_id is not None
+            }
+            roots = [version for version in candidates if version.previous_version_id is None]
+            if len(roots) != 1:
+                raise KnowledgeSnapshotStoreError("stored document version chain is invalid")
+            current = roots[0]
+            chain: list[DocumentVersion] = []
+            while current not in chain:
+                chain.append(current)
+                successor = children.get(current.version_id)
+                if successor is None:
+                    break
+                current = successor
+            if len(chain) != len(candidates):
+                raise KnowledgeSnapshotStoreError("stored document version chain is invalid")
+            ordered.extend(chain)
+        return tuple(ordered)
 
     @classmethod
     def _encode_metadata(cls, metadata: dict[str, Any]) -> str:
