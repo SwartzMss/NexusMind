@@ -196,7 +196,7 @@ class DocumentVersion:
         sync_context: str,
         previous_version_id: str | None = None,
     ) -> "DocumentVersion":
-        if type(document) is not Document:
+        if not isinstance(document, Document):
             raise TypeError("document must be a Document")
         return cls(
             version_id=stable_document_version_id(

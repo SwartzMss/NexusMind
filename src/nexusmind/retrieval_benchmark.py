@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .embeddings import EmbeddingVector
@@ -152,6 +153,7 @@ def _build_collection(mode: str) -> KnowledgeCollection:
     collection = KnowledgeCollection(
         chunker=TextChunker(chunk_size=1_000, overlap=100),
         index_factory=index_factory,
+        clock=lambda: datetime(2026, 8, 24, tzinfo=timezone.utc),
     )
     collection.sync(LocalDirectoryAdapter(BENCHMARK_CORPUS, source_id=BENCHMARK_SOURCE_ID))
     return collection
