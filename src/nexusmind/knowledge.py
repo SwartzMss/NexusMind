@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
 import json
+import re
 from typing import Any, Mapping
 
 
@@ -46,6 +47,32 @@ def stable_document_id(source_id: str, logical_path: str) -> str:
     """Create a stable document ID from source and source-relative identity."""
 
     return _stable_id("document", _require_text(source_id, "source_id"), _require_text(logical_path, "logical_path"))
+
+
+_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+_VERSION_ID_PATTERN = re.compile(r"version-[0-9a-f]{64}\Z")
+_UTC_TIMESTAMP_PATTERN = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z\Z"
+)
+
+
+def stable_document_version_id(
+    document_id: str,
+    content_hash: str,
+    previous_version_id: str | None,
+) -> str:
+    """Create a stable identity for one linked document version."""
+
+    document_id = _require_text(document_id, "document_id")
+    if _SHA256_PATTERN.fullmatch(content_hash) is None:
+        raise ValueError("content_hash must be a lowercase SHA-256 digest")
+    if previous_version_id is not None:
+        if type(previous_version_id) is not str or _VERSION_ID_PATTERN.fullmatch(
+            previous_version_id
+        ) is None:
+            raise ValueError("previous_version_id must be a version ID or None")
+    predecessor = "" if previous_version_id is None else previous_version_id
+    return _stable_id("version", document_id, content_hash, predecessor)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -121,10 +148,79 @@ class Document:
         return self.content_hash != other.content_hash
 
 
+@dataclass(frozen=True, slots=True)
+class DocumentVersion:
+    """One immutable content snapshot in a document's internal version chain."""
+
+    version_id: str
+    document_id: str
+    source_id: str
+    logical_path: str
+    content: str
+    content_hash: str
+    created_at: str
+    previous_version_id: str | None
+    sync_context: str
+
+    def __post_init__(self) -> None:
+        source_id = _require_text(self.source_id, "source_id")
+        logical_path = _require_text(self.logical_path, "logical_path")
+        document_id = _require_text(self.document_id, "document_id")
+        sync_context = _require_text(self.sync_context, "sync_context")
+        if type(self.content) is not str:
+            raise TypeError("content must be a string")
+        if type(self.created_at) is not str or _UTC_TIMESTAMP_PATTERN.fullmatch(
+            self.created_at
+        ) is None:
+            raise ValueError("created_at must be a canonical UTC timestamp")
+        if compute_content_hash(self.content) != self.content_hash:
+            raise ValueError("content_hash does not match content")
+        if stable_document_id(source_id, logical_path) != document_id:
+            raise ValueError("document_id does not match provenance")
+        expected_version_id = stable_document_version_id(
+            document_id, self.content_hash, self.previous_version_id
+        )
+        if self.version_id != expected_version_id:
+            raise ValueError("version_id does not match version identity")
+        object.__setattr__(self, "source_id", source_id)
+        object.__setattr__(self, "logical_path", logical_path)
+        object.__setattr__(self, "document_id", document_id)
+        object.__setattr__(self, "sync_context", sync_context)
+
+    @classmethod
+    def from_document(
+        cls,
+        document: Document,
+        *,
+        created_at: str,
+        sync_context: str,
+        previous_version_id: str | None = None,
+    ) -> "DocumentVersion":
+        if type(document) is not Document:
+            raise TypeError("document must be a Document")
+        return cls(
+            version_id=stable_document_version_id(
+                document.document_id,
+                document.content_hash,
+                previous_version_id,
+            ),
+            document_id=document.document_id,
+            source_id=document.source_id,
+            logical_path=document.logical_path,
+            content=document.content,
+            content_hash=document.content_hash,
+            created_at=created_at,
+            previous_version_id=previous_version_id,
+            sync_context=sync_context,
+        )
+
+
 __all__ = [
     "Document",
+    "DocumentVersion",
     "KnowledgeSource",
     "KnowledgeSourceType",
     "compute_content_hash",
     "stable_document_id",
+    "stable_document_version_id",
 ]

@@ -13,9 +13,11 @@ from .embeddings import (
 
 from .knowledge import (
     Document,
+    DocumentVersion,
     KnowledgeSource,
     KnowledgeSourceType,
     compute_content_hash,
+    stable_document_version_id,
 )
 from .knowledge_answer import (
     AnswerGenerationLimitError,
@@ -202,6 +204,7 @@ __all__ = [
     "ChunkIndexLimits",
     "DiagnosticChunkIndex",
     "Document",
+    "DocumentVersion",
     "DocumentChunker",
     "DocumentReplacementError",
     "EmbeddingError",
@@ -258,6 +261,7 @@ __all__ = [
     "KnowledgeSnapshotStoreError",
     "KnowledgeSyncResult",
     "compute_content_hash",
+    "stable_document_version_id",
     "assemble_context",
     "estimate_token_count",
     "DEFAULT_MAX_DIRECTORY_DEPTH",
