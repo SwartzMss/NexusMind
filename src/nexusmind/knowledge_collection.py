@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import hashlib
+import json
 from math import isfinite
 from typing import Callable, Protocol
 
@@ -11,6 +14,7 @@ from .context_assembly import ContextPackage, assemble_context
 
 from .knowledge import (
     Document,
+    DocumentVersion,
     KnowledgeSource,
     compute_content_hash,
     stable_document_id,
@@ -73,9 +77,10 @@ class KnowledgeCollectionLimits:
 
     max_sources: int = 100
     max_documents: int = 10_000
+    max_document_versions: int = 100_000
 
     def __post_init__(self) -> None:
-        for name in ("max_sources", "max_documents"):
+        for name in ("max_sources", "max_documents", "max_document_versions"):
             value = getattr(self, name)
             if type(value) is not int:
                 raise TypeError(f"{name} must be an integer")
@@ -101,6 +106,7 @@ class KnowledgeSnapshot:
 
     sources: tuple[KnowledgeSource, ...]
     documents: tuple[Document, ...]
+    document_versions: tuple[DocumentVersion, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +198,7 @@ class KnowledgeCollection:
         chunker: DocumentChunker | None = None,
         index_factory: Callable[[], CloneableChunkIndex] | None = None,
         limits: KnowledgeCollectionLimits | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._chunker = TextChunker() if chunker is None else chunker
         self._limits = KnowledgeCollectionLimits() if limits is None else limits
@@ -205,8 +212,12 @@ class KnowledgeCollection:
         self._require_cloneable_index(self._index)
         if not isinstance(self._limits, KnowledgeCollectionLimits):
             raise TypeError("limits must be KnowledgeCollectionLimits")
+        self._clock = self._utc_now if clock is None else clock
+        if not callable(self._clock):
+            raise TypeError("clock must be callable")
         self._sources: dict[str, KnowledgeSource] = {}
         self._documents: dict[str, dict[str, Document]] = {}
+        self._document_versions: dict[str, tuple[DocumentVersion, ...]] = {}
 
     @property
     def retrieval_backend_name(self) -> str:
@@ -251,7 +262,29 @@ class KnowledgeCollection:
             if old[document_id].content_hash != incoming[document_id].content_hash
         }
         unchanged = shared - changed
-        self._preflight_snapshot(owned_source.source_id, len(incoming))
+        versioned_ids = added | changed
+        self._preflight_snapshot(
+            owned_source.source_id,
+            len(incoming),
+            added_versions=len(versioned_ids),
+        )
+
+        staged_versions = dict(self._document_versions)
+        if versioned_ids:
+            created_at = self._format_clock_value(self._clock())
+            sync_context = self._sync_context(
+                owned_source.source_id, created_at, len(self._all_versions())
+            )
+            for document_id in sorted(versioned_ids):
+                chain = staged_versions.get(document_id, ())
+                previous_version_id = chain[-1].version_id if chain else None
+                version = DocumentVersion.from_document(
+                    incoming[document_id],
+                    created_at=created_at,
+                    sync_context=sync_context,
+                    previous_version_id=previous_version_id,
+                )
+                staged_versions[document_id] = chain + (version,)
 
         prepared: dict[str, tuple[Chunk, ...]] = {}
         for document_id in sorted(added | changed):
@@ -271,6 +304,7 @@ class KnowledgeCollection:
         self._index = staged
         self._sources[owned_source.source_id] = owned_source
         self._documents[owned_source.source_id] = incoming
+        self._document_versions = staged_versions
         return KnowledgeSyncResult(
             source_id=owned_source.source_id,
             documents_added=len(added),
@@ -872,12 +906,30 @@ class KnowledgeCollection:
             for source_id in sorted(self._documents)
             for _, document in sorted(self._documents[source_id].items())
         )
-        return KnowledgeSnapshot(sources=sources, documents=documents)
+        versions = tuple(
+            deepcopy(version)
+            for document_id in sorted(self._document_versions)
+            for version in self._document_versions[document_id]
+        )
+        return KnowledgeSnapshot(
+            sources=sources,
+            documents=documents,
+            document_versions=versions,
+        )
 
     def restore(self, snapshot: KnowledgeSnapshot) -> KnowledgeRestoreResult:
         """Atomically replace collection state and rebuild all derived state."""
 
         sources, documents = self._validate_restore_snapshot(snapshot)
+        restored_versions: dict[str, tuple[DocumentVersion, ...]] = {}
+        for version in snapshot.document_versions:
+            if type(version) is not DocumentVersion:
+                raise KnowledgeSnapshotError(
+                    "snapshot document_versions must contain only DocumentVersion values"
+                )
+            restored_versions[version.document_id] = (
+                restored_versions.get(version.document_id, ()) + (deepcopy(version),)
+            )
         prepared: dict[str, tuple[Chunk, ...]] = {}
         for document_id in sorted(documents):
             chunk_document = deepcopy(documents[document_id])
@@ -907,6 +959,7 @@ class KnowledgeCollection:
         self._index = staged
         self._sources = restored_sources
         self._documents = restored_documents
+        self._document_versions = restored_versions
         return KnowledgeRestoreResult(
             sources_restored=len(sources),
             documents_restored=len(documents),
@@ -957,7 +1010,9 @@ class KnowledgeCollection:
         if document.content_hash != compute_content_hash(document.content):
             raise KnowledgeSnapshotError("Document has an incoherent content_hash")
 
-    def _preflight_snapshot(self, source_id: str, incoming_count: int) -> None:
+    def _preflight_snapshot(
+        self, source_id: str, incoming_count: int, *, added_versions: int = 0
+    ) -> None:
         source_count = len(self._sources) + (0 if source_id in self._sources else 1)
         if source_count > self._limits.max_sources:
             raise KnowledgeCollectionLimitError("collection exceeds max_sources")
@@ -965,6 +1020,36 @@ class KnowledgeCollection:
         resulting_count = existing_count - len(self._documents.get(source_id, {})) + incoming_count
         if resulting_count > self._limits.max_documents:
             raise KnowledgeCollectionLimitError("collection exceeds max_documents")
+        if len(self._all_versions()) + added_versions > self._limits.max_document_versions:
+            raise KnowledgeCollectionLimitError(
+                "collection exceeds max_document_versions"
+            )
+
+    def _all_versions(self) -> tuple[DocumentVersion, ...]:
+        return tuple(
+            version
+            for document_id in sorted(self._document_versions)
+            for version in self._document_versions[document_id]
+        )
+
+    @staticmethod
+    def _utc_now() -> datetime:
+        return datetime.now(timezone.utc)
+
+    @staticmethod
+    def _format_clock_value(value: datetime) -> str:
+        if type(value) is not datetime or value.utcoffset() != timezone.utc.utcoffset(value):
+            raise KnowledgeSnapshotError("clock must return a UTC datetime")
+        return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    @staticmethod
+    def _sync_context(source_id: str, created_at: str, version_count: int) -> str:
+        canonical = json.dumps(
+            (source_id, created_at, version_count),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return f"sync-{hashlib.sha256(canonical).hexdigest()}"
 
     @staticmethod
     def _require_cloneable_index(index: object) -> None:
