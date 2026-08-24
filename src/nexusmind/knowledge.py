@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 import hashlib
 import json
@@ -173,6 +174,10 @@ class DocumentVersion:
             self.created_at
         ) is None:
             raise ValueError("created_at must be a canonical UTC timestamp")
+        try:
+            datetime.strptime(self.created_at, "%Y-%m-%dT%H:%M:%S.%fZ")
+        except ValueError as exc:
+            raise ValueError("created_at must be a canonical UTC timestamp") from exc
         if compute_content_hash(self.content) != self.content_hash:
             raise ValueError("content_hash does not match content")
         if stable_document_id(source_id, logical_path) != document_id:

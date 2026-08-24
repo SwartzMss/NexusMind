@@ -83,6 +83,7 @@ def test_document_version_links_to_predecessor_deterministically() -> None:
         ("content_hash", "bad", "content_hash"),
         ("created_at", "2026-08-24T02:00:00Z", "created_at"),
         ("created_at", "2026-08-24T02:00:00.000000+00:00", "created_at"),
+        ("created_at", "2026-99-99T99:99:99.000000Z", "created_at"),
         ("sync_context", "", "sync_context"),
         ("previous_version_id", "bad", "previous_version_id"),
         ("version_id", "bad", "version_id"),
