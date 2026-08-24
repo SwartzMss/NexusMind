@@ -163,7 +163,7 @@ def _require_store_sentinel(path: Path) -> None:
                 "SELECT value FROM knowledge_store_metadata "
                 "WHERE key = 'schema_version'"
             ).fetchone()
-            if version != ("1",):
+            if version not in {("1",), ("2",)}:
                 raise KnowledgeBasePersistenceError(
                     "canonical knowledge state is invalid"
                 )

@@ -229,11 +229,18 @@ kb.close()
 ```text
 security-kb/
 ├── manifest.json          # KnowledgeBase 配置和来源注册
-├── knowledge.db           # canonical 来源与文档
+├── knowledge.db           # canonical 来源、当前文档与内部版本历史
 └── .knowledge-base.lock   # 跨 handle/process 协调
 ```
 
-Chunk、embedding 和检索索引不会持久化，重新打开时会根据 canonical documents 重建。不要手动删除、替换或链接 `.knowledge-base.lock`。
+同步会比较文档内容哈希：首次出现、内容变化，或删除后重新出现时，
+KnowledgeBase 会追加一条不可变的内部版本记录；内容未变化时不会创建新版本。
+文档或来源从当前快照移除后，已有版本仍保留在 SQLite 中，用于后续维护和审计基础。
+
+搜索、问答、检查和索引始终只使用当前有效文档。历史版本不会被分块或进入检索结果，
+本版本也不提供列出或读取历史的公开 API。Git 历史分析、后台自动同步和 UI 时间线不在此功能范围内。
+
+Chunk、embedding 和检索索引不会持久化，重新打开时会根据当前 canonical documents 重建。不要手动删除、替换或链接 `.knowledge-base.lock`。
 
 更完整的同步原子性、并发协调与恢复策略见[技术架构：KnowledgeBase 存储](docs/architecture.md#knowledgebase-存储)。
 

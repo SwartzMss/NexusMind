@@ -56,7 +56,12 @@ def test_remove_source_removes_registration_canonical_and_search_state(tmp_path:
             table: {row[1] for row in database.execute(f"PRAGMA table_info({table})")}
             for table in tables
         }
-    assert tables == {"knowledge_store_metadata", "sources", "documents"}
+    assert tables == {
+        "knowledge_store_metadata",
+        "sources",
+        "documents",
+        "document_versions",
+    }
     persisted_names = {name for names in columns.values() for name in names}
     assert not persisted_names & {
         "chunk", "chunks", "embedding", "embeddings", "index", "reranker", "config"
