@@ -8,6 +8,8 @@ from nexusmind import (
     DocumentVersion,
     KnowledgeCollection,
     KnowledgeCollectionLimits,
+    KnowledgeSnapshot,
+    KnowledgeSnapshotError,
     KnowledgeSource,
     compute_content_hash,
     stable_document_version_id,
@@ -232,3 +234,70 @@ def test_version_limit_rejects_sync_without_changing_state() -> None:
 
     assert collection.snapshot() == before
     assert collection.search("one")
+
+
+def test_restore_round_trips_history_and_indexes_only_current_document() -> None:
+    times = iter(
+        (
+            datetime(2026, 8, 24, 2, 0, tzinfo=timezone.utc),
+            datetime(2026, 8, 24, 2, 1, tzinfo=timezone.utc),
+        )
+    )
+    original = KnowledgeCollection(clock=lambda: next(times))
+    original.sync(Adapter((_document(content="obsolete"),)))
+    original.sync(Adapter((_document(content="current-term"),)))
+    snapshot = original.snapshot()
+    restored = KnowledgeCollection()
+
+    restored.restore(snapshot)
+
+    assert restored.snapshot() == snapshot
+    assert restored.search("obsolete") == ()
+    assert restored.search("current-term")
+
+
+def test_restore_legacy_snapshot_synthesizes_root_versions() -> None:
+    document = _document(content="legacy")
+    snapshot = KnowledgeSnapshot(
+        sources=(Adapter((document,)).source(),), documents=(document,)
+    )
+    restored = KnowledgeCollection(clock=_fixed_clock(3))
+
+    restored.restore(snapshot)
+
+    versions = restored.snapshot().document_versions
+    assert len(versions) == 1
+    assert versions[0].content == "legacy"
+    assert versions[0].previous_version_id is None
+    assert versions[0].created_at == "2026-08-24T02:03:00.000000Z"
+
+
+@pytest.mark.parametrize("mutation", ["missing_predecessor", "stale_tip"])
+def test_restore_rejects_incoherent_history_without_changing_state(
+    mutation: str,
+) -> None:
+    times = iter(
+        (
+            datetime(2026, 8, 24, 2, 0, tzinfo=timezone.utc),
+            datetime(2026, 8, 24, 2, 1, tzinfo=timezone.utc),
+        )
+    )
+    source = KnowledgeCollection(clock=lambda: next(times))
+    source.sync(Adapter((_document(content="one"),)))
+    source.sync(Adapter((_document(content="two"),)))
+    snapshot = source.snapshot()
+    versions = list(snapshot.document_versions)
+    if mutation == "missing_predecessor":
+        object.__setattr__(versions[1], "previous_version_id", "version-" + "9" * 64)
+    else:
+        versions = versions[:1]
+    forged = KnowledgeSnapshot(snapshot.sources, snapshot.documents, tuple(versions))
+    target = KnowledgeCollection(clock=_fixed_clock())
+    target.sync(Adapter((_document(content="preserved"),)))
+    before = target.snapshot()
+
+    with pytest.raises(KnowledgeSnapshotError, match="version"):
+        target.restore(forged)
+
+    assert target.snapshot() == before
+    assert target.search("preserved")

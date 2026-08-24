@@ -921,15 +921,7 @@ class KnowledgeCollection:
         """Atomically replace collection state and rebuild all derived state."""
 
         sources, documents = self._validate_restore_snapshot(snapshot)
-        restored_versions: dict[str, tuple[DocumentVersion, ...]] = {}
-        for version in snapshot.document_versions:
-            if type(version) is not DocumentVersion:
-                raise KnowledgeSnapshotError(
-                    "snapshot document_versions must contain only DocumentVersion values"
-                )
-            restored_versions[version.document_id] = (
-                restored_versions.get(version.document_id, ()) + (deepcopy(version),)
-            )
+        restored_versions = self._validate_restore_versions(snapshot, documents)
         prepared: dict[str, tuple[Chunk, ...]] = {}
         for document_id in sorted(documents):
             chunk_document = deepcopy(documents[document_id])
@@ -975,6 +967,8 @@ class KnowledgeCollection:
             raise KnowledgeSnapshotError("snapshot sources must be a tuple")
         if type(snapshot.documents) is not tuple:
             raise KnowledgeSnapshotError("snapshot documents must be a tuple")
+        if type(snapshot.document_versions) is not tuple:
+            raise KnowledgeSnapshotError("snapshot document_versions must be a tuple")
 
         sources: dict[str, KnowledgeSource] = {}
         for source in snapshot.sources:
@@ -1002,6 +996,115 @@ class KnowledgeCollection:
         if len(documents) > self._limits.max_documents:
             raise KnowledgeCollectionLimitError("collection exceeds max_documents")
         return sources, documents
+
+    def _validate_restore_versions(
+        self,
+        snapshot: KnowledgeSnapshot,
+        documents: dict[str, Document],
+    ) -> dict[str, tuple[DocumentVersion, ...]]:
+        if not snapshot.document_versions:
+            if not documents:
+                return {}
+            created_at = self._format_clock_value(self._clock())
+            sync_context = self._sync_context("restore", created_at, 0)
+            return {
+                document_id: (
+                    DocumentVersion.from_document(
+                        documents[document_id],
+                        created_at=created_at,
+                        sync_context=sync_context,
+                    ),
+                )
+                for document_id in sorted(documents)
+            }
+        if len(snapshot.document_versions) > self._limits.max_document_versions:
+            raise KnowledgeCollectionLimitError(
+                "collection exceeds max_document_versions"
+            )
+
+        grouped: dict[str, list[DocumentVersion]] = {}
+        version_ids: set[str] = set()
+        for version in snapshot.document_versions:
+            if type(version) is not DocumentVersion:
+                raise KnowledgeSnapshotError(
+                    "snapshot document_versions must contain only DocumentVersion values"
+                )
+            try:
+                validated = DocumentVersion(
+                    version_id=version.version_id,
+                    document_id=version.document_id,
+                    source_id=version.source_id,
+                    logical_path=version.logical_path,
+                    content=version.content,
+                    content_hash=version.content_hash,
+                    created_at=version.created_at,
+                    previous_version_id=version.previous_version_id,
+                    sync_context=version.sync_context,
+                )
+            except (TypeError, ValueError) as exc:
+                raise KnowledgeSnapshotError(
+                    "snapshot contains an incoherent document version"
+                ) from exc
+            if validated.version_id in version_ids:
+                raise KnowledgeSnapshotError(
+                    "snapshot contains duplicate document version IDs"
+                )
+            version_ids.add(validated.version_id)
+            grouped.setdefault(validated.document_id, []).append(validated)
+
+        ordered: dict[str, tuple[DocumentVersion, ...]] = {}
+        for document_id, candidates in grouped.items():
+            by_id = {version.version_id: version for version in candidates}
+            roots = [
+                version for version in candidates if version.previous_version_id is None
+            ]
+            if len(roots) != 1:
+                raise KnowledgeSnapshotError(
+                    "document version chain must contain exactly one root"
+                )
+            children: dict[str, DocumentVersion] = {}
+            for version in candidates:
+                predecessor = version.previous_version_id
+                if predecessor is None:
+                    continue
+                if predecessor not in by_id:
+                    raise KnowledgeSnapshotError(
+                        "document version chain has a missing predecessor"
+                    )
+                if predecessor in children:
+                    raise KnowledgeSnapshotError("document version chain contains a fork")
+                children[predecessor] = version
+            chain: list[DocumentVersion] = []
+            current = roots[0]
+            while True:
+                if current in chain:
+                    raise KnowledgeSnapshotError("document version chain contains a cycle")
+                chain.append(current)
+                successor = children.get(current.version_id)
+                if successor is None:
+                    break
+                current = successor
+            if len(chain) != len(candidates):
+                raise KnowledgeSnapshotError("document version chain is disconnected")
+            ordered[document_id] = tuple(deepcopy(version) for version in chain)
+
+        for document_id, document in documents.items():
+            chain = ordered.get(document_id)
+            if chain is None:
+                raise KnowledgeSnapshotError(
+                    "current document has no document version history"
+                )
+            latest = chain[-1]
+            if (
+                latest.source_id != document.source_id
+                or latest.logical_path != document.logical_path
+                or latest.content != document.content
+                or latest.content_hash != document.content_hash
+            ):
+                raise KnowledgeSnapshotError(
+                    "current document does not match latest document version"
+                )
+        return ordered
 
     @staticmethod
     def _validate_document_identity(document: Document) -> None:

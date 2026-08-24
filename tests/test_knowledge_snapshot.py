@@ -176,7 +176,11 @@ def test_restore_replaces_existing_state_and_rebuilds_searchable_chunks() -> Non
     assert search_result.source == _source("docs")
     assert search_result.document == restored
     assert search_result.hit.chunk.document_id == restored.document_id
-    assert collection.snapshot() == KnowledgeSnapshot((_source("docs"),), (restored,))
+    restored_snapshot = collection.snapshot()
+    assert restored_snapshot.sources == (_source("docs"),)
+    assert restored_snapshot.documents == (restored,)
+    assert len(restored_snapshot.document_versions) == 1
+    assert restored_snapshot.document_versions[0].content == restored.content
 
 
 def test_restore_rebuilds_chinese_search_state_with_current_index_analyzer() -> None:
