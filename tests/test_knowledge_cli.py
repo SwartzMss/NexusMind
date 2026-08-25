@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from nexusmind import cli
 
 
-def test_cli_create_add_sync_search_inspect_and_remove(tmp_path, capsys) -> None:
+def _capture_runtime_logs(monkeypatch, caplog) -> None:
+    logger = logging.getLogger("nexusmind.runtime")
+    monkeypatch.setattr(logger, "propagate", True)
+    caplog.set_level(logging.INFO, logger=logger.name)
+
+
+def test_cli_create_add_sync_search_inspect_and_remove(tmp_path, capsys, caplog, monkeypatch) -> None:
+    _capture_runtime_logs(monkeypatch, caplog)
     source = tmp_path / "notes"
     source.mkdir()
     (source / "security.md").write_text("密钥轮换需要记录新的版本。", encoding="utf-8")
@@ -18,9 +26,15 @@ def test_cli_create_add_sync_search_inspect_and_remove(tmp_path, capsys) -> None
     assert sources[0]["source_id"] == "docs"
 
     assert cli.main(["sync", "--knowledge-base", str(root), "--json"]) == 0
+    assert [record.event for record in caplog.records[-2:]] == ["sync_started", "sync_completed"]
+    assert caplog.records[-1].document_count == 1
+    caplog.clear()
     assert cli.main(["search", "密钥轮换", "--knowledge-base", str(root), "--json"]) == 0
     results = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert results[0]["document"]["logical_path"] == "security.md"
+    assert [record.event for record in caplog.records] == ["search_started", "search_completed"]
+    assert caplog.records[-1].result_count == 1
+    assert all("密钥轮换" not in record.getMessage() for record in caplog.records)
 
     assert cli.main(["inspect", "--knowledge-base", str(root), "--json"]) == 0
     inspection = json.loads(capsys.readouterr().out.splitlines()[-1])

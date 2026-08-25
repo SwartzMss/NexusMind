@@ -6,6 +6,7 @@ import argparse
 from dataclasses import asdict, is_dataclass
 from enum import Enum
 import json
+import logging
 import sys
 from typing import Any
 
@@ -15,6 +16,10 @@ from nexusmind.knowledge_answer import KnowledgeAnswerError
 from nexusmind.knowledge_base import KnowledgeBase
 from nexusmind.knowledge_base_manifest import KnowledgeBaseError, LocalDirectorySourceConfig, LocalFileSourceConfig
 from nexusmind.knowledge_query import knowledge_query_result_dict
+from nexusmind.runtime_support import runtime_operation
+
+
+RUNTIME_LOGGER = logging.getLogger("nexusmind.runtime")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -78,39 +83,50 @@ def _source(args: argparse.Namespace) -> int:
 
 
 def _sync(args: argparse.Namespace) -> int:
-    kb = KnowledgeBase.open(args.knowledge_base)
-    try:
-        result: Any = kb.sync_source(args.source_id) if args.source_id else kb.sync()
-        if args.json: _print_json(result)
-        elif args.source_id: print(f"Synchronized source: {args.source_id}")
-        else: print(f"Synchronized {len(result)} source(s)")
-    finally: kb.close()
+    fields = {"source_id": args.source_id} if args.source_id else {}
+    with runtime_operation(RUNTIME_LOGGER, "sync", **fields) as operation:
+        kb = KnowledgeBase.open(args.knowledge_base)
+        try:
+            result: Any = kb.sync_source(args.source_id) if args.source_id else kb.sync()
+            sync_results = result if isinstance(result, tuple) else (result,)
+            operation["document_count"] = sum(
+                item.documents_added + item.documents_updated + item.documents_unchanged
+                for item in sync_results
+            )
+            if args.json: _print_json(result)
+            elif args.source_id: print(f"Synchronized source: {args.source_id}")
+            else: print(f"Synchronized {len(result)} source(s)")
+        finally: kb.close()
     return 0
 
 
 def _search(args: argparse.Namespace) -> int:
-    kb = KnowledgeBase.open(args.knowledge_base)
-    try:
-        results = kb.search(args.query, limit=args.limit)
-        if args.json: _print_json(results)
-        else:
-            for index, result in enumerate(results, start=1):
-                print(f"{index}. {result.document.logical_path} ({result.hit.score:.6f})"); print(result.hit.chunk.content)
-    finally: kb.close()
+    with runtime_operation(RUNTIME_LOGGER, "search") as operation:
+        kb = KnowledgeBase.open(args.knowledge_base)
+        try:
+            results = kb.search(args.query, limit=args.limit)
+            operation["result_count"] = len(results)
+            if args.json: _print_json(results)
+            else:
+                for index, result in enumerate(results, start=1):
+                    print(f"{index}. {result.document.logical_path} ({result.hit.score:.6f})"); print(result.hit.chunk.content)
+        finally: kb.close()
     return 0
 
 
 def _query(args: argparse.Namespace) -> int:
-    config = load_model_config_from_env(); provider = OpenAICompatibleAnswerProvider(config)
-    kb = KnowledgeBase.open(args.knowledge_base, answer_generator=provider)
-    try: result = kb.query(args.question)
-    finally: kb.close()
-    if args.json:
-        print(json.dumps(knowledge_query_result_dict(result, include_debug=args.debug), ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True)); return 0
-    print("Answer:"); print(result.answer.text); print("\nSources:")
-    for citation in result.citations: print(f"[{citation.citation_id}] {citation.logical_path}")
-    if args.debug:
-        print(f"\nRetrieval backend: {result.trace.retrieval_backend}"); print(f"Context: {result.trace.context_character_count} chars"); print(f"Trace: {result.trace_id}")
+    with runtime_operation(RUNTIME_LOGGER, "query") as operation:
+        config = load_model_config_from_env(); provider = OpenAICompatibleAnswerProvider(config)
+        kb = KnowledgeBase.open(args.knowledge_base, answer_generator=provider)
+        try: result = kb.query(args.question)
+        finally: kb.close()
+        operation["citation_count"] = len(result.citations)
+        if args.json:
+            print(json.dumps(knowledge_query_result_dict(result, include_debug=args.debug), ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True)); return 0
+        print("Answer:"); print(result.answer.text); print("\nSources:")
+        for citation in result.citations: print(f"[{citation.citation_id}] {citation.logical_path}")
+        if args.debug:
+            print(f"\nRetrieval backend: {result.trace.retrieval_backend}"); print(f"Context: {result.trace.context_character_count} chars"); print(f"Trace: {result.trace_id}")
     return 0
 
 
