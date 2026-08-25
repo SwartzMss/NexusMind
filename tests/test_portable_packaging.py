@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 
@@ -9,6 +10,24 @@ def test_pyinstaller_spec_targets_desktop_entry_and_onedir() -> None:
     assert "src/nexusmind/desktop.py" in text.replace("\\", "/")
     assert "COLLECT(" in text
     assert "console=True" in text
+
+
+def test_pyinstaller_spec_resolves_repository_root_from_spec_directory() -> None:
+    spec = Path("packaging/nexusmind.spec").resolve()
+    tree = ast.parse(spec.read_text(encoding="utf-8"))
+    root_assignment = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "ROOT" for target in node.targets)
+    )
+
+    root = eval(
+        compile(ast.Expression(root_assignment.value), str(spec), "eval"),
+        {"Path": Path, "SPECPATH": str(spec.parent)},
+    )
+
+    assert root == spec.parent.parent
 
 
 def test_portable_script_builds_smoke_tests_and_archives() -> None:
