@@ -263,6 +263,50 @@ Chunk、embedding 和检索索引不会持久化，重新打开时会根据当�
 - 引用只能由本次模型上下文中的 provenance allowlist 构造
 - Manifest、SQLite 和锁文件身份异常时，KnowledgeBase 会 fail closed
 
+## Windows 可移植 CLI
+
+Windows portable artifact 使用 PyInstaller `onedir` 模式，将 `nexusmind.exe`、
+Python runtime 和运行依赖放在同一个应用目录中。解压
+`nexusmind-windows-portable.zip` 后可直接运行：
+
+```powershell
+.\nexusmind\nexusmind.exe --help
+```
+
+无需另行安装 Python。portable 应用目录只包含程序文件，不包含用户数据、配置、
+日志或模型；GUI、安装器、自动更新和模型分发不属于该 artifact。
+
+首次启动会创建稳定的可写运行目录：
+
+```text
+%USERPROFILE%\.nexusmind\
+├── config\
+├── data\
+├── logs\
+│   └── nexusmind.log
+└── models\
+```
+
+可通过 `NEXUSMIND_RUNTIME_DIR` 指定其他绝对路径。相对路径会被拒绝，避免数据位置
+受当前工作目录影响。现有 KnowledgeBase 路径参数仍由用户显式指定；建议将需要与
+portable runtime 一起管理的本地数据库放在 `data\` 下。
+
+`logs\nexusmind.log` 使用有界轮转的单行 JSON 日志，记录启动、退出、同步、搜索、
+问答和失败诊断。日志只保留操作名、计数、耗时、错误类型等诊断字段，不写入 API
+Key、完整问题、文档内容、回答或工具输出。未预期异常会在终端显示简短提示和日志
+位置，并以非零状态退出。
+
+维护者可在 Windows PowerShell 中构建同一 portable ZIP：
+
+```powershell
+python -m pip install -e ".[dev,packaging]"
+.\scripts\build-portable.ps1
+```
+
+脚本会构建 `dist\nexusmind\nexusmind.exe`、用隔离运行目录执行 `--help` smoke test，
+确认启动日志已生成，然后创建 `dist\nexusmind-windows-portable.zip`。CI 也会在
+`windows-latest` 上执行该真实打包和 smoke test。
+
 ## 开发验证
 
 ```powershell

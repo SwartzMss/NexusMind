@@ -13,3 +13,24 @@ def test_supported_python_range_matches_deterministic_unicode_policy() -> None:
     project = tomllib.loads(pyproject.read_text(encoding="utf-8"))
 
     assert project["project"]["requires-python"] == ">=3.11,<3.14"
+
+
+def test_project_exposes_desktop_entry_and_packaging_extra() -> None:
+    pyproject = Path(__file__).parents[1] / "pyproject.toml"
+    project = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]
+
+    assert project["scripts"]["nexusmind"] == "nexusmind.desktop:main"
+    assert any(requirement.startswith("pyinstaller") for requirement in project["optional-dependencies"]["packaging"])
+
+
+def test_readme_documents_windows_portable_runtime() -> None:
+    readme = (Path(__file__).parents[1] / "README.md").read_text(encoding="utf-8")
+
+    for required in (
+        "NEXUSMIND_RUNTIME_DIR",
+        r"%USERPROFILE%\.nexusmind",
+        "nexusmind.log",
+        "build-portable.ps1",
+        "nexusmind-windows-portable.zip",
+    ):
+        assert required in readme
