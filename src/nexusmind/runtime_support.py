@@ -10,6 +10,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
+import sys
 import time
 import traceback
 from collections.abc import Iterator
@@ -67,7 +68,12 @@ class JsonLogFormatter(logging.Formatter):
 def resolve_runtime_root() -> Path:
     """Resolve the absolute mutable-data root without depending on cwd."""
     configured = os.getenv("NEXUSMIND_RUNTIME_DIR", "").strip()
-    root = Path(configured).expanduser() if configured else Path.home() / ".nexusmind"
+    if configured:
+        root = Path(configured).expanduser()
+    elif getattr(sys, "frozen", False):
+        root = Path(sys.executable).resolve().parent / ".nexusmind"
+    else:
+        root = Path.home() / ".nexusmind"
     if not root.is_absolute():
         raise RuntimeLayoutError("NEXUSMIND_RUNTIME_DIR must be an absolute path")
     return root

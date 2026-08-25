@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -29,6 +30,24 @@ def test_resolve_runtime_root_accepts_absolute_override(monkeypatch, tmp_path: P
     monkeypatch.setenv("NEXUSMIND_RUNTIME_DIR", str(root))
 
     assert resolve_runtime_root() == root
+
+
+def test_resolve_runtime_root_uses_frozen_executable_directory(monkeypatch, tmp_path: Path) -> None:
+    executable = tmp_path / "portable" / "nexusmind.exe"
+    monkeypatch.delenv("NEXUSMIND_RUNTIME_DIR", raising=False)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(executable))
+
+    assert resolve_runtime_root() == executable.parent / ".nexusmind"
+
+
+def test_absolute_override_wins_over_frozen_default(monkeypatch, tmp_path: Path) -> None:
+    override = tmp_path / "managed"
+    monkeypatch.setenv("NEXUSMIND_RUNTIME_DIR", str(override))
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "portable" / "nexusmind.exe"))
+
+    assert resolve_runtime_root() == override
 
 
 def test_resolve_runtime_root_rejects_relative_override(monkeypatch) -> None:
