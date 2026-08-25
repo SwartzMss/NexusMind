@@ -273,23 +273,33 @@ Python runtime 和运行依赖放在同一个应用目录中。解压
 .\nexusmind\nexusmind.exe --help
 ```
 
-无需另行安装 Python。portable 应用目录只包含程序文件，不包含用户数据、配置、
-日志或模型；GUI、安装器、自动更新和模型分发不属于该 artifact。
+无需另行安装 Python。ZIP 只包含程序文件，不预置用户数据、配置、日志或模型；
+GUI、安装器、自动更新和模型分发不属于该 artifact。
 
-首次启动会创建稳定的可写运行目录：
+首次启动会在 `nexusmind.exe` 同级创建 `.nexusmind` 可写运行目录：
 
 ```text
-%USERPROFILE%\.nexusmind\
-├── config\
-├── data\
-├── logs\
-│   └── nexusmind.log
-└── models\
+nexusmind\
+├── nexusmind.exe
+├── _internal\
+└── .nexusmind\
+    ├── config\
+    ├── data\
+    ├── logs\
+    │   └── nexusmind.log
+    └── models\
 ```
 
-可通过 `NEXUSMIND_RUNTIME_DIR` 指定其他绝对路径。相对路径会被拒绝，避免数据位置
-受当前工作目录影响。现有 KnowledgeBase 路径参数仍由用户显式指定；建议将需要与
-portable runtime 一起管理的本地数据库放在 `data\` 下。
+该位置由 exe 的绝对路径确定，不受启动时的当前工作目录影响。exe 所在目录必须可写；
+如果目录只读，可将整个 portable 目录移动到可写位置，或通过
+`NEXUSMIND_RUNTIME_DIR` 指定其他绝对路径。相对覆盖路径仍会被拒绝。现有
+KnowledgeBase 路径参数由用户显式指定；建议将需要与 portable runtime 一起管理的
+本地数据库放在 `.nexusmind\data\` 下。
+
+旧版本默认使用的用户目录数据不会自动迁移到 exe 同级。需要保留旧数据时，请手动
+复制原 `.nexusmind` 内容，或将 `NEXUSMIND_RUNTIME_DIR` 暂时指向旧目录。升级时应
+保留或备份 exe 同级的 `.nexusmind`；删除整个解压目录也会删除其中的日志、配置、
+模型及其他本地数据。
 
 `logs\nexusmind.log` 使用有界轮转的单行 JSON 日志，记录启动、退出、同步、搜索、
 问答和失败诊断。日志只保留操作名、计数、耗时、错误类型等诊断字段，不写入 API
@@ -303,9 +313,10 @@ python -m pip install -e ".[dev,packaging]"
 .\scripts\build-portable.ps1
 ```
 
-脚本会构建 `dist\nexusmind\nexusmind.exe`、用隔离运行目录执行 `--help` smoke test，
-确认启动日志已生成，然后创建 `dist\nexusmind-windows-portable.zip`。CI 也会在
-`windows-latest` 上执行该真实打包和 smoke test。
+脚本会构建 `dist\nexusmind\nexusmind.exe`、从应用目录外执行 `--help` smoke test，
+确认 exe 同级的 `.nexusmind\logs\nexusmind.log` 已生成，然后创建
+`dist\nexusmind-windows-portable.zip`。CI 也会在 `windows-latest` 上执行该真实
+打包和 smoke test。
 
 ## 开发验证
 
