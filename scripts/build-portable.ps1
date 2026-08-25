@@ -5,7 +5,7 @@ $distRoot = Join-Path $repositoryRoot "dist"
 $bundlePath = Join-Path $distRoot "nexusmind"
 $executablePath = Join-Path $bundlePath "nexusmind.exe"
 $archivePath = Join-Path $distRoot "nexusmind-windows-portable.zip"
-$smokeRuntime = Join-Path $repositoryRoot "build\smoke-runtime"
+$smokeWorkingDirectory = Join-Path $repositoryRoot "build\smoke-cwd"
 
 Push-Location $repositoryRoot
 try {
@@ -17,12 +17,21 @@ try {
         throw "Portable executable was not generated: $executablePath"
     }
 
-    $env:NEXUSMIND_RUNTIME_DIR = $smokeRuntime
-    & $executablePath --help
+    New-Item -ItemType Directory -Path $smokeWorkingDirectory -Force | Out-Null
+    if (Test-Path Env:NEXUSMIND_RUNTIME_DIR) {
+        Remove-Item Env:NEXUSMIND_RUNTIME_DIR
+    }
+    Push-Location $smokeWorkingDirectory
+    try {
+        & $executablePath --help
+    }
+    finally {
+        Pop-Location
+    }
     if ($LASTEXITCODE -ne 0) {
         throw "Portable executable smoke test failed with exit code $LASTEXITCODE"
     }
-    $smokeLog = Join-Path $smokeRuntime "logs\nexusmind.log"
+    $smokeLog = Join-Path $bundlePath ".nexusmind\logs\nexusmind.log"
     if (-not (Test-Path -Path $smokeLog -PathType Leaf)) {
         throw "Portable executable did not create its runtime log: $smokeLog"
     }
