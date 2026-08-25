@@ -316,7 +316,8 @@ python -m pip install -e ".[dev,packaging]"
 脚本会构建 `dist\nexusmind\nexusmind.exe`、从应用目录外执行 `--help` smoke test，
 确认 exe 同级的 `.nexusmind\logs\nexusmind.log` 已生成，然后创建
 `dist\nexusmind-windows-portable.zip`。CI 也会在 `windows-latest` 上执行该真实
-打包和 smoke test。
+打包和 smoke test；Actions Artifact 直接包含 portable 目录内容，下载后只需解压
+一次。
 
 ## 开发验证
 

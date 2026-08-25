@@ -53,3 +53,10 @@ def test_portable_script_removes_smoke_runtime_before_archiving() -> None:
 
     assert cleanup in text
     assert text.index(cleanup) < text.index("Compress-Archive")
+
+
+def test_ci_uploads_portable_directory_without_nested_zip() -> None:
+    text = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+    assert "path: dist/nexusmind/" in text
+    assert "path: dist/nexusmind-windows-portable.zip" not in text
