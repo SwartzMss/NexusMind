@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from types import SimpleNamespace
 
 from nexusmind import cli
@@ -29,8 +30,11 @@ def _patch(monkeypatch):
     return knowledge
 
 
-def test_query_cli_outputs_answer_sources_and_debug(monkeypatch, capsys) -> None:
+def test_query_cli_outputs_answer_sources_and_debug(monkeypatch, capsys, caplog) -> None:
     knowledge = _patch(monkeypatch)
+    logger = logging.getLogger("nexusmind.runtime")
+    monkeypatch.setattr(logger, "propagate", True)
+    caplog.set_level(logging.INFO, logger=logger.name)
     assert cli.main(["query", "Binder UID?", "--debug"]) == 0
     output = capsys.readouterr().out
     assert "Kernel credentials [K1]" in output
@@ -38,6 +42,9 @@ def test_query_cli_outputs_answer_sources_and_debug(monkeypatch, capsys) -> None
     assert "Retrieval backend: BM25" in output
     assert "3200 chars" in output
     assert knowledge.closed
+    assert [record.event for record in caplog.records] == ["query_started", "query_completed"]
+    assert caplog.records[-1].citation_count == 1
+    assert all("Binder UID?" not in record.getMessage() for record in caplog.records)
 
 
 def test_query_cli_json(monkeypatch, capsys) -> None:
