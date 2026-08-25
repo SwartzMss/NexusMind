@@ -4,6 +4,7 @@ $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $distRoot = Join-Path $repositoryRoot "dist"
 $bundlePath = Join-Path $distRoot "nexusmind"
 $executablePath = Join-Path $bundlePath "nexusmind.exe"
+$smokeRuntimeRoot = Join-Path $bundlePath ".nexusmind"
 $archivePath = Join-Path $distRoot "nexusmind-windows-portable.zip"
 $smokeWorkingDirectory = Join-Path $repositoryRoot "build\smoke-cwd"
 
@@ -35,6 +36,7 @@ try {
     if (-not (Test-Path -Path $smokeLog -PathType Leaf)) {
         throw "Portable executable did not create its runtime log: $smokeLog"
     }
+    Remove-Item -Path $smokeRuntimeRoot -Recurse -Force
 
     if (Test-Path -Path $archivePath) {
         Remove-Item -Path $archivePath -Force

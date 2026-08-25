@@ -45,3 +45,11 @@ def test_portable_script_smoke_tests_executable_relative_runtime() -> None:
     assert "Remove-Item Env:NEXUSMIND_RUNTIME_DIR" in text
     assert "Push-Location $smokeWorkingDirectory" in text
     assert 'Join-Path $bundlePath ".nexusmind\\logs\\nexusmind.log"' in text
+
+
+def test_portable_script_removes_smoke_runtime_before_archiving() -> None:
+    text = Path("scripts/build-portable.ps1").read_text(encoding="utf-8")
+    cleanup = "Remove-Item -Path $smokeRuntimeRoot -Recurse -Force"
+
+    assert cleanup in text
+    assert text.index(cleanup) < text.index("Compress-Archive")
