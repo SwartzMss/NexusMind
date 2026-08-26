@@ -50,6 +50,11 @@ def test_cli_create_add_sync_search_inspect_and_remove(tmp_path, capsys, caplog,
     UUID(inspection["status"]["knowledge_base_id"])
     assert inspection["status"]["document_count"] == 1
 
+    assert cli.main(["inspect", "--knowledge-base", str(root)]) == 0
+    plain_inspection = capsys.readouterr().out
+    assert "KnowledgeBase: Security" in plain_inspection
+    assert inspection["status"]["knowledge_base_id"] not in plain_inspection
+
     assert cli.main(["diagnose", "密钥轮换", "--knowledge-base", str(root), "--json"]) == 0
     diagnostics = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert diagnostics["results"]

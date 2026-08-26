@@ -207,6 +207,42 @@ def test_search_preserves_order_limit_and_provenance() -> None:
     assert controller.view.search_results[0].chunk_id == "chunk-second"
 
 
+def test_render_translates_internal_source_ids_to_paths() -> None:
+    fake = FakeKnowledgeBase(
+        sources=[
+            LocalDirectorySourceConfig(
+                source_id="internal-android", path=r"C:\knowledge\android"
+            ),
+            LocalDirectorySourceConfig(
+                source_id="internal-qnx", path=r"C:\knowledge\qnx"
+            ),
+        ],
+        search_results=(
+            _search_result("internal-android", "README.md", 9.0),
+            _search_result("internal-qnx", "README.md", 8.0),
+        ),
+    )
+    controller = _controller(fake)
+    controller.sync_all()
+    controller.search("README", limit=2)
+    app, _ = _window(controller)
+
+    app._render()
+
+    sync_output = app.sync_text.items[0]
+    search_output = app.results.items[0]
+    assert r"C:\knowledge\android" in sync_output
+    assert r"C:\knowledge\qnx" in sync_output
+    assert r"[C:\knowledge\android] README.md" in search_output
+    assert r"[C:\knowledge\qnx] README.md" in search_output
+    assert "internal-android" not in sync_output
+    assert "internal-qnx" not in sync_output
+    result_headers = tuple(
+        line for line in search_output.splitlines() if line.startswith("[")
+    )
+    assert all("internal-" not in line for line in result_headers)
+
+
 @pytest.mark.parametrize("query,limit", [("", 10), (" ", 10), ("query", 0), ("query", MAX_SEARCH_LIMIT + 1)])
 def test_search_rejects_invalid_ui_inputs_without_calling_runtime(
     query: str, limit: int

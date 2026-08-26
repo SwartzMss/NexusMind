@@ -177,7 +177,8 @@ def _inspect(args: argparse.Namespace) -> int:
             print(f"Document: {result.document.logical_path}")
             for chunk in result.chunks: print(f"{chunk.ordinal}\t{chunk.start_offset}:{chunk.end_offset}\t{chunk.preview}")
         else:
-            print(f"KnowledgeBase: {result.status.knowledge_base_id}"); print(f"Sources: {len(result.sources)}"); print(f"Documents: {len(result.documents)}")
+            display = result.status.display_name or Path(args.knowledge_base).resolve(strict=False).name
+            print(f"KnowledgeBase: {display}"); print(f"Sources: {len(result.sources)}"); print(f"Documents: {len(result.documents)}")
     finally: kb.close()
     return 0
 

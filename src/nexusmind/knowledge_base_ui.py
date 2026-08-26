@@ -521,13 +521,17 @@ class KnowledgeBaseTkApp:
             self.source_list.insert(
                 self._tk.END, f"{source.source_type} | {source.path}"
             )
+        source_paths = {source.source_id: source.path for source in view.sources}
         sync_lines = [
-            f"Source: +{item.documents_added} ~{item.documents_updated} "
+            f"{source_paths.get(item.source_id, 'Unknown source')}: "
+            f"+{item.documents_added} ~{item.documents_updated} "
             f"={item.documents_unchanged} -{item.documents_removed}; chunks {item.chunks_indexed}"
             for item in view.sync_results
         ]
         result_lines = [
-            f"[{item.score:.6g}] {item.logical_path}\n"
+            f"[{item.score:.6g}] "
+            f"[{source_paths.get(item.source_id, 'Unknown source')}] "
+            f"{item.logical_path}\n"
             f"chunk: {item.chunk_id}\n{item.snippet}\n"
             for item in view.search_results
         ]
