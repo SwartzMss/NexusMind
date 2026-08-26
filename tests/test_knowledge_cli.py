@@ -94,3 +94,27 @@ def test_cli_rejects_ambiguous_legacy_source_paths(tmp_path, capsys) -> None:
         == 1
     )
     assert "legacy duplicate registrations" in capsys.readouterr().err
+
+    assert (
+        cli.main(
+            [
+                "source",
+                "remove",
+                "--knowledge-base",
+                str(root),
+                "--id",
+                "docs-a",
+            ]
+        )
+        == 0
+    )
+    assert cli.main(["source", "list", "--knowledge-base", str(root), "--json"]) == 0
+    remaining = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert [item["source_id"] for item in remaining] == ["docs-b"]
+
+    assert (
+        cli.main(
+            ["sync", "--knowledge-base", str(root), "--source", str(source)]
+        )
+        == 0
+    )

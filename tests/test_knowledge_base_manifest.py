@@ -99,6 +99,14 @@ def test_automatic_source_id_is_stable_for_normalized_path(source_type: type) ->
     assert direct.source_id == equivalent.source_id
 
 
+def test_automatic_source_id_distinguishes_file_and_directory_types() -> None:
+    path = str(ABSOLUTE_BASE / "source")
+
+    assert LocalFileSourceConfig(path=path).source_id != LocalDirectorySourceConfig(
+        path=path
+    ).source_id
+
+
 @pytest.mark.parametrize("source_id", ["", " ", "\t", "\r\n", 1, None])
 def test_source_id_must_be_non_empty_text(source_id: object) -> None:
     with pytest.raises(KnowledgeBaseConfigError):

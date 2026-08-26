@@ -87,6 +87,14 @@ nexusmind diagnose "密钥轮换" --knowledge-base ./security-kb --limit 5
 
 同一个规范化来源路径在一个 KnowledgeBase 中只能注册一次。CLI、桌面界面和 Python API 都会执行这项检查，避免同一份内容以不同内部 ID 被重复同步。
 
+如果旧版 KnowledgeBase 已经包含相同路径的多个来源，按路径操作会报告歧义。此时可通过 `source list --json` 查看旧的内部 ID，并使用恢复选项删除其中一个重复注册：
+
+```powershell
+nexusmind source remove --id docs-a --knowledge-base ./security-kb
+```
+
+`--id` 仅用于修复旧数据；新来源仍应始终通过路径操作。
+
 删除来源及其 canonical documents：
 
 ```powershell

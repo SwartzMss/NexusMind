@@ -68,7 +68,12 @@ class LocalFileSourceConfig:
             object.__setattr__(
                 self,
                 "source_id",
-                str(uuid5(NAMESPACE_URL, f"nexusmind-source:{_normalized_path(self.path)}")),
+                str(
+                    uuid5(
+                        NAMESPACE_URL,
+                        f"nexusmind-source:{self.type}:{_normalized_path(self.path)}",
+                    )
+                ),
             )
         _require_non_empty_text(self.source_id, "source_id")
 
@@ -86,7 +91,12 @@ class LocalDirectorySourceConfig:
             object.__setattr__(
                 self,
                 "source_id",
-                str(uuid5(NAMESPACE_URL, f"nexusmind-source:{_normalized_path(self.path)}")),
+                str(
+                    uuid5(
+                        NAMESPACE_URL,
+                        f"nexusmind-source:{self.type}:{_normalized_path(self.path)}",
+                    )
+                ),
             )
         _require_non_empty_text(self.source_id, "source_id")
 

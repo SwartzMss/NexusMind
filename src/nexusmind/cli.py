@@ -40,7 +40,10 @@ def _parser() -> argparse.ArgumentParser:
     source_list = source_commands.add_parser("list", help="list registered sources")
     source_list.add_argument("--knowledge-base", default="."); source_list.add_argument("--json", action="store_true")
     source_remove = source_commands.add_parser("remove", help="remove a source and its documents")
-    source_remove.add_argument("source_path", metavar="PATH"); source_remove.add_argument("--knowledge-base", default=".")
+    source_remove_selector = source_remove.add_mutually_exclusive_group(required=True)
+    source_remove_selector.add_argument("source_path", metavar="PATH", nargs="?")
+    source_remove_selector.add_argument("--id", dest="source_id", help="remove by internal ID to repair legacy duplicate paths")
+    source_remove.add_argument("--knowledge-base", default=".")
 
     sync = commands.add_parser("sync", help="synchronize registered sources")
     sync.add_argument("--knowledge-base", default="."); sync.add_argument("--source", dest="source_path", metavar="PATH"); sync.add_argument("--json", action="store_true")
@@ -88,8 +91,11 @@ def _source(args: argparse.Namespace) -> int:
             normalized = str(source_path.resolve(strict=True))
             kb.add_source(kind(path=normalized)); print(f"Registered source: {normalized}")
         elif args.source_command == "remove":
-            item = _source_by_path(kb, args.source_path)
-            kb.remove_source(item.source_id); print(f"Removed source: {item.path}")
+            if args.source_id:
+                kb.remove_source(args.source_id); print("Removed source by internal ID")
+            else:
+                item = _source_by_path(kb, args.source_path)
+                kb.remove_source(item.source_id); print(f"Removed source: {item.path}")
         else:
             sources = kb.list_sources()
             if args.json: _print_json(sources)
