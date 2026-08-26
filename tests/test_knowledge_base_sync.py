@@ -116,7 +116,9 @@ def test_failed_registration_write_does_not_swap_memory(
     assert tuple(item.source_id for item in kb.list_sources()) == ("two",)
 
 
-def test_remove_and_readd_by_path_preserves_document_version_chain(tmp_path: Path) -> None:
+def test_auto_identity_remove_and_readd_preserves_document_version_chain(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "kb"
     source = tmp_path / "notes.md"
     source.write_text("first version", encoding="utf-8")
