@@ -123,3 +123,9 @@ def test_cli_rejects_ambiguous_legacy_source_paths(tmp_path, capsys) -> None:
         )
         == 0
     )
+
+    assert cli.main(["source", "remove", str(source), "--knowledge-base", str(root)]) == 0
+    assert cli.main(["source", "add", str(source), "--knowledge-base", str(root)]) == 0
+    assert cli.main(["source", "list", "--knowledge-base", str(root), "--json"]) == 0
+    restored = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert [item["source_id"] for item in restored] == ["docs-b"]

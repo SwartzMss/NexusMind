@@ -115,10 +115,11 @@ def _normalized_path(path: str) -> str:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class KnowledgeBaseManifest:
-    format_version: ClassVar[str] = "1"
+    format_version: ClassVar[str] = "2"
     knowledge_base_id: str
     display_name: str | None = None
     sources: tuple[RegisteredSourceConfig, ...] = ()
+    retired_sources: tuple[RegisteredSourceConfig, ...] = ()
     limits: InitVar[KnowledgeBaseLimits | None] = None
 
     def __post_init__(self, limits: KnowledgeBaseLimits | None) -> None:
@@ -134,14 +135,17 @@ class KnowledgeBaseManifest:
             display_name = _require_non_empty_text(self.display_name, "display_name")
             if len(display_name) > active_limits.max_display_name_chars:
                 raise KnowledgeBaseConfigError("display_name exceeds configured limit")
-        if type(self.sources) is not tuple:
-            raise KnowledgeBaseConfigError("sources must be an exact tuple")
-        if len(self.sources) > active_limits.max_sources:
+        if type(self.sources) is not tuple or type(self.retired_sources) is not tuple:
+            raise KnowledgeBaseConfigError("source collections must be exact tuples")
+        if len(self.sources) + len(self.retired_sources) > active_limits.max_sources:
             raise KnowledgeBaseConfigError("source count exceeds configured limit")
-
-        normalized: list[RegisteredSourceConfig] = []
+        normalized_active: list[RegisteredSourceConfig] = []
+        normalized_retired: list[RegisteredSourceConfig] = []
         seen: set[str] = set()
-        for item in self.sources:
+        for item, destination in (
+            *((item, normalized_active) for item in self.sources),
+            *((item, normalized_retired) for item in self.retired_sources),
+        ):
             if type(item) not in (LocalFileSourceConfig, LocalDirectorySourceConfig):
                 raise KnowledgeBaseConfigError("sources contain an unsupported member")
             source_id = _require_non_empty_text(item.source_id, "source_id")
@@ -154,11 +158,13 @@ class KnowledgeBaseManifest:
             path = _normalized_path(item.path)
             if len(path) > active_limits.max_path_chars:
                 raise KnowledgeBaseConfigError("path exceeds configured limit")
-            normalized.append(replace(item, path=path))
-        object.__setattr__(self, "sources", tuple(sorted(normalized, key=lambda item: item.source_id)))
+            destination.append(replace(item, path=path))
+        object.__setattr__(self, "sources", tuple(sorted(normalized_active, key=lambda item: item.source_id)))
+        object.__setattr__(self, "retired_sources", tuple(sorted(normalized_retired, key=lambda item: item.source_id)))
 
 
-_ROOT_KEYS = frozenset({"format_version", "knowledge_base_id", "display_name", "sources"})
+_ROOT_KEYS_V1 = frozenset({"format_version", "knowledge_base_id", "display_name", "sources"})
+_ROOT_KEYS_V2 = _ROOT_KEYS_V1 | {"retired_sources"}
 _SOURCE_KEYS = frozenset({"config_version", "source_id", "type", "path"})
 _READ_CHUNK_BYTES = 64 * 1024
 
@@ -179,6 +185,15 @@ def _manifest_mapping(manifest: KnowledgeBaseManifest) -> dict[str, object]:
             }
             for item in manifest.sources
         ],
+        "retired_sources": [
+            {
+                "config_version": item.config_version,
+                "source_id": item.source_id,
+                "type": item.type,
+                "path": item.path,
+            }
+            for item in manifest.retired_sources
+        ],
     }
 
 
@@ -192,6 +207,7 @@ def encode_manifest(manifest: KnowledgeBaseManifest, limits: KnowledgeBaseLimits
         knowledge_base_id=manifest.knowledge_base_id,
         display_name=manifest.display_name,
         sources=manifest.sources,
+        retired_sources=manifest.retired_sources,
         limits=limits,
     )
     data = (
@@ -269,8 +285,12 @@ def decode_manifest(data: bytes, limits: KnowledgeBaseLimits) -> KnowledgeBaseMa
     if type(value) is not dict:
         raise KnowledgeBaseConfigError("manifest root must be an object")
     root: dict[str, object] = value
-    _require_exact_keys(root, _ROOT_KEYS, "manifest")
-    if root["format_version"] != "1" or type(root["format_version"]) is not str:
+    version = root.get("format_version")
+    if version == "1":
+        _require_exact_keys(root, _ROOT_KEYS_V1, "manifest")
+    elif version == "2":
+        _require_exact_keys(root, _ROOT_KEYS_V2, "manifest")
+    else:
         raise KnowledgeBaseConfigError("unsupported manifest format version")
     if type(root["knowledge_base_id"]) is not str:
         raise KnowledgeBaseConfigError("knowledge_base_id must be text")
@@ -279,10 +299,16 @@ def decode_manifest(data: bytes, limits: KnowledgeBaseLimits) -> KnowledgeBaseMa
     if type(root["sources"]) is not list:
         raise KnowledgeBaseConfigError("sources must be an array")
     sources = tuple(_decode_source(item) for item in root["sources"])
+    retired_sources = (
+        tuple(_decode_source(item) for item in root["retired_sources"])
+        if version == "2"
+        else ()
+    )
     return KnowledgeBaseManifest(
         knowledge_base_id=root["knowledge_base_id"],
         display_name=root["display_name"],
         sources=sources,
+        retired_sources=retired_sources,
         limits=limits,
     )
 

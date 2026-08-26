@@ -174,8 +174,8 @@ def test_codec_is_exact_utf8_deterministic_and_order_independent() -> None:
     limits = KnowledgeBaseLimits()
     empty = manifest()
     assert encode_manifest(empty, limits) == (
-        b'{"display_name":null,"format_version":"1",'
-        b'"knowledge_base_id":"kb","sources":[]}\n'
+        b'{"display_name":null,"format_version":"2",'
+        b'"knowledge_base_id":"kb","retired_sources":[],"sources":[]}\n'
     )
     assert decode_manifest(encode_manifest(empty, limits), limits) == empty
 
@@ -188,8 +188,8 @@ def test_codec_is_exact_utf8_deterministic_and_order_independent() -> None:
     path_a = json.dumps(str(ABSOLUTE_BASE / "\u4e2d"), ensure_ascii=False)
     path_b = json.dumps(str(ABSOLUTE_BASE / "b"), ensure_ascii=False)
     exact_two_source_json = (
-        '{"display_name":"\u77e5\u8bc6","format_version":"1",'
-        '"knowledge_base_id":"kb","sources":['
+        '{"display_name":"\u77e5\u8bc6","format_version":"2",'
+        '"knowledge_base_id":"kb","retired_sources":[],"sources":['
         f'{{"config_version":"1","path":{path_a},"source_id":"a",'
         '"type":"local_file"},'
         f'{{"config_version":"1","path":{path_b},"source_id":"b",'
@@ -249,7 +249,7 @@ def test_decode_checks_byte_limit_before_decoding() -> None:
     [
         {"extra": 1},
         {"remove": "display_name"},
-        {"format_version": "2"},
+        {"format_version": "3"},
         {"format_version": 1},
         {"knowledge_base_id": 1},
         {"display_name": 1},
@@ -270,6 +270,20 @@ def test_decode_rejects_root_schema_violations(change: dict[str, object]) -> Non
     value.update(change)
     with pytest.raises(KnowledgeBaseConfigError):
         decode_manifest(encoded(value), KnowledgeBaseLimits())
+
+
+def test_decode_v1_manifest_migrates_without_retired_sources() -> None:
+    value = {
+        "format_version": "1",
+        "knowledge_base_id": "kb",
+        "display_name": None,
+        "sources": [],
+    }
+
+    decoded = decode_manifest(encoded(value), KnowledgeBaseLimits())
+
+    assert decoded.sources == ()
+    assert decoded.retired_sources == ()
 
 
 @pytest.mark.parametrize(

@@ -143,6 +143,29 @@ def test_auto_identity_remove_and_readd_preserves_document_version_chain(
     assert versions[1].previous_version_id == first_version.version_id
 
 
+def test_legacy_identity_remove_and_readd_restores_version_chain(tmp_path: Path) -> None:
+    root = tmp_path / "kb"
+    source = tmp_path / "legacy.md"
+    source.write_text("legacy first version", encoding="utf-8")
+    kb = KnowledgeBase.create(str(root))
+    kb.add_source(LocalFileSourceConfig(source_id="docs", path=str(source)))
+    kb.sync()
+    first_version = SQLiteKnowledgeSnapshotStore(
+        root / "knowledge.db"
+    ).load().document_versions[0]
+
+    kb.remove_source("docs")
+    source.write_text("legacy second version", encoding="utf-8")
+    kb.add_source(LocalFileSourceConfig(path=str(source)))
+    assert kb.list_sources()[0].source_id == "docs"
+    kb.sync()
+
+    versions = SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load().document_versions
+    assert len(versions) == 2
+    assert versions[1].document_id == first_version.document_id
+    assert versions[1].previous_version_id == first_version.version_id
+
+
 def test_unlock_failure_after_success_does_not_reverse_commit_or_retain_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
