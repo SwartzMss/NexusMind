@@ -91,6 +91,14 @@ def test_source_contracts_are_frozen_and_own_fixed_discriminators(source_type: t
         source_type(source_id="docs", path="/tmp", type="wrong")
 
 
+@pytest.mark.parametrize("source_type", [LocalFileSourceConfig, LocalDirectorySourceConfig])
+def test_automatic_source_id_is_stable_for_normalized_path(source_type: type) -> None:
+    direct = source_type(path=str(ABSOLUTE_BASE / "source"))
+    equivalent = source_type(path=str(ABSOLUTE_BASE / "missing" / ".." / "source"))
+
+    assert direct.source_id == equivalent.source_id
+
+
 @pytest.mark.parametrize("source_id", ["", " ", "\t", "\r\n", 1, None])
 def test_source_id_must_be_non_empty_text(source_id: object) -> None:
     with pytest.raises(KnowledgeBaseConfigError):

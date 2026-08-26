@@ -83,7 +83,7 @@ nexusmind diagnose "密钥轮换" --knowledge-base ./security-kb --limit 5
 - **来源不等于文档**：一个 directory 来源可以产生多篇 canonical documents；`source list` 看注册配置，`inspect` 看同步后的知识状态。
 - **搜索不等于诊断**：`search` 给日常使用的最终结果；`diagnose` 暴露检索各阶段的候选项，更适合调试相关度和后端配置。
 
-本地来源当前只读取严格 UTF-8 编码的 `.txt`、`.md` 和 `.markdown` 文件。上述相对路径均以运行命令时的当前目录为基准。KnowledgeBase 和来源的内部 ID 均由程序自动生成，用户通过路径操作它们。除 `create` 外，如果省略 `--knowledge-base`，CLI 会把当前目录当作 KnowledgeBase；读取类命令可添加 `--json` 以便脚本处理。
+本地来源当前只读取严格 UTF-8 编码的 `.txt`、`.md` 和 `.markdown` 文件。上述相对路径均以运行命令时的当前目录为基准。KnowledgeBase 的内部 ID 由程序自动生成；来源 ID 则根据规范化路径稳定派生，因此删除后重新注册同一路径仍能延续文档版本历史。用户通过路径操作它们。除 `create` 外，如果省略 `--knowledge-base`，CLI 会把当前目录当作 KnowledgeBase；读取类命令可添加 `--json` 以便脚本处理。
 
 同一个规范化来源路径在一个 KnowledgeBase 中只能注册一次。CLI、桌面界面和 Python API 都会执行这项检查，避免同一份内容以不同内部 ID 被重复同步。
 

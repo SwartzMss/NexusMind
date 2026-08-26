@@ -116,6 +116,31 @@ def test_failed_registration_write_does_not_swap_memory(
     assert tuple(item.source_id for item in kb.list_sources()) == ("two",)
 
 
+def test_remove_and_readd_by_path_preserves_document_version_chain(tmp_path: Path) -> None:
+    root = tmp_path / "kb"
+    source = tmp_path / "notes.md"
+    source.write_text("first version", encoding="utf-8")
+    kb = KnowledgeBase.create(str(root))
+
+    first_registration = LocalFileSourceConfig(path=str(source))
+    kb.add_source(first_registration)
+    kb.sync()
+    first_snapshot = SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load()
+    first_version = first_snapshot.document_versions[0]
+
+    kb.remove_source(first_registration.source_id)
+    source.write_text("second version", encoding="utf-8")
+    second_registration = LocalFileSourceConfig(path=str(source))
+    assert second_registration.source_id == first_registration.source_id
+    kb.add_source(second_registration)
+    kb.sync()
+
+    versions = SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load().document_versions
+    assert len(versions) == 2
+    assert versions[1].document_id == first_version.document_id
+    assert versions[1].previous_version_id == first_version.version_id
+
+
 def test_unlock_failure_after_success_does_not_reverse_commit_or_retain_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

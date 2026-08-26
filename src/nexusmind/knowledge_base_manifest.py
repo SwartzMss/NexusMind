@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import InitVar, dataclass, field, replace
+from dataclasses import InitVar, dataclass, replace
 import json
 import os
 from pathlib import Path
 from typing import ClassVar, TypeAlias
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 
 class KnowledgeBaseError(Exception):
@@ -28,6 +28,9 @@ class KnowledgeBasePersistenceError(KnowledgeBaseError):
 
 class KnowledgeBaseClosedError(KnowledgeBaseError):
     """Raised when a closed knowledge base is used."""
+
+
+_AUTO_SOURCE_ID = object()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -56,24 +59,36 @@ def _require_non_empty_text(value: object, field: str) -> str:
 class LocalFileSourceConfig:
     config_version: ClassVar[str] = "1"
     type: ClassVar[str] = "local_file"
-    source_id: str = field(default_factory=lambda: str(uuid4()))
+    source_id: str = _AUTO_SOURCE_ID  # type: ignore[assignment]
     path: str
 
     def __post_init__(self) -> None:
-        _require_non_empty_text(self.source_id, "source_id")
         _require_non_empty_text(self.path, "path")
+        if self.source_id is _AUTO_SOURCE_ID:
+            object.__setattr__(
+                self,
+                "source_id",
+                str(uuid5(NAMESPACE_URL, f"nexusmind-source:{_normalized_path(self.path)}")),
+            )
+        _require_non_empty_text(self.source_id, "source_id")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class LocalDirectorySourceConfig:
     config_version: ClassVar[str] = "1"
     type: ClassVar[str] = "local_directory"
-    source_id: str = field(default_factory=lambda: str(uuid4()))
+    source_id: str = _AUTO_SOURCE_ID  # type: ignore[assignment]
     path: str
 
     def __post_init__(self) -> None:
-        _require_non_empty_text(self.source_id, "source_id")
         _require_non_empty_text(self.path, "path")
+        if self.source_id is _AUTO_SOURCE_ID:
+            object.__setattr__(
+                self,
+                "source_id",
+                str(uuid5(NAMESPACE_URL, f"nexusmind-source:{_normalized_path(self.path)}")),
+            )
+        _require_non_empty_text(self.source_id, "source_id")
 
 
 RegisteredSourceConfig: TypeAlias = LocalFileSourceConfig | LocalDirectorySourceConfig
