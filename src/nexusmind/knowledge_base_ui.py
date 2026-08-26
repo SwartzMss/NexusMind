@@ -109,11 +109,10 @@ class KnowledgeBaseUIController:
     def view(self) -> KnowledgeBaseUIView:
         return self._view
 
-    def create(self, root: str, knowledge_base_id: str, display_name: str = "") -> None:
+    def create(self, root: str, display_name: str = "") -> None:
         self._replace_knowledge_base(
             lambda: self._create(
                 root,
-                knowledge_base_id=knowledge_base_id,
                 display_name=display_name or None,
             ),
             "KnowledgeBase created.",
@@ -153,18 +152,18 @@ class KnowledgeBaseUIController:
         except Exception as error:
             self._set_error(error)
 
-    def add_file(self, source_id: str, path: str) -> None:
+    def add_file(self, path: str) -> None:
         self._mutate(
             lambda kb: kb.add_source(
-                LocalFileSourceConfig(source_id=source_id, path=path)
+                LocalFileSourceConfig(path=path)
             ),
             "File source registered. Sync explicitly when ready.",
         )
 
-    def add_directory(self, source_id: str, path: str) -> None:
+    def add_directory(self, path: str) -> None:
         self._mutate(
             lambda kb: kb.add_source(
-                LocalDirectorySourceConfig(source_id=source_id, path=path)
+                LocalDirectorySourceConfig(path=path)
             ),
             "Directory source registered. Sync explicitly when ready.",
         )
@@ -368,9 +367,7 @@ class KnowledgeBaseTkApp:
         lifecycle = _ttk.LabelFrame(shell, text="KnowledgeBase", padding=8)
         lifecycle.pack(fill="x")
         self.root_path = _tk.StringVar()
-        self.kb_id = _tk.StringVar()
         self.display_name = _tk.StringVar()
-        self.source_id = _tk.StringVar()
         self.search_query = _tk.StringVar()
         self.search_limit = _tk.StringVar(value=str(DEFAULT_SEARCH_LIMIT))
         self.message = _tk.StringVar(value="Create or open a KnowledgeBase.")
@@ -383,18 +380,14 @@ class KnowledgeBaseTkApp:
         _ttk.Button(
             lifecycle, text="Choose directory", command=self._choose_root
         ).grid(row=0, column=2)
-        _ttk.Label(lifecycle, text="ID:").grid(row=1, column=0, sticky="w")
-        _ttk.Entry(lifecycle, textvariable=self.kb_id, width=30).grid(
-            row=1, column=1, sticky="ew"
-        )
         _ttk.Label(lifecycle, text="Display name:").grid(
-            row=2, column=0, sticky="w"
+            row=1, column=0, sticky="w"
         )
         _ttk.Entry(lifecycle, textvariable=self.display_name, width=30).grid(
-            row=2, column=1, sticky="ew"
+            row=1, column=1, sticky="ew"
         )
-        self._button(lifecycle, "Create", self._start_create).grid(row=3, column=1, sticky="e")
-        self._button(lifecycle, "Open", self._start_open).grid(row=3, column=2)
+        self._button(lifecycle, "Create", self._start_create).grid(row=2, column=1, sticky="e")
+        self._button(lifecycle, "Open", self._start_open).grid(row=2, column=2)
         _ttk.Label(shell, textvariable=self.status_text).pack(fill="x", pady=(8, 0))
         _ttk.Label(shell, textvariable=self.message, foreground="#8b1a1a").pack(fill="x")
 
@@ -402,7 +395,6 @@ class KnowledgeBaseTkApp:
         sources.pack(fill="both", expand=True, pady=8)
         controls = _ttk.Frame(sources)
         controls.pack(fill="x")
-        _ttk.Entry(controls, textvariable=self.source_id, width=24).pack(side="left")
         self._button(controls, "Add file", lambda: self._pick_source(False)).pack(side="left")
         self._button(controls, "Add directory", lambda: self._pick_source(True)).pack(side="left")
         self._button(controls, "Sync all", lambda: self._background(self._controller.sync_all)).pack(side="left")
@@ -441,10 +433,9 @@ class KnowledgeBaseTkApp:
 
     def _start_create(self) -> None:
         root = self.root_path.get()
-        knowledge_base_id = self.kb_id.get()
         display_name = self.display_name.get()
         self._background(
-            lambda: self._controller.create(root, knowledge_base_id, display_name)
+            lambda: self._controller.create(root, display_name)
         )
 
     def _start_open(self) -> None:
@@ -461,9 +452,8 @@ class KnowledgeBaseTkApp:
         )
         if not selected:
             return
-        source_id = self.source_id.get()
         operation = self._controller.add_directory if directory else self._controller.add_file
-        self._background(lambda: operation(source_id, selected))
+        self._background(lambda: operation(selected))
 
     def _selected_action(self, operation: Callable[[str], None]) -> None:
         selection = self.source_list.curselection()
@@ -520,7 +510,7 @@ class KnowledgeBaseTkApp:
         else:
             display = view.status.display_name or "—"
             self.status_text.set(
-                f"ID: {view.status.knowledge_base_id} | Name: {display} | "
+                f"Name: {display} | "
                 f"Registered: {view.status.registered_source_count} | "
                 f"Canonical: {view.status.canonical_source_count} | "
                 f"Documents: {view.status.document_count}"
@@ -529,15 +519,15 @@ class KnowledgeBaseTkApp:
         self.source_list.delete(0, self._tk.END)
         for source in view.sources:
             self.source_list.insert(
-                self._tk.END, f"{source.source_id} | {source.source_type} | {source.path}"
+                self._tk.END, f"{source.source_type} | {source.path}"
             )
         sync_lines = [
-            f"{item.source_id}: +{item.documents_added} ~{item.documents_updated} "
+            f"Source: +{item.documents_added} ~{item.documents_updated} "
             f"={item.documents_unchanged} -{item.documents_removed}; chunks {item.chunks_indexed}"
             for item in view.sync_results
         ]
         result_lines = [
-            f"[{item.score:.6g}] {item.source_id} / {item.logical_path}\n"
+            f"[{item.score:.6g}] {item.logical_path}\n"
             f"chunk: {item.chunk_id}\n{item.snippet}\n"
             for item in view.search_results
         ]

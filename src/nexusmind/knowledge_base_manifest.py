@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import InitVar, dataclass, replace
+from dataclasses import InitVar, dataclass, field, replace
 import json
 import os
 from pathlib import Path
@@ -56,7 +56,7 @@ def _require_non_empty_text(value: object, field: str) -> str:
 class LocalFileSourceConfig:
     config_version: ClassVar[str] = "1"
     type: ClassVar[str] = "local_file"
-    source_id: str
+    source_id: str = field(default_factory=lambda: str(uuid4()))
     path: str
 
     def __post_init__(self) -> None:
@@ -68,7 +68,7 @@ class LocalFileSourceConfig:
 class LocalDirectorySourceConfig:
     config_version: ClassVar[str] = "1"
     type: ClassVar[str] = "local_directory"
-    source_id: str
+    source_id: str = field(default_factory=lambda: str(uuid4()))
     path: str
 
     def __post_init__(self) -> None:

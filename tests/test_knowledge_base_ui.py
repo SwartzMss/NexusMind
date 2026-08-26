@@ -110,14 +110,14 @@ def test_create_and_open_delegate_to_injected_knowledge_base_boundary() -> None:
         return opened
 
     controller = KnowledgeBaseUIController(create=create, open_existing=open_existing)
-    controller.create("new-root", "my-kb", "My KB")
+    controller.create("new-root", "My KB")
     controller.open("existing-root")
 
     assert calls == [
         (
             "create",
             "new-root",
-            {"knowledge_base_id": "my-kb", "display_name": "My KB"},
+            {"display_name": "My KB"},
         ),
         ("open", "existing-root"),
     ]
@@ -129,14 +129,15 @@ def test_file_and_directory_registration_do_not_implicitly_sync() -> None:
     fake = FakeKnowledgeBase()
     controller = _controller(fake)
 
-    controller.add_file("file", "notes.md")
-    controller.add_directory("directory", "docs")
+    controller.add_file("notes.md")
+    controller.add_directory("docs")
 
     additions = [call[1] for call in fake.calls if isinstance(call, tuple)]
-    assert additions == [
-        LocalFileSourceConfig(source_id="file", path="notes.md"),
-        LocalDirectorySourceConfig(source_id="directory", path="docs"),
+    assert [type(item) for item in additions] == [
+        LocalFileSourceConfig,
+        LocalDirectorySourceConfig,
     ]
+    assert [item.path for item in additions] == ["notes.md", "docs"]
     assert "sync" not in fake.calls
     assert controller.view.status.registered_source_count == 2
 
@@ -360,7 +361,7 @@ def _window(controller: object) -> tuple[KnowledgeBaseTkApp, FakeRoot]:
     return app, root
 
 
-def test_create_form_has_labeled_non_overlapping_id_and_display_name_rows() -> None:
+def test_create_form_hides_internal_id_and_labels_display_name() -> None:
     app, _ = _window(KnowledgeBaseUIController())
     entries = {
         item.kwargs.get("textvariable"): item
@@ -369,14 +370,11 @@ def test_create_form_has_labeled_non_overlapping_id_and_display_name_rows() -> N
     }
     labels = {item.kwargs.get("text") for item in FakeWidget.instances}
 
-    assert {"Destination:", "ID:", "Display name:"} <= labels
-    assert entries[app.kb_id].layout == (
-        "grid",
-        {"row": 1, "column": 1, "sticky": "ew"},
-    )
+    assert {"Destination:", "Display name:"} <= labels
+    assert "ID:" not in labels
     assert entries[app.display_name].layout == (
         "grid",
-        {"row": 2, "column": 1, "sticky": "ew"},
+        {"row": 1, "column": 1, "sticky": "ew"},
     )
 
 

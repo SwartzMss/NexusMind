@@ -56,8 +56,8 @@ nexusmind-kb
 CLI 覆盖 KnowledgeBase 的创建、来源管理、同步、搜索、问答、检查与诊断：
 
 ```powershell
-nexusmind create ./security-kb --id security --name "Security Notes"
-nexusmind source add --knowledge-base ./security-kb --id docs --path ./security-notes --type directory
+nexusmind create ./security-kb --name "Security Notes"
+nexusmind source add ./security-notes --knowledge-base ./security-kb
 nexusmind source list --knowledge-base ./security-kb
 nexusmind sync --knowledge-base ./security-kb
 nexusmind search "密钥轮换" --knowledge-base ./security-kb --limit 5
@@ -65,10 +65,30 @@ nexusmind inspect --knowledge-base ./security-kb
 nexusmind diagnose "密钥轮换" --knowledge-base ./security-kb --limit 5
 ```
 
+这组命令对应一条完整的“创建 → 注册来源 → 同步 → 检索 → 排查”工作流：
+
+| 命令 | 用途 | 是否修改 KnowledgeBase |
+| --- | --- | --- |
+| `create` | 在 `./security-kb` 创建一个 KnowledgeBase，内部 ID 由程序自动生成。`--name "Security Notes"` 是展示名称。目标目录必须不存在或为空。 | 是 |
+| `source add` | 注册 `./security-notes` 来源。程序会根据路径自动判断它是文件还是目录，并生成内部来源 ID。注册只保存配置，不会读取或索引文件。 | 是，仅注册来源 |
+| `source list` | 列出已经注册的来源类型和路径。它适合确认 `source add` 是否成功，但不能说明内容是否已经同步。 | 否 |
+| `sync` | 读取所有已注册来源，把当前文件内容提交为 canonical documents，并重建用于检索的分块和索引。以后新增、修改或删除来源文件后，需要再次运行此命令。使用 `--source ./security-notes` 可以只同步一个来源。 | 是 |
+| `search` | 在已同步内容中搜索“密钥轮换”，返回相关度最高的最多 5 个分块，显示文档路径、分数和原文。它只做检索，不调用回答模型。 | 否 |
+| `inspect` | 查看 KnowledgeBase 的整体状态，包括来源数和 canonical document 数。使用 `--document <document-id>` 可进一步查看某篇文档的分块、字符范围和预览。 | 否 |
+| `diagnose` | 对同一个搜索词输出检索管线的候选项，包含阶段、排名、分数和文档路径，用来分析为什么某篇文档命中、排序不理想或没有进入最终结果。根据所配置的后端，阶段可能包括 `lexical`、`semantic`、`fusion` 和 `reranker`。 | 否 |
+
+需要特别区分以下三组概念：
+
+- **注册不等于同步**：`source add` 只告诉 KnowledgeBase“去哪里找资料”；`sync` 才真正读取文件。首次注册后不执行 `sync`，`search` 不会搜到这些文件。
+- **来源不等于文档**：一个 directory 来源可以产生多篇 canonical documents；`source list` 看注册配置，`inspect` 看同步后的知识状态。
+- **搜索不等于诊断**：`search` 给日常使用的最终结果；`diagnose` 暴露检索各阶段的候选项，更适合调试相关度和后端配置。
+
+本地来源当前只读取严格 UTF-8 编码的 `.txt`、`.md` 和 `.markdown` 文件。上述相对路径均以运行命令时的当前目录为基准。KnowledgeBase 和来源的内部 ID 均由程序自动生成，用户通过路径操作它们。除 `create` 外，如果省略 `--knowledge-base`，CLI 会把当前目录当作 KnowledgeBase；读取类命令可添加 `--json` 以便脚本处理。
+
 删除来源及其 canonical documents：
 
 ```powershell
-nexusmind source remove --knowledge-base ./security-kb --id docs
+nexusmind source remove ./security-notes --knowledge-base ./security-kb
 ```
 
 所有读取类命令均支持适合脚本处理的 `--json` 输出。
@@ -121,13 +141,11 @@ from nexusmind import KnowledgeBase, LocalDirectorySourceConfig
 
 kb = KnowledgeBase.create(
     "./security-kb",
-    knowledge_base_id="security",
     display_name="Security Notes",
 )
 
 kb.add_source(
     LocalDirectorySourceConfig(
-        source_id="docs",
         path="./security-notes",
     )
 )
@@ -332,7 +350,6 @@ CI 在 `windows-latest` 上运行离线测试，不依赖真实 API Key、模型
 
 ## 项目文档
 
-- [KnowledgeBase-only 迁移说明](docs/knowledgebase-only-migration.md)
 - [KnowledgeBase 技术架构](docs/architecture.md#knowledge-runtime)
 - [检索 Benchmark 说明与结果](evals/knowledge/benchmark.md)
 

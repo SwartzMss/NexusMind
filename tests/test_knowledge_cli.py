@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from uuid import UUID
 
 from nexusmind import cli
 
@@ -19,11 +20,12 @@ def test_cli_create_add_sync_search_inspect_and_remove(tmp_path, capsys, caplog,
     (source / "security.md").write_text("密钥轮换需要记录新的版本。", encoding="utf-8")
     root = tmp_path / "kb"
 
-    assert cli.main(["create", str(root), "--id", "security", "--name", "Security"]) == 0
-    assert cli.main(["source", "add", "--knowledge-base", str(root), "--id", "docs", "--path", str(source), "--type", "directory"]) == 0
+    assert cli.main(["create", str(root), "--name", "Security"]) == 0
+    assert cli.main(["source", "add", str(source), "--knowledge-base", str(root)]) == 0
     assert cli.main(["source", "list", "--knowledge-base", str(root), "--json"]) == 0
     sources = json.loads(capsys.readouterr().out.splitlines()[-1])
-    assert sources[0]["source_id"] == "docs"
+    assert sources[0]["path"] == str(source.resolve())
+    UUID(sources[0]["source_id"])
 
     assert cli.main(["sync", "--knowledge-base", str(root), "--json"]) == 0
     assert [record.event for record in caplog.records[-2:]] == ["sync_started", "sync_completed"]
@@ -38,13 +40,14 @@ def test_cli_create_add_sync_search_inspect_and_remove(tmp_path, capsys, caplog,
 
     assert cli.main(["inspect", "--knowledge-base", str(root), "--json"]) == 0
     inspection = json.loads(capsys.readouterr().out.splitlines()[-1])
+    UUID(inspection["status"]["knowledge_base_id"])
     assert inspection["status"]["document_count"] == 1
 
     assert cli.main(["diagnose", "密钥轮换", "--knowledge-base", str(root), "--json"]) == 0
     diagnostics = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert diagnostics["results"]
 
-    assert cli.main(["source", "remove", "--knowledge-base", str(root), "--id", "docs"]) == 0
+    assert cli.main(["source", "remove", str(source), "--knowledge-base", str(root)]) == 0
 
 
 def test_cli_help_exposes_only_knowledge_commands(capsys) -> None:

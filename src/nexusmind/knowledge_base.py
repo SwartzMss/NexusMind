@@ -202,7 +202,7 @@ class KnowledgeBase:
         cls,
         path: str,
         *,
-        knowledge_base_id: str,
+        knowledge_base_id: str | None = None,
         display_name: str | None = None,
         index_factory: Callable[[], CloneableChunkIndex] | None = None,
         limits: KnowledgeBaseLimits | None = None,
@@ -223,7 +223,9 @@ class KnowledgeBase:
                 "unable to resolve knowledge-base root"
             ) from exc
         manifest = KnowledgeBaseManifest(
-            knowledge_base_id=knowledge_base_id,
+            knowledge_base_id=(
+                knowledge_base_id if knowledge_base_id is not None else str(uuid4())
+            ),
             display_name=display_name,
             limits=active_limits,
         )
