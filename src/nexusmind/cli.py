@@ -23,6 +23,10 @@ from nexusmind.runtime_support import runtime_operation
 RUNTIME_LOGGER = logging.getLogger("nexusmind.runtime")
 
 
+class _AmbiguousSourcePathError(ValueError):
+    """A legacy manifest contains more than one source for a user-facing path."""
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nexusmind", description="Local KnowledgeBase management, retrieval, and cited answers.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -57,6 +61,13 @@ def main(argv: list[str] | None = None) -> int:
         return {"create": _create, "source": _source, "sync": _sync, "search": _search, "query": _query, "inspect": _inspect, "diagnose": _diagnose}[args.command](args)
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr); return 2
+    except _AmbiguousSourcePathError:
+        print(
+            "Source path is ambiguous because this KnowledgeBase contains legacy "
+            "duplicate registrations.",
+            file=sys.stderr,
+        )
+        return 1
     except (KnowledgeBaseError, KnowledgeAnswerError, TypeError, ValueError):
         print("KnowledgeBase operation failed.", file=sys.stderr); return 1
 
@@ -75,8 +86,6 @@ def _source(args: argparse.Namespace) -> int:
             elif source_path.is_dir(): kind = LocalDirectorySourceConfig
             else: raise ValueError("source path must be an existing file or directory")
             normalized = str(source_path.resolve(strict=True))
-            if any(item.path == normalized for item in kb.list_sources()):
-                raise ValueError("source path is already registered")
             kb.add_source(kind(path=normalized)); print(f"Registered source: {normalized}")
         elif args.source_command == "remove":
             item = _source_by_path(kb, args.source_path)
@@ -115,10 +124,12 @@ def _sync(args: argparse.Namespace) -> int:
 
 def _source_by_path(kb: KnowledgeBase, path: str) -> Any:
     normalized = str(Path(path).resolve(strict=False))
-    match = next((item for item in kb.list_sources() if item.path == normalized), None)
-    if match is None:
+    matches = tuple(item for item in kb.list_sources() if item.path == normalized)
+    if len(matches) > 1:
+        raise _AmbiguousSourcePathError
+    if not matches:
         raise ValueError("source path is not registered")
-    return match
+    return matches[0]
 
 
 def _search(args: argparse.Namespace) -> int:

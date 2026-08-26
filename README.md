@@ -85,6 +85,8 @@ nexusmind diagnose "密钥轮换" --knowledge-base ./security-kb --limit 5
 
 本地来源当前只读取严格 UTF-8 编码的 `.txt`、`.md` 和 `.markdown` 文件。上述相对路径均以运行命令时的当前目录为基准。KnowledgeBase 和来源的内部 ID 均由程序自动生成，用户通过路径操作它们。除 `create` 外，如果省略 `--knowledge-base`，CLI 会把当前目录当作 KnowledgeBase；读取类命令可添加 `--json` 以便脚本处理。
 
+同一个规范化来源路径在一个 KnowledgeBase 中只能注册一次。CLI、桌面界面和 Python API 都会执行这项检查，避免同一份内容以不同内部 ID 被重复同步。
+
 删除来源及其 canonical documents：
 
 ```powershell

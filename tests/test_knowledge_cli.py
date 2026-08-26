@@ -4,7 +4,14 @@ import json
 import logging
 from uuid import UUID
 
-from nexusmind import cli
+from nexusmind import (
+    KnowledgeBase,
+    KnowledgeBaseLimits,
+    KnowledgeBaseManifest,
+    LocalDirectorySourceConfig,
+    cli,
+)
+from nexusmind.knowledge_base_manifest import write_manifest
 
 
 def _capture_runtime_logs(monkeypatch, caplog) -> None:
@@ -60,3 +67,30 @@ def test_cli_help_exposes_only_knowledge_commands(capsys) -> None:
         assert command in output
     for removed in ("chat", "tools", "runs", "mcp", "skill"):
         assert removed not in output
+
+
+def test_cli_rejects_ambiguous_legacy_source_paths(tmp_path, capsys) -> None:
+    root = tmp_path / "kb"
+    source = tmp_path / "notes"
+    source.mkdir()
+    KnowledgeBase.create(str(root)).close()
+    limits = KnowledgeBaseLimits()
+    write_manifest(
+        root / "manifest.json",
+        KnowledgeBaseManifest(
+            knowledge_base_id="legacy",
+            sources=(
+                LocalDirectorySourceConfig(source_id="docs-a", path=str(source)),
+                LocalDirectorySourceConfig(source_id="docs-b", path=str(source)),
+            ),
+        ),
+        limits,
+    )
+
+    assert (
+        cli.main(
+            ["sync", "--knowledge-base", str(root), "--source", str(source)]
+        )
+        == 1
+    )
+    assert "legacy duplicate registrations" in capsys.readouterr().err

@@ -44,6 +44,13 @@ def test_registration_is_sorted_persistent_and_does_not_ingest(
     assert KnowledgeBase.open(str(root)).list_sources() == kb.list_sources()
     with pytest.raises(KnowledgeBaseSourceError):
         kb.add_source(LocalFileSourceConfig(source_id="z", path=str(file_path)))
+    with pytest.raises(KnowledgeBaseSourceError, match="source path is already registered"):
+        kb.add_source(
+            LocalFileSourceConfig(
+                source_id="duplicate-path",
+                path=str(file_path.parent / "missing" / ".." / file_path.name),
+            )
+        )
     with pytest.raises(KnowledgeBaseConfigError):
         kb.add_source(object())  # type: ignore[arg-type]
 

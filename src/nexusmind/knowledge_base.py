@@ -874,6 +874,11 @@ class KnowledgeBase:
             sources=self._manifest.sources + (config,),
             limits=self._limits,
         )
+        normalized = next(
+            item for item in candidate.sources if item.source_id == config.source_id
+        )
+        if sum(item.path == normalized.path for item in candidate.sources) > 1:
+            raise KnowledgeBaseSourceError("source path is already registered")
         self._persist_manifest(candidate)
         self._manifest = candidate
 
