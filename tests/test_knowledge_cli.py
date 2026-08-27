@@ -31,6 +31,9 @@ def test_cli_create_add_sync_search_inspect_and_remove(tmp_path, capsys, caplog,
     assert cli.main(["source", "add", str(source), "--knowledge-base", str(root)]) == 0
     assert cli.main(["source", "list", "--knowledge-base", str(root), "--json"]) == 0
     sources = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert set(sources[0]) == {"config_version", "source_id", "type", "path"}
+    assert sources[0]["config_version"] == "1"
+    assert sources[0]["type"] == "local_directory"
     assert sources[0]["path"] == str(source.resolve())
     UUID(sources[0]["source_id"])
 

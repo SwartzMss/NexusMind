@@ -198,7 +198,19 @@ def _diagnose(args: argparse.Namespace) -> int:
 
 
 def _jsonable(value: Any) -> Any:
-    if is_dataclass(value): return {key: _jsonable(item) for key, item in asdict(value).items()}
+    if isinstance(value, (LocalFileSourceConfig, LocalDirectorySourceConfig)):
+        return {
+            "config_version": value.config_version,
+            "source_id": value.source_id,
+            "type": value.type,
+            "path": value.path,
+        }
+    if is_dataclass(value):
+        return {
+            key: _jsonable(item)
+            for key, item in asdict(value).items()
+            if not key.startswith("_")
+        }
     if isinstance(value, Enum): return value.value
     if isinstance(value, (tuple, list)): return [_jsonable(item) for item in value]
     if isinstance(value, dict): return {str(key): _jsonable(item) for key, item in value.items()}
