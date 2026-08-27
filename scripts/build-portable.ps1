@@ -87,7 +87,9 @@ try {
     if (@($search).Count -lt 1 -or $searchJson -notmatch "release-smoke-token") {
         throw "Portable search did not return the synchronized fixture"
     }
-    if ($inspection.status.source_count -ne 1 -or $inspection.status.document_count -ne 1) {
+    if ($inspection.status.registered_source_count -ne 1 -or
+        $inspection.status.canonical_source_count -ne 1 -or
+        $inspection.status.document_count -ne 1) {
         throw "Portable inspect did not reopen canonical state"
     }
     Write-Host "Portable package: $archivePath"

@@ -75,6 +75,8 @@ def test_portable_script_runs_extracted_archive_knowledge_base_e2e() -> None:
         '"inspect"',
         '"--json"',
         "ConvertFrom-Json",
+        "registered_source_count",
+        "canonical_source_count",
         "document_count",
     )
     for marker in required:
