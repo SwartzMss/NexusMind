@@ -8,6 +8,7 @@ import pytest
 
 from nexusmind import (
     Document,
+    DocumentVersion,
     EmbeddingVector,
     InMemorySemanticChunkIndex,
     KnowledgeCollection,
@@ -54,9 +55,17 @@ def _document(
 
 
 def _snapshot(source_id: str, content: str = "searchable") -> KnowledgeSnapshot:
+    document = _document(source_id, "notes.md", content)
     return KnowledgeSnapshot(
         sources=(_source(source_id),),
-        documents=(_document(source_id, "notes.md", content),),
+        documents=(document,),
+        document_versions=(
+            DocumentVersion.from_document(
+                document,
+                created_at="2026-08-27T00:00:00.000000Z",
+                sync_context="fixture",
+            ),
+        ),
     )
 
 
@@ -98,13 +107,29 @@ def test_sqlite_restart_restores_canonical_state_and_rebuilds_embeddings(tmp_pat
 
 def test_load_reads_one_committed_point_in_time_during_concurrent_save(tmp_path) -> None:
     path = tmp_path / "knowledge.db"
+    before_document = _document("docs", "notes.md", "before content")
     before = KnowledgeSnapshot(
         (_source("docs", metadata={"version": "before"}),),
-        (_document("docs", "notes.md", "before content"),),
+        (before_document,),
+        (
+            DocumentVersion.from_document(
+                before_document,
+                created_at="2026-08-27T00:00:00.000000Z",
+                sync_context="before",
+            ),
+        ),
     )
+    after_document = _document("docs", "notes.md", "after content")
     after = KnowledgeSnapshot(
         (_source("docs", metadata={"version": "after"}),),
-        (_document("docs", "notes.md", "after content"),),
+        (after_document,),
+        (
+            DocumentVersion.from_document(
+                after_document,
+                created_at="2026-08-27T00:00:01.000000Z",
+                sync_context="after",
+            ),
+        ),
     )
     writer = SQLiteKnowledgeSnapshotStore(path)
     writer.save(before)
@@ -176,15 +201,24 @@ def test_load_reads_one_committed_point_in_time_during_concurrent_save(tmp_path)
 
 def test_round_trip_multiple_sources_documents_and_nested_metadata(tmp_path) -> None:
     store = SQLiteKnowledgeSnapshotStore(tmp_path / "knowledge.db")
+    documents = (
+        _document("z", "z.md", "z", metadata={"tags": ["z"]}),
+        _document("a", "b.md", "b"),
+        _document("a", "a.md", "a"),
+    )
     snapshot = KnowledgeSnapshot(
         sources=(
             _source("z", metadata={"nested": {"items": [None, True, 2, 3.5, "你"]}}),
             _source("a"),
         ),
-        documents=(
-            _document("z", "z.md", "z", metadata={"tags": ["z"]}),
-            _document("a", "b.md", "b"),
-            _document("a", "a.md", "a"),
+        documents=documents,
+        document_versions=tuple(
+            DocumentVersion.from_document(
+                document,
+                created_at="2026-08-27T00:00:00.000000Z",
+                sync_context="fixture",
+            )
+            for document in documents
         ),
     )
 
@@ -276,7 +310,17 @@ def test_sqlite_restart_rebuilds_chinese_search_state_from_canonical_data(tmp_pa
     path = tmp_path / "knowledge.db"
     source = _source("docs")
     document = _document("docs", "guide.md", "知识图谱支持语义检索")
-    snapshot = KnowledgeSnapshot((source,), (document,))
+    snapshot = KnowledgeSnapshot(
+        (source,),
+        (document,),
+        (
+            DocumentVersion.from_document(
+                document,
+                created_at="2026-08-27T00:00:00.000000Z",
+                sync_context="fixture",
+            ),
+        ),
+    )
     SQLiteKnowledgeSnapshotStore(path).save(snapshot)
 
     restarted = KnowledgeCollection()
@@ -334,7 +378,7 @@ def test_metadata_encoding_failure_preserves_previous_snapshot(tmp_path) -> None
     assert store.load() == previous
 
 
-def test_sqlite_write_failure_rolls_back_complete_replacement(tmp_path) -> None:
+def test_unexpected_trigger_prevents_snapshot_replacement(tmp_path) -> None:
     path = tmp_path / "knowledge.db"
     store = SQLiteKnowledgeSnapshotStore(path)
     previous = _snapshot("old")
@@ -345,10 +389,29 @@ def test_sqlite_write_failure_rolls_back_complete_replacement(tmp_path) -> None:
             "WHEN NEW.content = 'fail' BEGIN SELECT RAISE(ABORT, 'forced failure'); END"
         )
 
-    with pytest.raises(KnowledgeSnapshotStoreError):
+    with pytest.raises(KnowledgeSnapshotStoreError, match="schema"):
         store.save(_snapshot("new", "fail"))
 
+    with sqlite3.connect(path) as db:
+        db.execute("DROP TRIGGER reject_failed_document")
     assert store.load() == previous
+
+
+def test_store_rejects_history_free_nonempty_snapshot_on_save_and_load(tmp_path) -> None:
+    path = tmp_path / "knowledge.db"
+    store = SQLiteKnowledgeSnapshotStore(path)
+    previous = _snapshot("old")
+    store.save(previous)
+    document = _document("docs", "notes.md", "history required")
+
+    with pytest.raises(KnowledgeSnapshotStoreError, match="document versions"):
+        store.save(KnowledgeSnapshot((_source("docs"),), (document,)))
+    assert store.load() == previous
+
+    with sqlite3.connect(path) as db:
+        db.execute("DELETE FROM document_versions")
+    with pytest.raises(KnowledgeSnapshotStoreError, match="document versions"):
+        store.load()
 
 
 def test_unsupported_and_malformed_schema_fail_closed(tmp_path) -> None:
@@ -368,7 +431,7 @@ def test_unsupported_and_malformed_schema_fail_closed(tmp_path) -> None:
         SQLiteKnowledgeSnapshotStore(malformed)
 
 
-def test_schema_v1_database_migrates_without_changing_canonical_rows(tmp_path) -> None:
+def test_incomplete_schema_v1_database_is_rejected_without_migration(tmp_path) -> None:
     path = tmp_path / "v1.db"
     source = _source("docs")
     document = _document("docs", "notes.md", "legacy persisted")
@@ -413,14 +476,84 @@ def test_schema_v1_database_migrates_without_changing_canonical_rows(tmp_path) -
             ),
         )
 
-    loaded = SQLiteKnowledgeSnapshotStore(path).load()
+    with pytest.raises(KnowledgeSnapshotStoreError, match="schema"):
+        SQLiteKnowledgeSnapshotStore(path)
 
-    assert loaded == KnowledgeSnapshot((source,), (document,))
     with sqlite3.connect(path) as db:
         assert db.execute(
             "SELECT value FROM knowledge_store_metadata WHERE key = 'schema_version'"
-        ).fetchone() == ("2",)
-        assert db.execute("SELECT count(*) FROM document_versions").fetchone() == (0,)
+        ).fetchone() == ("1",)
+        assert db.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'document_versions'"
+        ).fetchone() == (0,)
+
+
+@pytest.mark.parametrize(
+    "damage", ["extra-table", "missing-index", "misdirected-index"]
+)
+def test_schema_v1_requires_exact_application_objects(tmp_path, damage: str) -> None:
+    path = tmp_path / f"{damage}.db"
+    SQLiteKnowledgeSnapshotStore(path)
+    with sqlite3.connect(path) as db:
+        if damage == "extra-table":
+            db.execute("CREATE TABLE unexpected (value TEXT)")
+        elif damage == "missing-index":
+            db.execute("DROP INDEX document_versions_document_id")
+        else:
+            db.execute("DROP INDEX document_versions_document_id")
+            db.execute(
+                "CREATE INDEX document_versions_document_id ON sources(display_name)"
+            )
+
+    with pytest.raises(KnowledgeSnapshotStoreError, match="schema"):
+        SQLiteKnowledgeSnapshotStore(path)
+
+
+def test_schema_v1_rejects_extra_implicit_unique_index(tmp_path) -> None:
+    path = tmp_path / "extra-unique.db"
+    SQLiteKnowledgeSnapshotStore(path)
+    with sqlite3.connect(path) as db:
+        _replace_documents_table(db, "UNIQUE(logical_path)")
+
+    with pytest.raises(KnowledgeSnapshotStoreError, match="schema"):
+        SQLiteKnowledgeSnapshotStore(path)
+
+
+@pytest.mark.parametrize(
+    "extra_constraint",
+    [
+        "FOREIGN KEY(content_type) REFERENCES sources(source_id)",
+        "CHECK(length(content) < 10)",
+    ],
+)
+def test_schema_v1_rejects_extra_table_constraints(
+    tmp_path, extra_constraint: str
+) -> None:
+    path = tmp_path / "extra-constraint.db"
+    SQLiteKnowledgeSnapshotStore(path)
+    with sqlite3.connect(path) as db:
+        _replace_documents_table(db, extra_constraint)
+
+    with pytest.raises(KnowledgeSnapshotStoreError, match="schema"):
+        SQLiteKnowledgeSnapshotStore(path)
+
+
+def _replace_documents_table(
+    db: sqlite3.Connection, extra_constraint: str
+) -> None:
+    db.execute("PRAGMA foreign_keys=OFF")
+    db.execute("ALTER TABLE documents RENAME TO original_documents")
+    db.execute(
+        "CREATE TABLE documents ("
+        "document_id TEXT PRIMARY KEY, source_id TEXT NOT NULL, "
+        "logical_path TEXT NOT NULL, content TEXT NOT NULL, "
+        "content_type TEXT NOT NULL, metadata_json TEXT NOT NULL, "
+        "content_hash TEXT NOT NULL, "
+        "FOREIGN KEY(source_id) REFERENCES sources(source_id) ON DELETE CASCADE, "
+        f"{extra_constraint})"
+    )
+    db.execute("DROP TABLE original_documents")
 
 
 def test_orphan_database_row_fails_closed(tmp_path) -> None:

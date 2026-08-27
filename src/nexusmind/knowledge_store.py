@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from contextlib import closing
 from enum import Enum
 import json
@@ -15,7 +16,38 @@ from .knowledge import Document, DocumentVersion, KnowledgeSource
 from .knowledge_collection import KnowledgeSnapshot
 
 
-_SCHEMA_VERSION = "2"
+_SCHEMA_VERSION = "1"
+_TABLE_DDL = {
+    "knowledge_store_metadata": (
+        "CREATE TABLE knowledge_store_metadata "
+        "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    ),
+    "sources": (
+        "CREATE TABLE sources ("
+        "source_id TEXT PRIMARY KEY, source_type TEXT NOT NULL, "
+        "display_name TEXT NOT NULL, logical_location TEXT, metadata_json TEXT NOT NULL)"
+    ),
+    "documents": (
+        "CREATE TABLE documents ("
+        "document_id TEXT PRIMARY KEY, source_id TEXT NOT NULL, "
+        "logical_path TEXT NOT NULL, content TEXT NOT NULL, content_type TEXT NOT NULL, "
+        "metadata_json TEXT NOT NULL, content_hash TEXT NOT NULL, "
+        "FOREIGN KEY(source_id) REFERENCES sources(source_id) ON DELETE CASCADE)"
+    ),
+    "document_versions": (
+        "CREATE TABLE document_versions ("
+        "version_id TEXT PRIMARY KEY, document_id TEXT NOT NULL, "
+        "source_id TEXT NOT NULL, logical_path TEXT NOT NULL, content TEXT NOT NULL, "
+        "content_hash TEXT NOT NULL, created_at TEXT NOT NULL, "
+        "previous_version_id TEXT, sync_context TEXT NOT NULL)"
+    ),
+}
+_INDEX_DDL = {
+    "document_versions_document_id": (
+        "CREATE INDEX document_versions_document_id "
+        "ON document_versions(document_id)"
+    )
+}
 
 
 class KnowledgeSnapshotStoreError(RuntimeError):
@@ -31,7 +63,7 @@ class KnowledgeSnapshotStore(Protocol):
 
 
 class SQLiteKnowledgeSnapshotStore:
-    """SQLite v2 storage for canonical snapshots and document history."""
+    """SQLite v1 storage for canonical snapshots and document history."""
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
         try:
@@ -168,10 +200,12 @@ class SQLiteKnowledgeSnapshotStore:
                 raise KnowledgeSnapshotStoreError(
                     "stored DocumentVersion is invalid"
                 ) from exc
+        ordered_versions = self._order_versions(versions)
+        self._require_current_document_versions(documents, ordered_versions)
         return KnowledgeSnapshot(
             sources=tuple(sources),
             documents=tuple(documents),
-            document_versions=self._order_versions(versions),
+            document_versions=ordered_versions,
         )
 
     def _initialize(self) -> None:
@@ -183,39 +217,12 @@ class SQLiteKnowledgeSnapshotStore:
                     "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
                 ).fetchall()
                 if not objects:
-                    db.execute(
-                        "CREATE TABLE knowledge_store_metadata "
-                        "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-                    )
-                    db.execute(
-                        "CREATE TABLE sources ("
-                        "source_id TEXT PRIMARY KEY, source_type TEXT NOT NULL, "
-                        "display_name TEXT NOT NULL, logical_location TEXT, metadata_json TEXT NOT NULL)"
-                    )
-                    db.execute(
-                        "CREATE TABLE documents ("
-                        "document_id TEXT PRIMARY KEY, source_id TEXT NOT NULL, "
-                        "logical_path TEXT NOT NULL, content TEXT NOT NULL, content_type TEXT NOT NULL, "
-                        "metadata_json TEXT NOT NULL, content_hash TEXT NOT NULL, "
-                        "FOREIGN KEY(source_id) REFERENCES sources(source_id) ON DELETE CASCADE)"
-                    )
-                    self._create_versions_table(db)
+                    for statement in (*_TABLE_DDL.values(), *_INDEX_DDL.values()):
+                        db.execute(statement)
                     db.execute(
                         "INSERT INTO knowledge_store_metadata (key, value) VALUES ('schema_version', ?)",
                         (_SCHEMA_VERSION,),
                     )
-                else:
-                    row = db.execute(
-                        "SELECT value FROM knowledge_store_metadata WHERE key = 'schema_version'"
-                    ).fetchone()
-                    if row is not None and row[0] == "1":
-                        self._validate_schema_v1(db)
-                        self._create_versions_table(db)
-                        db.execute(
-                            "UPDATE knowledge_store_metadata SET value = ? "
-                            "WHERE key = 'schema_version'",
-                            (_SCHEMA_VERSION,),
-                        )
                 self._validate_schema(db)
                 db.commit()
         except KnowledgeSnapshotStoreError:
@@ -233,6 +240,57 @@ class SQLiteKnowledgeSnapshotStore:
 
     @staticmethod
     def _validate_schema(db: sqlite3.Connection) -> None:
+        objects = {
+            (row[0], row[1]): row[2]
+            for row in db.execute(
+                "SELECT type, name, sql FROM sqlite_master "
+                "WHERE name NOT LIKE 'sqlite_%'"
+            )
+        }
+        expected_ddl = {
+            **{("table", name): sql for name, sql in _TABLE_DDL.items()},
+            **{("index", name): sql for name, sql in _INDEX_DDL.items()},
+        }
+        if set(objects) != set(expected_ddl) or any(
+            SQLiteKnowledgeSnapshotStore._canonical_ddl(objects[key])
+            != SQLiteKnowledgeSnapshotStore._canonical_ddl(expected_ddl[key])
+            for key in expected_ddl
+        ):
+            raise KnowledgeSnapshotStoreError(
+                "knowledge snapshot schema is incomplete or incompatible"
+            )
+        expected_indexes = {
+            "knowledge_store_metadata": Counter(
+                {("pk", 1, 0, (("key", 0, "BINARY"),)): 1}
+            ),
+            "sources": Counter(
+                {("pk", 1, 0, (("source_id", 0, "BINARY"),)): 1}
+            ),
+            "documents": Counter(
+                {("pk", 1, 0, (("document_id", 0, "BINARY"),)): 1}
+            ),
+            "document_versions": Counter(
+                {
+                    ("pk", 1, 0, (("version_id", 0, "BINARY"),)): 1,
+                    ("c", 0, 0, (("document_id", 0, "BINARY"),)): 1,
+                }
+            ),
+        }
+        for table, expected_table_indexes in expected_indexes.items():
+            actual_table_indexes: Counter[tuple[object, ...]] = Counter()
+            for index in db.execute(f"PRAGMA index_list({table})"):
+                key_columns = tuple(
+                    (row[2], row[3], row[4])
+                    for row in db.execute(f"PRAGMA index_xinfo({index[1]})")
+                    if row[5] == 1
+                )
+                actual_table_indexes[
+                    (index[3], index[2], index[4], key_columns)
+                ] += 1
+            if actual_table_indexes != expected_table_indexes:
+                raise KnowledgeSnapshotStoreError(
+                    "knowledge snapshot schema has an invalid index contract"
+                )
         try:
             row = db.execute(
                 "SELECT value FROM knowledge_store_metadata WHERE key = 'schema_version'"
@@ -282,44 +340,34 @@ class SQLiteKnowledgeSnapshotStore:
             }
             if actual != columns:
                 raise KnowledgeSnapshotStoreError("knowledge snapshot schema is incomplete or incompatible")
-        foreign_keys = db.execute("PRAGMA foreign_key_list(documents)").fetchall()
-        if not any(
-            row[2] == "sources"
-            and row[3] == "source_id"
-            and row[4] == "source_id"
-            and row[6].upper() == "CASCADE"
-            for row in foreign_keys
+        expected_foreign_keys = {
+            "knowledge_store_metadata": [],
+            "sources": [],
+            "documents": [
+                (
+                    0,
+                    0,
+                    "sources",
+                    "source_id",
+                    "source_id",
+                    "NO ACTION",
+                    "CASCADE",
+                    "NONE",
+                )
+            ],
+            "document_versions": [],
+        }
+        if any(
+            db.execute(f"PRAGMA foreign_key_list({table})").fetchall() != expected
+            for table, expected in expected_foreign_keys.items()
         ):
             raise KnowledgeSnapshotStoreError("knowledge snapshot schema has an invalid foreign key")
 
     @staticmethod
-    def _validate_schema_v1(db: sqlite3.Connection) -> None:
-        expected_tables = {"knowledge_store_metadata", "sources", "documents"}
-        tables = {
-            row[0]
-            for row in db.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' "
-                "AND name NOT LIKE 'sqlite_%'"
-            )
-        }
-        if tables != expected_tables:
-            raise KnowledgeSnapshotStoreError(
-                "knowledge snapshot schema is incomplete or incompatible"
-            )
-
-    @staticmethod
-    def _create_versions_table(db: sqlite3.Connection) -> None:
-        db.execute(
-            "CREATE TABLE document_versions ("
-            "version_id TEXT PRIMARY KEY, document_id TEXT NOT NULL, "
-            "source_id TEXT NOT NULL, logical_path TEXT NOT NULL, content TEXT NOT NULL, "
-            "content_hash TEXT NOT NULL, created_at TEXT NOT NULL, "
-            "previous_version_id TEXT, sync_context TEXT NOT NULL)"
-        )
-        db.execute(
-            "CREATE INDEX document_versions_document_id "
-            "ON document_versions(document_id)"
-        )
+    def _canonical_ddl(value: object) -> str:
+        if type(value) is not str:
+            return ""
+        return " ".join(value.split()).casefold()
 
     @classmethod
     def _encode_snapshot(
@@ -374,6 +422,7 @@ class SQLiteKnowledgeSnapshotStore:
                 )
             )
         documents: list[tuple[Any, ...]] = []
+        validated_documents: list[Document] = []
         document_ids: set[str] = set()
         for document in snapshot.documents:
             if not isinstance(document, Document):
@@ -397,6 +446,7 @@ class SQLiteKnowledgeSnapshotStore:
             if document.content_hash != validated_document.content_hash:
                 raise KnowledgeSnapshotStoreError("snapshot Document content hash is incoherent")
             document_ids.add(validated_document.document_id)
+            validated_documents.append(validated_document)
             documents.append(
                 (
                     validated_document.document_id,
@@ -411,6 +461,7 @@ class SQLiteKnowledgeSnapshotStore:
         sources.sort(key=lambda row: row[0])
         documents.sort(key=lambda row: row[0])
         versions: list[tuple[Any, ...]] = []
+        validated_versions: list[DocumentVersion] = []
         version_ids: set[str] = set()
         for version in snapshot.document_versions:
             if type(version) is not DocumentVersion:
@@ -438,6 +489,7 @@ class SQLiteKnowledgeSnapshotStore:
                     "snapshot contains duplicate DocumentVersion IDs"
                 )
             version_ids.add(validated.version_id)
+            validated_versions.append(validated)
             versions.append(
                 (
                     validated.version_id,
@@ -451,7 +503,32 @@ class SQLiteKnowledgeSnapshotStore:
                     validated.sync_context,
                 )
             )
+        cls._require_current_document_versions(
+            validated_documents,
+            cls._order_versions(validated_versions),
+        )
         return sources, documents, versions
+
+    @staticmethod
+    def _require_current_document_versions(
+        documents: list[Document], versions: tuple[DocumentVersion, ...]
+    ) -> None:
+        latest = {version.document_id: version for version in versions}
+        for document in documents:
+            version = latest.get(document.document_id)
+            if version is None:
+                raise KnowledgeSnapshotStoreError(
+                    "snapshot documents require document versions"
+                )
+            if (
+                version.source_id != document.source_id
+                or version.logical_path != document.logical_path
+                or version.content != document.content
+                or version.content_hash != document.content_hash
+            ):
+                raise KnowledgeSnapshotStoreError(
+                    "snapshot current document does not match its latest version"
+                )
 
     @staticmethod
     def _order_versions(

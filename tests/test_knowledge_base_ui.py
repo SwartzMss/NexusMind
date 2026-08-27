@@ -143,9 +143,8 @@ def test_file_and_directory_registration_do_not_implicitly_sync() -> None:
 
 
 def test_sync_all_and_single_source_render_exact_counters() -> None:
-    fake = FakeKnowledgeBase(
-        sources=[LocalFileSourceConfig(source_id="one", path="one.md")]
-    )
+    source = LocalFileSourceConfig(path="one.md")
+    fake = FakeKnowledgeBase(sources=[source])
     controller = _controller(fake)
 
     controller.sync_all()
@@ -156,27 +155,28 @@ def test_sync_all_and_single_source_render_exact_counters() -> None:
     assert controller.view.sync_results[0].documents_removed == 4
     assert controller.view.sync_results[0].chunks_indexed == 5
 
-    controller.sync_source("one")
-    assert ("sync_source", "one") in fake.calls
-    assert tuple(item.source_id for item in controller.view.sync_results) == ("one",)
+    controller.sync_source(source.source_id)
+    assert ("sync_source", source.source_id) in fake.calls
+    assert tuple(item.source_id for item in controller.view.sync_results) == (
+        source.source_id,
+    )
 
 
 def test_source_removal_delegates_and_refreshes_status() -> None:
-    fake = FakeKnowledgeBase(
-        sources=[LocalFileSourceConfig(source_id="one", path="one.md")]
-    )
+    source = LocalFileSourceConfig(path="one.md")
+    fake = FakeKnowledgeBase(sources=[source])
     controller = _controller(fake)
 
-    controller.remove_source("one")
+    controller.remove_source(source.source_id)
 
-    assert ("remove_source", "one") in fake.calls
+    assert ("remove_source", source.source_id) in fake.calls
     assert controller.view.sources == ()
     assert controller.view.status.registered_source_count == 0
 
 
 def test_status_is_rendered_only_from_knowledge_base_status() -> None:
     fake = FakeKnowledgeBase(
-        sources=[LocalFileSourceConfig(source_id="one", path="one.md")],
+        sources=[LocalFileSourceConfig(path="one.md")],
         canonical_source_count=1,
         document_count=7,
     )
@@ -208,18 +208,13 @@ def test_search_preserves_order_limit_and_provenance() -> None:
 
 
 def test_render_translates_internal_source_ids_to_paths() -> None:
+    android = LocalDirectorySourceConfig(path=r"C:\knowledge\android")
+    qnx = LocalDirectorySourceConfig(path=r"C:\knowledge\qnx")
     fake = FakeKnowledgeBase(
-        sources=[
-            LocalDirectorySourceConfig(
-                source_id="internal-android", path=r"C:\knowledge\android"
-            ),
-            LocalDirectorySourceConfig(
-                source_id="internal-qnx", path=r"C:\knowledge\qnx"
-            ),
-        ],
+        sources=[android, qnx],
         search_results=(
-            _search_result("internal-android", "README.md", 9.0),
-            _search_result("internal-qnx", "README.md", 8.0),
+            _search_result(android.source_id, "README.md", 9.0),
+            _search_result(qnx.source_id, "README.md", 8.0),
         ),
     )
     controller = _controller(fake)
@@ -235,12 +230,13 @@ def test_render_translates_internal_source_ids_to_paths() -> None:
     assert r"C:\knowledge\qnx" in sync_output
     assert r"[C:\knowledge\android] README.md" in search_output
     assert r"[C:\knowledge\qnx] README.md" in search_output
-    assert "internal-android" not in sync_output
-    assert "internal-qnx" not in sync_output
+    assert android.source_id not in sync_output
+    assert qnx.source_id not in sync_output
     result_headers = tuple(
         line for line in search_output.splitlines() if line.startswith("[")
     )
-    assert all("internal-" not in line for line in result_headers)
+    assert all(android.source_id not in line for line in result_headers)
+    assert all(qnx.source_id not in line for line in result_headers)
 
 
 @pytest.mark.parametrize("query,limit", [("", 10), (" ", 10), ("query", 0), ("query", MAX_SEARCH_LIMIT + 1)])
@@ -273,7 +269,7 @@ def test_controlled_errors_do_not_render_exception_text_or_tracebacks() -> None:
 
 def test_duplicate_local_mutation_is_rejected_while_sync_is_active() -> None:
     fake = FakeKnowledgeBase(
-        sources=[LocalFileSourceConfig(source_id="one", path="one.md")]
+        sources=[LocalFileSourceConfig(path="one.md")]
     )
     controller = _controller(fake)
     fake.on_sync = lambda: controller.remove_source("one")

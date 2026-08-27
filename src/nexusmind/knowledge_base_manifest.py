@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import InitVar, dataclass, field, replace
+from dataclasses import InitVar, dataclass, field
 import json
 import os
 from pathlib import Path
@@ -28,9 +28,6 @@ class KnowledgeBasePersistenceError(KnowledgeBaseError):
 
 class KnowledgeBaseClosedError(KnowledgeBaseError):
     """Raised when a closed knowledge base is used."""
-
-
-_AUTO_SOURCE_ID = object()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -59,52 +56,42 @@ def _require_non_empty_text(value: object, field: str) -> str:
 class LocalFileSourceConfig:
     config_version: ClassVar[str] = "1"
     type: ClassVar[str] = "local_file"
-    source_id: str = _AUTO_SOURCE_ID  # type: ignore[assignment]
     path: str
-    _source_id_was_auto: bool = field(init=False, repr=False, compare=False)
+    source_id: str = field(init=False)
 
     def __post_init__(self) -> None:
         _require_non_empty_text(self.path, "path")
-        source_id_was_auto = self.source_id is _AUTO_SOURCE_ID
-        if source_id_was_auto:
-            object.__setattr__(
-                self,
-                "source_id",
-                str(
-                    uuid5(
-                        NAMESPACE_URL,
-                        f"nexusmind-source:{self.type}:{_path_identity(self.path)}",
-                    )
-                ),
-            )
-        object.__setattr__(self, "_source_id_was_auto", source_id_was_auto)
-        _require_non_empty_text(self.source_id, "source_id")
+        object.__setattr__(
+            self,
+            "source_id",
+            str(
+                uuid5(
+                    NAMESPACE_URL,
+                    f"nexusmind-source:{self.type}:{_path_identity(self.path)}",
+                )
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class LocalDirectorySourceConfig:
     config_version: ClassVar[str] = "1"
     type: ClassVar[str] = "local_directory"
-    source_id: str = _AUTO_SOURCE_ID  # type: ignore[assignment]
     path: str
-    _source_id_was_auto: bool = field(init=False, repr=False, compare=False)
+    source_id: str = field(init=False)
 
     def __post_init__(self) -> None:
         _require_non_empty_text(self.path, "path")
-        source_id_was_auto = self.source_id is _AUTO_SOURCE_ID
-        if source_id_was_auto:
-            object.__setattr__(
-                self,
-                "source_id",
-                str(
-                    uuid5(
-                        NAMESPACE_URL,
-                        f"nexusmind-source:{self.type}:{_path_identity(self.path)}",
-                    )
-                ),
-            )
-        object.__setattr__(self, "_source_id_was_auto", source_id_was_auto)
-        _require_non_empty_text(self.source_id, "source_id")
+        object.__setattr__(
+            self,
+            "source_id",
+            str(
+                uuid5(
+                    NAMESPACE_URL,
+                    f"nexusmind-source:{self.type}:{_path_identity(self.path)}",
+                )
+            ),
+        )
 
 
 RegisteredSourceConfig: TypeAlias = LocalFileSourceConfig | LocalDirectorySourceConfig
@@ -125,11 +112,10 @@ def _path_identity(path: str) -> str:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class KnowledgeBaseManifest:
-    format_version: ClassVar[str] = "2"
+    format_version: ClassVar[str] = "1"
     knowledge_base_id: str
     display_name: str | None = None
     sources: tuple[RegisteredSourceConfig, ...] = ()
-    retired_sources: tuple[RegisteredSourceConfig, ...] = ()
     limits: InitVar[KnowledgeBaseLimits | None] = None
 
     def __post_init__(self, limits: KnowledgeBaseLimits | None) -> None:
@@ -145,41 +131,40 @@ class KnowledgeBaseManifest:
             display_name = _require_non_empty_text(self.display_name, "display_name")
             if len(display_name) > active_limits.max_display_name_chars:
                 raise KnowledgeBaseConfigError("display_name exceeds configured limit")
-        if type(self.sources) is not tuple or type(self.retired_sources) is not tuple:
-            raise KnowledgeBaseConfigError("source collections must be exact tuples")
+        if type(self.sources) is not tuple:
+            raise KnowledgeBaseConfigError("sources must be an exact tuple")
         if len(self.sources) > active_limits.max_sources:
             raise KnowledgeBaseConfigError("source count exceeds configured limit")
-        normalized_active: list[RegisteredSourceConfig] = []
-        normalized_retired: list[RegisteredSourceConfig] = []
+        normalized_sources: list[RegisteredSourceConfig] = []
         seen: set[str] = set()
-        for item, destination in (
-            *((item, normalized_active) for item in self.sources),
-            *((item, normalized_retired) for item in self.retired_sources),
-        ):
+        seen_paths: set[str] = set()
+        for item in self.sources:
             if type(item) not in (LocalFileSourceConfig, LocalDirectorySourceConfig):
                 raise KnowledgeBaseConfigError("sources contain an unsupported member")
             _require_non_empty_text(item.path, "path")
             path = _normalized_path(item.path)
             if len(path) > active_limits.max_path_chars:
                 raise KnowledgeBaseConfigError("path exceeds configured limit")
-            normalized = (
-                type(item)(path=path)
-                if item._source_id_was_auto
-                else replace(item, path=path)
-            )
+            normalized = type(item)(path=path)
             source_id = _require_non_empty_text(normalized.source_id, "source_id")
             if source_id in seen:
                 raise KnowledgeBaseConfigError("source identifiers must be unique")
             seen.add(source_id)
+            path_identity = _path_identity(path)
+            if path_identity in seen_paths:
+                raise KnowledgeBaseConfigError("source paths must be unique")
+            seen_paths.add(path_identity)
             if len(source_id) > active_limits.max_source_id_chars:
                 raise KnowledgeBaseConfigError("source_id exceeds configured limit")
-            destination.append(normalized)
-        object.__setattr__(self, "sources", tuple(sorted(normalized_active, key=lambda item: item.source_id)))
-        object.__setattr__(self, "retired_sources", tuple(sorted(normalized_retired, key=lambda item: item.source_id)))
+            normalized_sources.append(normalized)
+        object.__setattr__(
+            self,
+            "sources",
+            tuple(sorted(normalized_sources, key=lambda item: item.source_id)),
+        )
 
 
-_ROOT_KEYS_V1 = frozenset({"format_version", "knowledge_base_id", "display_name", "sources"})
-_ROOT_KEYS_V2 = _ROOT_KEYS_V1 | {"retired_sources"}
+_ROOT_KEYS = frozenset({"format_version", "knowledge_base_id", "display_name", "sources"})
 _SOURCE_KEYS = frozenset({"config_version", "source_id", "type", "path"})
 _READ_CHUNK_BYTES = 64 * 1024
 
@@ -200,15 +185,6 @@ def _manifest_mapping(manifest: KnowledgeBaseManifest) -> dict[str, object]:
             }
             for item in manifest.sources
         ],
-        "retired_sources": [
-            {
-                "config_version": item.config_version,
-                "source_id": item.source_id,
-                "type": item.type,
-                "path": item.path,
-            }
-            for item in manifest.retired_sources
-        ],
     }
 
 
@@ -222,7 +198,6 @@ def encode_manifest(manifest: KnowledgeBaseManifest, limits: KnowledgeBaseLimits
         knowledge_base_id=manifest.knowledge_base_id,
         display_name=manifest.display_name,
         sources=manifest.sources,
-        retired_sources=manifest.retired_sources,
         limits=limits,
     )
     data = (
@@ -276,7 +251,12 @@ def _decode_source(value: object) -> RegisteredSourceConfig:
     source_class = source_classes.get(source_type)
     if source_class is None:
         raise KnowledgeBaseConfigError("unsupported source type")
-    return source_class(source_id=source_id, path=path)
+    source = source_class(path=path)
+    if source.source_id != source_id:
+        raise KnowledgeBaseConfigError(
+            "persisted source_id does not match source identity"
+        )
+    return source
 
 
 def decode_manifest(data: bytes, limits: KnowledgeBaseLimits) -> KnowledgeBaseManifest:
@@ -300,32 +280,20 @@ def decode_manifest(data: bytes, limits: KnowledgeBaseLimits) -> KnowledgeBaseMa
     if type(value) is not dict:
         raise KnowledgeBaseConfigError("manifest root must be an object")
     root: dict[str, object] = value
-    version = root.get("format_version")
-    if version == "1":
-        _require_exact_keys(root, _ROOT_KEYS_V1, "manifest")
-    elif version == "2":
-        _require_exact_keys(root, _ROOT_KEYS_V2, "manifest")
-    else:
+    if root.get("format_version") != "1":
         raise KnowledgeBaseConfigError("unsupported manifest format version")
+    _require_exact_keys(root, _ROOT_KEYS, "manifest")
     if type(root["knowledge_base_id"]) is not str:
         raise KnowledgeBaseConfigError("knowledge_base_id must be text")
     if root["display_name"] is not None and type(root["display_name"]) is not str:
         raise KnowledgeBaseConfigError("display_name must be text or null")
     if type(root["sources"]) is not list:
         raise KnowledgeBaseConfigError("sources must be an array")
-    if version == "2" and type(root["retired_sources"]) is not list:
-        raise KnowledgeBaseConfigError("retired_sources must be an array")
     sources = tuple(_decode_source(item) for item in root["sources"])
-    retired_sources = (
-        tuple(_decode_source(item) for item in root["retired_sources"])
-        if version == "2"
-        else ()
-    )
     return KnowledgeBaseManifest(
         knowledge_base_id=root["knowledge_base_id"],
         display_name=root["display_name"],
         sources=sources,
-        retired_sources=retired_sources,
         limits=limits,
     )
 
