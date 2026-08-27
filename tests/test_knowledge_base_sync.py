@@ -144,6 +144,48 @@ def test_auto_identity_remove_and_readd_preserves_document_version_chain(
     assert versions[1].previous_version_id == first_version.version_id
 
 
+def test_auto_identity_uses_registration_cwd_for_relative_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first_cwd = tmp_path / "first"
+    second_cwd = tmp_path / "second"
+    first_cwd.mkdir()
+    second_cwd.mkdir()
+    monkeypatch.chdir(first_cwd)
+    delayed = LocalFileSourceConfig(path="notes.md")
+    monkeypatch.chdir(second_cwd)
+    kb = KnowledgeBase.create(str(tmp_path / "kb"))
+
+    kb.add_source(delayed)
+
+    registered = kb.list_sources()[0]
+    assert registered.path == str(second_cwd / "notes.md")
+    assert registered.source_id == LocalFileSourceConfig(
+        path=str(second_cwd / "notes.md")
+    ).source_id
+
+
+def test_delayed_relative_auto_identity_does_not_collide_with_original_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first_cwd = tmp_path / "first"
+    second_cwd = tmp_path / "second"
+    first_cwd.mkdir()
+    second_cwd.mkdir()
+    monkeypatch.chdir(first_cwd)
+    delayed = LocalFileSourceConfig(path="notes.md")
+    monkeypatch.chdir(second_cwd)
+    kb = KnowledgeBase.create(str(tmp_path / "kb"))
+    kb.add_source(delayed)
+
+    kb.add_source(LocalFileSourceConfig(path=str(first_cwd / "notes.md")))
+
+    assert {item.path for item in kb.list_sources()} == {
+        str(first_cwd / "notes.md"),
+        str(second_cwd / "notes.md"),
+    }
+
+
 def test_legacy_identity_remove_and_readd_restores_version_chain(tmp_path: Path) -> None:
     root = tmp_path / "kb"
     source = tmp_path / "legacy.md"

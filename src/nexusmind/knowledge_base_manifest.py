@@ -158,17 +158,22 @@ class KnowledgeBaseManifest:
         ):
             if type(item) not in (LocalFileSourceConfig, LocalDirectorySourceConfig):
                 raise KnowledgeBaseConfigError("sources contain an unsupported member")
-            source_id = _require_non_empty_text(item.source_id, "source_id")
             _require_non_empty_text(item.path, "path")
+            path = _normalized_path(item.path)
+            if len(path) > active_limits.max_path_chars:
+                raise KnowledgeBaseConfigError("path exceeds configured limit")
+            normalized = (
+                type(item)(path=path)
+                if item._source_id_was_auto
+                else replace(item, path=path)
+            )
+            source_id = _require_non_empty_text(normalized.source_id, "source_id")
             if source_id in seen:
                 raise KnowledgeBaseConfigError("source identifiers must be unique")
             seen.add(source_id)
             if len(source_id) > active_limits.max_source_id_chars:
                 raise KnowledgeBaseConfigError("source_id exceeds configured limit")
-            path = _normalized_path(item.path)
-            if len(path) > active_limits.max_path_chars:
-                raise KnowledgeBaseConfigError("path exceeds configured limit")
-            destination.append(replace(item, path=path))
+            destination.append(normalized)
         object.__setattr__(self, "sources", tuple(sorted(normalized_active, key=lambda item: item.source_id)))
         object.__setattr__(self, "retired_sources", tuple(sorted(normalized_retired, key=lambda item: item.source_id)))
 
