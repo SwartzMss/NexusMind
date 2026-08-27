@@ -857,14 +857,14 @@ class KnowledgeBase:
                 "unable to diagnose knowledge search"
             ) from None
 
-    def add_source(self, config: RegisteredSourceConfig) -> None:
-        """Persist a source registration without touching the source itself."""
+    def add_source(self, config: RegisteredSourceConfig) -> RegisteredSourceConfig:
+        """Persist and return a canonical source registration without ingesting it."""
         self._require_open()
         with self._mutation_guard():
             self._refresh_manifest()
-            self._add_source(config)
+            return self._add_source(config)
 
-    def _add_source(self, config: RegisteredSourceConfig) -> None:
+    def _add_source(self, config: RegisteredSourceConfig) -> RegisteredSourceConfig:
         if type(config) not in (LocalFileSourceConfig, LocalDirectorySourceConfig):
             raise KnowledgeBaseConfigError("source config type is unsupported")
         source_id_was_auto = config._source_id_was_auto
@@ -907,6 +907,9 @@ class KnowledgeBase:
             raise KnowledgeBaseSourceError("source path is already registered")
         self._persist_manifest(candidate)
         self._manifest = candidate
+        return next(
+            item for item in candidate.sources if item.source_id == normalized.source_id
+        )
 
     def unregister_source(self, source_id: str) -> None:
         """Remove an unused registration while preserving canonical content."""

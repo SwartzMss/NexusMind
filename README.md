@@ -154,16 +154,16 @@ kb = KnowledgeBase.create(
     display_name="Security Notes",
 )
 
-kb.add_source(
+registered = kb.add_source(
     LocalDirectorySourceConfig(
         path="./security-notes",
     )
 )
-kb.sync()
+kb.sync_source(registered.source_id)
 kb.close()
 ```
 
-`add_source()` 只保存来源注册，不会立即读取文件。只有调用 `sync()` 或 `sync_source()` 时，KnowledgeBase 才会读取并提交最新内容。
+`add_source()` 只保存来源注册，不会立即读取文件，并返回包含最终规范化路径与内部 ID 的注册配置。只有调用 `sync()` 或 `sync_source()` 时，KnowledgeBase 才会读取并提交最新内容。
 
 ### 搜索
 

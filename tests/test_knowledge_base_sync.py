@@ -154,15 +154,17 @@ def test_auto_identity_uses_registration_cwd_for_relative_path(
     monkeypatch.chdir(first_cwd)
     delayed = LocalFileSourceConfig(path="notes.md")
     monkeypatch.chdir(second_cwd)
+    second_cwd.joinpath("notes.md").write_text("canonical", encoding="utf-8")
     kb = KnowledgeBase.create(str(tmp_path / "kb"))
 
-    kb.add_source(delayed)
+    registered = kb.add_source(delayed)
 
-    registered = kb.list_sources()[0]
     assert registered.path == str(second_cwd / "notes.md")
     assert registered.source_id == LocalFileSourceConfig(
         path=str(second_cwd / "notes.md")
     ).source_id
+    assert kb.list_sources() == (registered,)
+    assert kb.sync_source(registered.source_id).source_id == registered.source_id
 
 
 def test_delayed_relative_auto_identity_does_not_collide_with_original_cwd(
