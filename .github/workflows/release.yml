@@ -9,8 +9,73 @@ permissions:
   contents: read
 
 jobs:
+  validate-release:
+    name: Validate release provenance and version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.13"
+
+      - name: Validate main ancestry, tag and source metadata
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import subprocess
+          import tomllib
+          from pathlib import Path
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          if not tag.startswith("v") or not tag[1:]:
+              raise SystemExit("release tag must start with v and contain a version")
+          version = tag[1:]
+
+          def commit(ref):
+              return subprocess.check_output(
+                  ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], text=True
+              ).strip()
+
+          # Peel annotated tags and check the commit actually being built.
+          tagged_commit = commit(f"refs/tags/{tag}")
+          if tagged_commit != commit("HEAD"):
+              raise SystemExit("checked-out commit does not match release tag")
+          main_commit = commit("refs/remotes/origin/main")
+          ancestry = subprocess.run(["git", "merge-base", "--is-ancestor", tagged_commit, main_commit])
+          if ancestry.returncode != 0:
+              raise SystemExit("release tag must point to a commit in origin/main history")
+
+          project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
+          expected = {
+              "version": version,
+              "requires-python": ">=3.11,<3.14",
+              "license": "MIT",
+          }
+          for key, value in expected.items():
+              if project.get(key) != value:
+                  raise SystemExit(f"{key} must be {value!r}, got {project.get(key)!r}")
+          if not Path(f"docs/releases/{tag}.md").is_file():
+              raise SystemExit(f"release notes are missing for {tag}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"version={version}\n")
+          PY
+
   tests:
     name: tests (Python ${{ matrix.python-version }})
+    needs: [validate-release]
     runs-on: windows-latest
     timeout-minutes: 10
     strategy:
@@ -43,8 +108,11 @@ jobs:
 
   python-package:
     name: Python release distributions
+    needs: [validate-release]
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      RELEASE_VERSION: ${{ needs.validate-release.outputs.version }}
 
     steps:
       - name: Check out repository
@@ -58,28 +126,6 @@ jobs:
           python-version: "3.13"
           cache: pip
 
-      - name: Validate tag and source metadata
-        shell: bash
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import os
-          import tomllib
-          from pathlib import Path
-
-          project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
-          expected = {
-              "version": "0.1.0",
-              "requires-python": ">=3.11,<3.14",
-              "license": "MIT",
-          }
-          for key, value in expected.items():
-              if project.get(key) != value:
-                  raise SystemExit(f"{key} must be {value!r}, got {project.get(key)!r}")
-          if os.environ["GITHUB_REF_NAME"] != f"v{expected['version']}":
-              raise SystemExit("release tag does not match package version")
-          PY
-
       - name: Build wheel and sdist
         shell: bash
         run: |
@@ -87,8 +133,8 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install "build>=1,<2"
           python -m build
-          test -f dist/nexusmind-0.1.0-py3-none-any.whl
-          test -f dist/nexusmind-0.1.0.tar.gz
+          test -f "dist/nexusmind-${RELEASE_VERSION}-py3-none-any.whl"
+          test -f "dist/nexusmind-${RELEASE_VERSION}.tar.gz"
           test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
 
       - name: Clean-install and verify wheel
@@ -96,17 +142,21 @@ jobs:
         run: |
           set -euo pipefail
           python -m venv "$RUNNER_TEMP/venv-wheel"
-          "$RUNNER_TEMP/venv-wheel/bin/python" -m pip install "$GITHUB_WORKSPACE/dist/nexusmind-0.1.0-py3-none-any.whl"
+          "$RUNNER_TEMP/venv-wheel/bin/python" -m pip install "$GITHUB_WORKSPACE/dist/nexusmind-${RELEASE_VERSION}-py3-none-any.whl"
           "$RUNNER_TEMP/venv-wheel/bin/python" -m pip check
           "$RUNNER_TEMP/venv-wheel/bin/nexusmind" --help
           "$RUNNER_TEMP/venv-wheel/bin/python" - <<'PY'
           import importlib.metadata
+          import os
           from pathlib import Path
           import sys
 
           metadata = importlib.metadata.metadata("nexusmind")
-          if metadata["Version"] != "0.1.0":
+          if metadata["Version"] != os.environ["RELEASE_VERSION"]:
               raise SystemExit("installed wheel version mismatch")
+          requires_python = {item.strip() for item in metadata.get("Requires-Python", "").split(",")}
+          if requires_python != {">=3.11", "<3.14"}:
+              raise SystemExit("installed wheel Requires-Python mismatch")
           if (metadata.get("License-Expression") or metadata.get("License")) != "MIT":
               raise SystemExit("installed wheel license mismatch")
           scripts = {item.name: item for item in importlib.metadata.entry_points(group="console_scripts")}
@@ -120,17 +170,21 @@ jobs:
         run: |
           set -euo pipefail
           python -m venv "$RUNNER_TEMP/venv-sdist"
-          "$RUNNER_TEMP/venv-sdist/bin/python" -m pip install "$GITHUB_WORKSPACE/dist/nexusmind-0.1.0.tar.gz"
+          "$RUNNER_TEMP/venv-sdist/bin/python" -m pip install "$GITHUB_WORKSPACE/dist/nexusmind-${RELEASE_VERSION}.tar.gz"
           "$RUNNER_TEMP/venv-sdist/bin/python" -m pip check
           "$RUNNER_TEMP/venv-sdist/bin/nexusmind" --help
           "$RUNNER_TEMP/venv-sdist/bin/python" - <<'PY'
           import importlib.metadata
+          import os
           from pathlib import Path
           import sys
 
           metadata = importlib.metadata.metadata("nexusmind")
-          if metadata["Version"] != "0.1.0":
+          if metadata["Version"] != os.environ["RELEASE_VERSION"]:
               raise SystemExit("installed sdist version mismatch")
+          requires_python = {item.strip() for item in metadata.get("Requires-Python", "").split(",")}
+          if requires_python != {">=3.11", "<3.14"}:
+              raise SystemExit("installed sdist Requires-Python mismatch")
           if (metadata.get("License-Expression") or metadata.get("License")) != "MIT":
               raise SystemExit("installed sdist license mismatch")
           scripts = {item.name: item for item in importlib.metadata.entry_points(group="console_scripts")}
@@ -144,12 +198,13 @@ jobs:
         with:
           name: python-release-distributions
           path: |
-            dist/nexusmind-0.1.0-py3-none-any.whl
-            dist/nexusmind-0.1.0.tar.gz
+            dist/nexusmind-${{ env.RELEASE_VERSION }}-py3-none-any.whl
+            dist/nexusmind-${{ env.RELEASE_VERSION }}.tar.gz
           if-no-files-found: error
 
   windows-portable:
     name: Windows portable release
+    needs: [validate-release]
     runs-on: windows-latest
     timeout-minutes: 15
 
@@ -190,11 +245,13 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: [tests, python-package, windows-portable]
+    needs: [validate-release, tests, python-package, windows-portable]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
+    env:
+      RELEASE_VERSION: ${{ needs.validate-release.outputs.version }}
 
     steps:
       - name: Check out repository
@@ -219,12 +276,14 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
+          import os
           from pathlib import Path
 
+          version = os.environ["RELEASE_VERSION"]
           actual = {item.name for item in Path("release-artifacts").iterdir() if item.is_file()}
           expected = {
-              "nexusmind-0.1.0-py3-none-any.whl",
-              "nexusmind-0.1.0.tar.gz",
+              f"nexusmind-{version}-py3-none-any.whl",
+              f"nexusmind-{version}.tar.gz",
               "nexusmind-windows-portable.zip",
           }
           if actual != expected:
@@ -238,9 +297,9 @@ jobs:
         run: |
           set -euo pipefail
           gh release create "$GITHUB_REF_NAME" \
-            release-artifacts/nexusmind-0.1.0-py3-none-any.whl \
-            release-artifacts/nexusmind-0.1.0.tar.gz \
+            "release-artifacts/nexusmind-${RELEASE_VERSION}-py3-none-any.whl" \
+            "release-artifacts/nexusmind-${RELEASE_VERSION}.tar.gz" \
             release-artifacts/nexusmind-windows-portable.zip \
             --verify-tag \
             --title "NexusMind $GITHUB_REF_NAME" \
-            --notes-file docs/releases/v0.1.0.md
+            --notes-file "docs/releases/${GITHUB_REF_NAME}.md"

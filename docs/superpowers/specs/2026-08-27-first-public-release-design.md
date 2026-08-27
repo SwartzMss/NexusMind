@@ -10,8 +10,9 @@ a GitHub Release.
 ## Release Architecture
 
 Add `.github/workflows/release.yml`, triggered only by version tags matching `v*`.
-The workflow separates verification and construction into independent jobs and has
-a final publication job depend on all of them:
+The workflow first validates the tag's main ancestry, source metadata, and release
+notes. All test, build, and publication jobs depend on this gate. Verification and
+construction then run in independent jobs, with publication depending on all of them:
 
 1. Run the complete test suite on the supported Python versions.
 2. Build the wheel and sdist, validate their metadata, and clean-install the wheel
@@ -19,7 +20,7 @@ a final publication job depend on all of them:
 3. Build the Windows portable ZIP and smoke-test the extracted archive through the
    real CLI in multiple process invocations.
 4. Download only the artifacts uploaded by successful jobs and create the GitHub
-   Release with the checked-in `v0.1.0` notes.
+   Release with the checked-in `docs/releases/<tag>.md` notes.
 
 The publication job uses GitHub CLI provided by the runner rather than introducing
 another third-party release action. It receives `contents: write`; build and test
@@ -30,19 +31,29 @@ jobs retain read-only repository permissions.
 The release workflow derives the expected version by removing the leading `v` from
 the tag. Before publication it verifies that:
 
-- the tag version and `[project].version` in `pyproject.toml` are both `0.1.0`;
+- the tagged commit is the checked-out commit and is in `origin/main` history
+  (the current tip is not required); full history is fetched and annotated tags
+  are peeled to commits;
+- the tag version matches `[project].version` in `pyproject.toml` (`0.1.0` for the
+  first release), and `docs/releases/<tag>.md` exists;
 - `requires-python` remains `>=3.11,<3.14`;
 - the declared license is MIT;
 - the generated filenames are
-  `nexusmind-0.1.0-py3-none-any.whl`, `nexusmind-0.1.0.tar.gz`, and
+  `nexusmind-<version>-py3-none-any.whl`, `nexusmind-<version>.tar.gz`, and
   `nexusmind-windows-portable.zip`;
-- installed package metadata reports the expected version and license;
+- installed wheel and sdist metadata reports the expected version, MIT license,
+  and `Requires-Python` clauses `>=3.11` and `<3.14`, independent of clause order;
 - `nexusmind` and `nexusmind-kb` are installed and respond to `--help`;
 - `python -m pip check` succeeds in each clean installation.
 
 Use the standard Python `build` package to create the wheel and sdist. Each archive
 is installed into its own new virtual environment so validation cannot import from
 the source checkout or reuse dependencies from the build environment.
+
+The gate exports the version once for build, clean-install, upload, publication-set
+validation, and release attachment paths. A subsequent release such as `v0.1.1`
+requires updating package metadata and adding its release notes, without editing
+the workflow.
 
 ## Windows Portable End-to-End Test
 
@@ -83,6 +94,8 @@ Follow test-driven development for repository changes:
 - extend packaging tests to require a real extracted-archive E2E smoke flow;
 - add release-workflow contract tests for tag triggering, permissions, dependency
   gates, exact artifacts, clean installs, metadata checks, and release publication;
+  execute the workflow's Python validators against temporary Git histories,
+  installed metadata fixtures, and publication sets for both `0.1.0` and `0.1.1`;
 - add documentation contract tests for the first-user quick start, artifact
   guidance, shipped capability notes, and explicit constraints;
 - run focused tests after each change, then run the entire existing suite;
@@ -97,7 +110,7 @@ own metadata or E2E checks pass. The publication job declares `needs` on all tes
 and build jobs, checks the exact downloaded filenames, and creates the release only
 after those checks. A mismatched tag, metadata value, installation, entrypoint,
 portable command, or expected output fails the workflow before GitHub Release
-creation.
+creation. Tags outside main history fail before any build or publication job runs.
 
 ## Non-Goals
 

@@ -1,75 +1,211 @@
 from __future__ import annotations
 
+import importlib.metadata
 from pathlib import Path
+import subprocess
+import sys
+from types import SimpleNamespace
 
 import pytest
+import yaml
 
 
-WORKFLOW = Path(".github/workflows/release.yml")
+WORKFLOW = Path(__file__).parents[1] / ".github/workflows/release.yml"
 
 
-def test_release_workflow_is_tag_driven_and_gated() -> None:
-    text = WORKFLOW.read_text(encoding="utf-8")
-
-    for marker in (
-        "tags:",
-        '- "v*"',
-        "needs: [tests, python-package, windows-portable]",
-        "contents: write",
-    ):
-        assert marker in text
+@pytest.fixture
+def workflow() -> dict:
+    return yaml.load(WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
 
-def test_release_workflow_runs_the_supported_test_matrix() -> None:
-    text = WORKFLOW.read_text(encoding="utf-8")
-
-    assert "python-version: [\"3.11\", \"3.12\", \"3.13\"]" in text
-    assert "python -m pytest -vv" in text
+def step(workflow: dict, job: str, name: str) -> dict:
+    return next(item for item in workflow["jobs"][job]["steps"] if item["name"] == name)
 
 
-def test_release_workflow_verifies_python_metadata_and_clean_installs() -> None:
-    text = WORKFLOW.read_text(encoding="utf-8")
-
-    for marker in (
-        "GITHUB_REF_NAME",
-        "pyproject.toml",
-        '>=3.11,<3.14',
-        "MIT",
-        "python -m build",
-        "venv-wheel",
-        "venv-sdist",
-        "python -m pip check",
-        'bin/nexusmind" --help',
-        "importlib.metadata",
-        "nexusmind-kb",
-    ):
-        assert marker in text
+def run_embedded_python(step: dict) -> None:
+    code = step["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    exec(compile(code, str(WORKFLOW), "exec"), {})
 
 
-def test_release_workflow_publishes_only_exact_verified_artifacts() -> None:
-    text = WORKFLOW.read_text(encoding="utf-8")
+def test_release_workflow_is_tag_driven_and_gated(workflow: dict) -> None:
+    assert workflow["on"]["push"]["tags"] == ["v*"]
+    jobs = workflow["jobs"]
+    assert set(jobs) == {"validate-release", "tests", "python-package", "windows-portable", "publish"}
+    assert workflow["permissions"] == {"contents": "read"}
+    assert jobs["publish"]["permissions"] == {"contents": "write"}
+    assert jobs["publish"]["needs"] == ["validate-release", "tests", "python-package", "windows-portable"]
+    for name in ("tests", "python-package", "windows-portable"):
+        assert jobs[name]["needs"] == ["validate-release"]
+        assert "permissions" not in jobs[name]
+    assert "permissions" not in jobs["validate-release"]
+    checkout = step(workflow, "validate-release", "Check out repository")
+    assert checkout["with"]["fetch-depth"] == "0"
+    assert checkout["with"]["persist-credentials"] == "false"
 
-    for marker in (
-        "nexusmind-0.1.0-py3-none-any.whl",
-        "nexusmind-0.1.0.tar.gz",
-        "nexusmind-windows-portable.zip",
-        "scripts/build-portable.ps1",
-        "gh release create",
-        "--verify-tag",
-        "docs/releases/v0.1.0.md",
-    ):
-        assert marker in text
+
+def test_release_workflow_runs_the_supported_test_matrix(workflow: dict) -> None:
+    assert workflow["jobs"]["tests"]["strategy"]["matrix"]["python-version"] == ["3.11", "3.12", "3.13"]
+    assert step(workflow, "tests", "Run test suite")["run"] == "python -m pytest -vv"
 
 
-def test_release_workflow_is_valid_yaml_when_pyyaml_is_available() -> None:
-    yaml = pytest.importorskip("yaml")
+def test_release_version_flows_into_build_install_upload_and_publish(workflow: dict) -> None:
+    assert "0.1.0" not in WORKFLOW.read_text(encoding="utf-8")
+    gate = step(workflow, "validate-release", "Validate main ancestry, tag and source metadata")
+    assert gate["id"] == "release"
+    assert workflow["jobs"]["validate-release"]["outputs"]["version"] == "${{ steps.release.outputs.version }}"
+    for job in ("python-package", "publish"):
+        assert workflow["jobs"][job]["env"]["RELEASE_VERSION"] == "${{ needs.validate-release.outputs.version }}"
+    build = step(workflow, "python-package", "Build wheel and sdist")["run"]
+    assert "python -m build" in build
+    for kind, suffix in (("wheel", "py3-none-any.whl"), ("sdist", "tar.gz")):
+        filename = f"nexusmind-${{RELEASE_VERSION}}{'-' if kind == 'wheel' else '.'}{suffix}"
+        assert filename in build
+        clean_install = step(workflow, "python-package", f"Clean-install and verify {kind}")["run"]
+        assert f'venv-{kind}/bin/python" -m pip install "$GITHUB_WORKSPACE/dist/{filename}"' in clean_install
+        assert f'venv-{kind}/bin/python" -m pip check' in clean_install
+        assert f'venv-{kind}/bin/nexusmind" --help' in clean_install
+        assert "nexusmind-kb" in clean_install
+        assert filename in step(workflow, "publish", "Create GitHub Release")["run"]
+    upload = step(workflow, "python-package", "Upload verified Python distributions")["with"]
+    assert upload["path"].splitlines() == [
+        "dist/nexusmind-${{ env.RELEASE_VERSION }}-py3-none-any.whl",
+        "dist/nexusmind-${{ env.RELEASE_VERSION }}.tar.gz",
+    ]
+    assert upload["if-no-files-found"] == "error"
+    publish = step(workflow, "publish", "Create GitHub Release")["run"]
+    assert "gh release create" in publish
+    assert "--verify-tag" in publish
+    assert '--notes-file "docs/releases/${GITHUB_REF_NAME}.md"' in publish
+    assert "release-artifacts/nexusmind-windows-portable.zip" in publish
+    assert "./scripts/build-portable.ps1" in step(workflow, "windows-portable", "Build and E2E smoke-test portable ZIP")["run"]
 
-    parsed = yaml.load(WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
-    assert parsed["on"]["push"]["tags"] == ["v*"]
-    assert set(parsed["jobs"]) == {
-        "tests",
-        "python-package",
-        "windows-portable",
-        "publish",
-    }
+def git(repo: Path, *args: str) -> str:
+    return subprocess.check_output(["git", "-C", str(repo), *args], text=True, stderr=subprocess.STDOUT).strip()
+
+
+@pytest.fixture
+def release_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, dict[str, str]]:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "--initial-branch=main")
+    git(repo, "config", "user.name", "Release test")
+    git(repo, "config", "user.email", "release-test@example.invalid")
+    git(repo, "config", "commit.gpgsign", "false")
+    git(repo, "config", "tag.gpgsign", "false")
+    git(repo, "commit", "--allow-empty", "-m", "base")
+    base = git(repo, "rev-parse", "HEAD")
+    git(repo, "checkout", "-b", "feature")
+    git(repo, "commit", "--allow-empty", "-m", "unmerged feature")
+    feature = git(repo, "rev-parse", "HEAD")
+    git(repo, "checkout", "main")
+    git(repo, "commit", "--allow-empty", "-m", "main tip")
+    main = git(repo, "rev-parse", "HEAD")
+    git(repo, "update-ref", "refs/remotes/origin/main", main)
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("GITHUB_OUTPUT", str(repo / "outputs"))
+    return repo, {"base": base, "feature": feature, "main": main}
+
+
+def prepare_release(repo: Path, monkeypatch: pytest.MonkeyPatch, commit: str, version: str, *, annotated: bool = False) -> None:
+    tag = f"v{version}"
+    git(repo, "tag", *(["-a", "-m", "Release"] if annotated else []), tag, commit)
+    git(repo, "checkout", "--detach", tag)
+    monkeypatch.setenv("GITHUB_REF_NAME", tag)
+    (repo / "pyproject.toml").write_text(
+        f'[project]\nversion = "{version}"\nrequires-python = ">=3.11,<3.14"\nlicense = "MIT"\n',
+        encoding="utf-8",
+    )
+    notes = repo / "docs/releases" / f"{tag}.md"
+    notes.parent.mkdir(parents=True)
+    notes.write_text("Release notes\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("version", ["0.1.0", "0.1.1"])
+@pytest.mark.parametrize("target,annotated", [("main", False), ("base", True)])
+def test_release_gate_accepts_tags_in_main_history(workflow: dict, release_repo, monkeypatch, version, target, annotated) -> None:
+    repo, commits = release_repo
+    prepare_release(repo, monkeypatch, commits[target], version, annotated=annotated)
+    run_embedded_python(step(workflow, "validate-release", "Validate main ancestry, tag and source metadata"))
+    assert (repo / "outputs").read_text(encoding="utf-8") == f"version={version}\n"
+
+
+@pytest.mark.parametrize("failure", ["unmerged", "missing-main", "wrong-head", "wrong-version", "wrong-python", "wrong-license", "missing-notes"])
+def test_release_gate_rejects_invalid_release(workflow: dict, release_repo, monkeypatch, failure) -> None:
+    repo, commits = release_repo
+    prepare_release(repo, monkeypatch, commits["feature" if failure == "unmerged" else "main"], "0.1.1")
+    if failure == "missing-main":
+        git(repo, "update-ref", "-d", "refs/remotes/origin/main")
+    elif failure == "wrong-head":
+        git(repo, "checkout", "--detach", commits["base"])
+    elif failure.startswith("wrong-"):
+        old, new = {
+            "wrong-version": ("0.1.1", "0.1.0"),
+            "wrong-python": (">=3.11,<3.14", ">=3.10"),
+            "wrong-license": ("MIT", "Apache-2.0"),
+        }[failure]
+        metadata = repo / "pyproject.toml"
+        metadata.write_text(metadata.read_text(encoding="utf-8").replace(old, new), encoding="utf-8")
+    elif failure == "missing-notes":
+        (repo / "docs/releases/v0.1.1.md").unlink()
+    with pytest.raises((SystemExit, subprocess.CalledProcessError)):
+        run_embedded_python(step(workflow, "validate-release", "Validate main ancestry, tag and source metadata"))
+    assert not (repo / "outputs").exists()
+
+
+@pytest.mark.parametrize("kind", ["wheel", "sdist"])
+@pytest.mark.parametrize("field,value,error", [
+    ("Requires-Python", ">=3.11,<3.14", None),
+    ("Requires-Python", "<3.14,>=3.11", None),
+    ("Requires-Python", " <3.14, >=3.11 ", None),
+    ("Requires-Python", None, "Requires-Python"),
+    ("Requires-Python", ">=3.11", "Requires-Python"),
+    ("Requires-Python", ">=3.10,<3.14", "Requires-Python"),
+    ("Requires-Python", ">=3.11,<3.13", "Requires-Python"),
+    ("Version", "0.1.0", "version"),
+    ("License-Expression", "Apache-2.0", "license"),
+])
+def test_clean_install_verifies_final_metadata(workflow, tmp_path, monkeypatch, kind, field, value, error) -> None:
+    metadata = {"Version": "0.1.1", "License-Expression": "MIT", "Requires-Python": ">=3.11,<3.14"}
+    if value is None:
+        metadata.pop(field)
+    else:
+        metadata[field] = value
+    monkeypatch.setenv("RELEASE_VERSION", "0.1.1")
+    monkeypatch.setattr(importlib.metadata, "metadata", lambda name: metadata)
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "python"))
+    scripts = []
+    for name in ("nexusmind", "nexusmind-kb"):
+        (tmp_path / name).touch()
+        scripts.append(SimpleNamespace(name=name, load=lambda: lambda: None))
+    monkeypatch.setattr(importlib.metadata, "entry_points", lambda **kwargs: scripts)
+    verification = step(workflow, "python-package", f"Clean-install and verify {kind}")
+    if error is None:
+        run_embedded_python(verification)
+    else:
+        with pytest.raises(SystemExit, match=error):
+            run_embedded_python(verification)
+
+
+@pytest.mark.parametrize("version", ["0.1.0", "0.1.1"])
+@pytest.mark.parametrize("problem", [None, "missing", "extra", "stale"])
+def test_publication_set_uses_derived_version(workflow, tmp_path, monkeypatch, version, problem) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RELEASE_VERSION", version)
+    artifacts = tmp_path / "release-artifacts"
+    artifacts.mkdir()
+    wheel = artifacts / f"nexusmind-{version}-py3-none-any.whl"
+    for name in (wheel.name, f"nexusmind-{version}.tar.gz", "nexusmind-windows-portable.zip"):
+        (artifacts / name).touch()
+    if problem == "missing":
+        wheel.unlink()
+    elif problem == "extra":
+        (artifacts / "unexpected.zip").touch()
+    elif problem == "stale":
+        wheel.rename(artifacts / "nexusmind-0.0.9-py3-none-any.whl")
+    verification = step(workflow, "publish", "Verify publication set")
+    if problem is None:
+        run_embedded_python(verification)
+    else:
+        with pytest.raises(SystemExit, match="release artifact mismatch"):
+            run_embedded_python(verification)
