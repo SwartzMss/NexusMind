@@ -17,6 +17,37 @@ from .knowledge_collection import KnowledgeSnapshot
 
 
 _SCHEMA_VERSION = "1"
+_TABLE_DDL = {
+    "knowledge_store_metadata": (
+        "CREATE TABLE knowledge_store_metadata "
+        "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    ),
+    "sources": (
+        "CREATE TABLE sources ("
+        "source_id TEXT PRIMARY KEY, source_type TEXT NOT NULL, "
+        "display_name TEXT NOT NULL, logical_location TEXT, metadata_json TEXT NOT NULL)"
+    ),
+    "documents": (
+        "CREATE TABLE documents ("
+        "document_id TEXT PRIMARY KEY, source_id TEXT NOT NULL, "
+        "logical_path TEXT NOT NULL, content TEXT NOT NULL, content_type TEXT NOT NULL, "
+        "metadata_json TEXT NOT NULL, content_hash TEXT NOT NULL, "
+        "FOREIGN KEY(source_id) REFERENCES sources(source_id) ON DELETE CASCADE)"
+    ),
+    "document_versions": (
+        "CREATE TABLE document_versions ("
+        "version_id TEXT PRIMARY KEY, document_id TEXT NOT NULL, "
+        "source_id TEXT NOT NULL, logical_path TEXT NOT NULL, content TEXT NOT NULL, "
+        "content_hash TEXT NOT NULL, created_at TEXT NOT NULL, "
+        "previous_version_id TEXT, sync_context TEXT NOT NULL)"
+    ),
+}
+_INDEX_DDL = {
+    "document_versions_document_id": (
+        "CREATE INDEX document_versions_document_id "
+        "ON document_versions(document_id)"
+    )
+}
 
 
 class KnowledgeSnapshotStoreError(RuntimeError):
@@ -186,23 +217,8 @@ class SQLiteKnowledgeSnapshotStore:
                     "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
                 ).fetchall()
                 if not objects:
-                    db.execute(
-                        "CREATE TABLE knowledge_store_metadata "
-                        "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-                    )
-                    db.execute(
-                        "CREATE TABLE sources ("
-                        "source_id TEXT PRIMARY KEY, source_type TEXT NOT NULL, "
-                        "display_name TEXT NOT NULL, logical_location TEXT, metadata_json TEXT NOT NULL)"
-                    )
-                    db.execute(
-                        "CREATE TABLE documents ("
-                        "document_id TEXT PRIMARY KEY, source_id TEXT NOT NULL, "
-                        "logical_path TEXT NOT NULL, content TEXT NOT NULL, content_type TEXT NOT NULL, "
-                        "metadata_json TEXT NOT NULL, content_hash TEXT NOT NULL, "
-                        "FOREIGN KEY(source_id) REFERENCES sources(source_id) ON DELETE CASCADE)"
-                    )
-                    self._create_versions_table(db)
+                    for statement in (*_TABLE_DDL.values(), *_INDEX_DDL.values()):
+                        db.execute(statement)
                     db.execute(
                         "INSERT INTO knowledge_store_metadata (key, value) VALUES ('schema_version', ?)",
                         (_SCHEMA_VERSION,),
@@ -225,20 +241,21 @@ class SQLiteKnowledgeSnapshotStore:
     @staticmethod
     def _validate_schema(db: sqlite3.Connection) -> None:
         objects = {
-            (row[0], row[1])
+            (row[0], row[1]): row[2]
             for row in db.execute(
-                "SELECT type, name FROM sqlite_master "
+                "SELECT type, name, sql FROM sqlite_master "
                 "WHERE name NOT LIKE 'sqlite_%'"
             )
         }
-        expected_objects = {
-            ("table", "knowledge_store_metadata"),
-            ("table", "sources"),
-            ("table", "documents"),
-            ("table", "document_versions"),
-            ("index", "document_versions_document_id"),
+        expected_ddl = {
+            **{("table", name): sql for name, sql in _TABLE_DDL.items()},
+            **{("index", name): sql for name, sql in _INDEX_DDL.items()},
         }
-        if objects != expected_objects:
+        if set(objects) != set(expected_ddl) or any(
+            SQLiteKnowledgeSnapshotStore._canonical_ddl(objects[key])
+            != SQLiteKnowledgeSnapshotStore._canonical_ddl(expected_ddl[key])
+            for key in expected_ddl
+        ):
             raise KnowledgeSnapshotStoreError(
                 "knowledge snapshot schema is incomplete or incompatible"
             )
@@ -323,29 +340,34 @@ class SQLiteKnowledgeSnapshotStore:
             }
             if actual != columns:
                 raise KnowledgeSnapshotStoreError("knowledge snapshot schema is incomplete or incompatible")
-        foreign_keys = db.execute("PRAGMA foreign_key_list(documents)").fetchall()
-        if not any(
-            row[2] == "sources"
-            and row[3] == "source_id"
-            and row[4] == "source_id"
-            and row[6].upper() == "CASCADE"
-            for row in foreign_keys
+        expected_foreign_keys = {
+            "knowledge_store_metadata": [],
+            "sources": [],
+            "documents": [
+                (
+                    0,
+                    0,
+                    "sources",
+                    "source_id",
+                    "source_id",
+                    "NO ACTION",
+                    "CASCADE",
+                    "NONE",
+                )
+            ],
+            "document_versions": [],
+        }
+        if any(
+            db.execute(f"PRAGMA foreign_key_list({table})").fetchall() != expected
+            for table, expected in expected_foreign_keys.items()
         ):
             raise KnowledgeSnapshotStoreError("knowledge snapshot schema has an invalid foreign key")
 
     @staticmethod
-    def _create_versions_table(db: sqlite3.Connection) -> None:
-        db.execute(
-            "CREATE TABLE document_versions ("
-            "version_id TEXT PRIMARY KEY, document_id TEXT NOT NULL, "
-            "source_id TEXT NOT NULL, logical_path TEXT NOT NULL, content TEXT NOT NULL, "
-            "content_hash TEXT NOT NULL, created_at TEXT NOT NULL, "
-            "previous_version_id TEXT, sync_context TEXT NOT NULL)"
-        )
-        db.execute(
-            "CREATE INDEX document_versions_document_id "
-            "ON document_versions(document_id)"
-        )
+    def _canonical_ddl(value: object) -> str:
+        if type(value) is not str:
+            return ""
+        return " ".join(value.split()).casefold()
 
     @classmethod
     def _encode_snapshot(

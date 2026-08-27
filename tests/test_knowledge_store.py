@@ -514,20 +514,46 @@ def test_schema_v1_rejects_extra_implicit_unique_index(tmp_path) -> None:
     path = tmp_path / "extra-unique.db"
     SQLiteKnowledgeSnapshotStore(path)
     with sqlite3.connect(path) as db:
-        db.execute("PRAGMA foreign_keys=OFF")
-        db.execute("ALTER TABLE documents RENAME TO original_documents")
-        db.execute(
-            "CREATE TABLE documents ("
-            "document_id TEXT PRIMARY KEY, source_id TEXT NOT NULL, "
-            "logical_path TEXT NOT NULL, content TEXT NOT NULL, "
-            "content_type TEXT NOT NULL, metadata_json TEXT NOT NULL, "
-            "content_hash TEXT NOT NULL, UNIQUE(logical_path), "
-            "FOREIGN KEY(source_id) REFERENCES sources(source_id) ON DELETE CASCADE)"
-        )
-        db.execute("DROP TABLE original_documents")
+        _replace_documents_table(db, "UNIQUE(logical_path)")
 
     with pytest.raises(KnowledgeSnapshotStoreError, match="schema"):
         SQLiteKnowledgeSnapshotStore(path)
+
+
+@pytest.mark.parametrize(
+    "extra_constraint",
+    [
+        "FOREIGN KEY(content_type) REFERENCES sources(source_id)",
+        "CHECK(length(content) < 10)",
+    ],
+)
+def test_schema_v1_rejects_extra_table_constraints(
+    tmp_path, extra_constraint: str
+) -> None:
+    path = tmp_path / "extra-constraint.db"
+    SQLiteKnowledgeSnapshotStore(path)
+    with sqlite3.connect(path) as db:
+        _replace_documents_table(db, extra_constraint)
+
+    with pytest.raises(KnowledgeSnapshotStoreError, match="schema"):
+        SQLiteKnowledgeSnapshotStore(path)
+
+
+def _replace_documents_table(
+    db: sqlite3.Connection, extra_constraint: str
+) -> None:
+    db.execute("PRAGMA foreign_keys=OFF")
+    db.execute("ALTER TABLE documents RENAME TO original_documents")
+    db.execute(
+        "CREATE TABLE documents ("
+        "document_id TEXT PRIMARY KEY, source_id TEXT NOT NULL, "
+        "logical_path TEXT NOT NULL, content TEXT NOT NULL, "
+        "content_type TEXT NOT NULL, metadata_json TEXT NOT NULL, "
+        "content_hash TEXT NOT NULL, "
+        "FOREIGN KEY(source_id) REFERENCES sources(source_id) ON DELETE CASCADE, "
+        f"{extra_constraint})"
+    )
+    db.execute("DROP TABLE original_documents")
 
 
 def test_orphan_database_row_fails_closed(tmp_path) -> None:
