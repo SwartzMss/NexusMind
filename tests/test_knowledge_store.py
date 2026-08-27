@@ -489,15 +489,22 @@ def test_incomplete_schema_v1_database_is_rejected_without_migration(tmp_path) -
         ).fetchone() == (0,)
 
 
-@pytest.mark.parametrize("damage", ["extra-table", "missing-index"])
+@pytest.mark.parametrize(
+    "damage", ["extra-table", "missing-index", "misdirected-index"]
+)
 def test_schema_v1_requires_exact_application_objects(tmp_path, damage: str) -> None:
     path = tmp_path / f"{damage}.db"
     SQLiteKnowledgeSnapshotStore(path)
     with sqlite3.connect(path) as db:
         if damage == "extra-table":
             db.execute("CREATE TABLE unexpected (value TEXT)")
+        elif damage == "missing-index":
+            db.execute("DROP INDEX document_versions_document_id")
         else:
             db.execute("DROP INDEX document_versions_document_id")
+            db.execute(
+                "CREATE INDEX document_versions_document_id ON sources(display_name)"
+            )
 
     with pytest.raises(KnowledgeSnapshotStoreError, match="schema"):
         SQLiteKnowledgeSnapshotStore(path)

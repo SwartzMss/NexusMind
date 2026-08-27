@@ -241,6 +241,33 @@ class SQLiteKnowledgeSnapshotStore:
             raise KnowledgeSnapshotStoreError(
                 "knowledge snapshot schema is incomplete or incompatible"
             )
+        version_indexes = db.execute(
+            "PRAGMA index_list(document_versions)"
+        ).fetchall()
+        expected_index = next(
+            (
+                row
+                for row in version_indexes
+                if row[1] == "document_versions_document_id"
+            ),
+            None,
+        )
+        indexed_columns = tuple(
+            row[2]
+            for row in db.execute(
+                "PRAGMA index_info(document_versions_document_id)"
+            )
+        )
+        if (
+            expected_index is None
+            or expected_index[2] != 0
+            or expected_index[3] != "c"
+            or expected_index[4] != 0
+            or indexed_columns != ("document_id",)
+        ):
+            raise KnowledgeSnapshotStoreError(
+                "knowledge snapshot schema has an invalid document version index"
+            )
         try:
             row = db.execute(
                 "SELECT value FROM knowledge_store_metadata WHERE key = 'schema_version'"
