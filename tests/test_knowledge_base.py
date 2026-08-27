@@ -85,8 +85,8 @@ def test_create_new_and_existing_empty_directories_with_exact_layout(tmp_path: P
         }
         assert root.joinpath(".knowledge-base.lock").read_bytes() == b"\0"
         assert root.joinpath("manifest.json").read_bytes() == (
-            b'{"display_name":"Security","format_version":"1",'
-            b'"knowledge_base_id":"security","sources":[]}\n'
+            b'{"display_name":"Security","format_version":"2",'
+            b'"knowledge_base_id":"security","retired_sources":[],"sources":[]}\n'
         )
         assert kb.status() == KnowledgeBaseStatus(
             knowledge_base_id="security",

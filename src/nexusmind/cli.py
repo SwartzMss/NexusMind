@@ -7,6 +7,7 @@ from dataclasses import asdict, is_dataclass
 from enum import Enum
 import json
 import logging
+from pathlib import Path
 import sys
 from typing import Any
 
@@ -14,7 +15,7 @@ from nexusmind.answer_provider import OpenAICompatibleAnswerProvider
 from nexusmind.config import ConfigError, load_model_config_from_env
 from nexusmind.knowledge_answer import KnowledgeAnswerError
 from nexusmind.knowledge_base import KnowledgeBase
-from nexusmind.knowledge_base_manifest import KnowledgeBaseError, LocalDirectorySourceConfig, LocalFileSourceConfig
+from nexusmind.knowledge_base_manifest import KnowledgeBaseError, LocalDirectorySourceConfig, LocalFileSourceConfig, _path_identity
 from nexusmind.knowledge_query import knowledge_query_result_dict
 from nexusmind.runtime_support import runtime_operation
 
@@ -22,23 +23,30 @@ from nexusmind.runtime_support import runtime_operation
 RUNTIME_LOGGER = logging.getLogger("nexusmind.runtime")
 
 
+class _AmbiguousSourcePathError(ValueError):
+    """A legacy manifest contains more than one source for a user-facing path."""
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nexusmind", description="Local KnowledgeBase management, retrieval, and cited answers.")
     commands = parser.add_subparsers(dest="command", required=True)
     create = commands.add_parser("create", help="create a knowledge base")
-    create.add_argument("path"); create.add_argument("--id", required=True, dest="knowledge_base_id"); create.add_argument("--name", dest="display_name")
+    create.add_argument("path"); create.add_argument("--name", dest="display_name")
 
     source = commands.add_parser("source", help="manage registered sources")
     source_commands = source.add_subparsers(dest="source_command", required=True)
     source_add = source_commands.add_parser("add", help="register a local source")
-    source_add.add_argument("--knowledge-base", default="."); source_add.add_argument("--id", required=True, dest="source_id"); source_add.add_argument("--path", required=True, dest="source_path"); source_add.add_argument("--type", choices=("file", "directory"), required=True)
+    source_add.add_argument("source_path", metavar="PATH"); source_add.add_argument("--knowledge-base", default=".")
     source_list = source_commands.add_parser("list", help="list registered sources")
     source_list.add_argument("--knowledge-base", default="."); source_list.add_argument("--json", action="store_true")
     source_remove = source_commands.add_parser("remove", help="remove a source and its documents")
-    source_remove.add_argument("--knowledge-base", default="."); source_remove.add_argument("--id", required=True, dest="source_id")
+    source_remove_selector = source_remove.add_mutually_exclusive_group(required=True)
+    source_remove_selector.add_argument("source_path", metavar="PATH", nargs="?")
+    source_remove_selector.add_argument("--id", dest="source_id", help="remove by internal ID to repair legacy duplicate paths")
+    source_remove.add_argument("--knowledge-base", default=".")
 
     sync = commands.add_parser("sync", help="synchronize registered sources")
-    sync.add_argument("--knowledge-base", default="."); sync.add_argument("--source", dest="source_id"); sync.add_argument("--json", action="store_true")
+    sync.add_argument("--knowledge-base", default="."); sync.add_argument("--source", dest="source_path", metavar="PATH"); sync.add_argument("--json", action="store_true")
     search = commands.add_parser("search", help="search canonical knowledge")
     search.add_argument("query"); search.add_argument("--knowledge-base", default="."); search.add_argument("--limit", type=int, default=10); search.add_argument("--json", action="store_true")
     query = commands.add_parser("query", help="generate a cited answer")
@@ -56,12 +64,19 @@ def main(argv: list[str] | None = None) -> int:
         return {"create": _create, "source": _source, "sync": _sync, "search": _search, "query": _query, "inspect": _inspect, "diagnose": _diagnose}[args.command](args)
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr); return 2
+    except _AmbiguousSourcePathError:
+        print(
+            "Source path is ambiguous because this KnowledgeBase contains legacy "
+            "duplicate registrations.",
+            file=sys.stderr,
+        )
+        return 1
     except (KnowledgeBaseError, KnowledgeAnswerError, TypeError, ValueError):
         print("KnowledgeBase operation failed.", file=sys.stderr); return 1
 
 
 def _create(args: argparse.Namespace) -> int:
-    kb = KnowledgeBase.create(args.path, knowledge_base_id=args.knowledge_base_id, display_name=args.display_name)
+    kb = KnowledgeBase.create(args.path, display_name=args.display_name)
     kb.close(); print(f"Created KnowledgeBase: {args.path}"); return 0
 
 
@@ -69,35 +84,60 @@ def _source(args: argparse.Namespace) -> int:
     kb = KnowledgeBase.open(args.knowledge_base)
     try:
         if args.source_command == "add":
-            kind = LocalFileSourceConfig if args.type == "file" else LocalDirectorySourceConfig
-            kb.add_source(kind(source_id=args.source_id, path=args.source_path)); print(f"Registered source: {args.source_id}")
+            source_path = Path(args.source_path)
+            if source_path.is_file(): kind = LocalFileSourceConfig
+            elif source_path.is_dir(): kind = LocalDirectorySourceConfig
+            else: raise ValueError("source path must be an existing file or directory")
+            normalized = str(source_path.resolve(strict=True))
+            kb.add_source(kind(path=normalized)); print(f"Registered source: {normalized}")
         elif args.source_command == "remove":
-            kb.remove_source(args.source_id); print(f"Removed source: {args.source_id}")
+            if args.source_id:
+                kb.remove_source(args.source_id); print("Removed source by internal ID")
+            else:
+                item = _source_by_path(kb, args.source_path)
+                kb.remove_source(item.source_id); print(f"Removed source: {item.path}")
         else:
             sources = kb.list_sources()
             if args.json: _print_json(sources)
             else:
-                for item in sources: print(f"{item.source_id}\t{item.type}\t{item.path}")
+                for item in sources: print(f"{item.type}\t{item.path}")
     finally: kb.close()
     return 0
 
 
 def _sync(args: argparse.Namespace) -> int:
-    fields = {"source_id": args.source_id} if args.source_id else {}
+    source = None
+    if args.source_path:
+        lookup = KnowledgeBase.open(args.knowledge_base)
+        try: source = _source_by_path(lookup, args.source_path)
+        finally: lookup.close()
+    fields = {"source_id": source.source_id} if source else {}
     with runtime_operation(RUNTIME_LOGGER, "sync", **fields) as operation:
         kb = KnowledgeBase.open(args.knowledge_base)
         try:
-            result: Any = kb.sync_source(args.source_id) if args.source_id else kb.sync()
+            result: Any = kb.sync_source(source.source_id) if source else kb.sync()
             sync_results = result if isinstance(result, tuple) else (result,)
             operation["document_count"] = sum(
                 item.documents_added + item.documents_updated + item.documents_unchanged
                 for item in sync_results
             )
             if args.json: _print_json(result)
-            elif args.source_id: print(f"Synchronized source: {args.source_id}")
+            elif source: print(f"Synchronized source: {source.path}")
             else: print(f"Synchronized {len(result)} source(s)")
         finally: kb.close()
     return 0
+
+
+def _source_by_path(kb: KnowledgeBase, path: str) -> Any:
+    identity = _path_identity(path)
+    matches = tuple(
+        item for item in kb.list_sources() if _path_identity(item.path) == identity
+    )
+    if len(matches) > 1:
+        raise _AmbiguousSourcePathError
+    if not matches:
+        raise ValueError("source path is not registered")
+    return matches[0]
 
 
 def _search(args: argparse.Namespace) -> int:
@@ -139,7 +179,8 @@ def _inspect(args: argparse.Namespace) -> int:
             print(f"Document: {result.document.logical_path}")
             for chunk in result.chunks: print(f"{chunk.ordinal}\t{chunk.start_offset}:{chunk.end_offset}\t{chunk.preview}")
         else:
-            print(f"KnowledgeBase: {result.status.knowledge_base_id}"); print(f"Sources: {len(result.sources)}"); print(f"Documents: {len(result.documents)}")
+            display = result.status.display_name or Path(args.knowledge_base).resolve(strict=False).name
+            print(f"KnowledgeBase: {display}"); print(f"Sources: {len(result.sources)}"); print(f"Documents: {len(result.documents)}")
     finally: kb.close()
     return 0
 
@@ -157,7 +198,19 @@ def _diagnose(args: argparse.Namespace) -> int:
 
 
 def _jsonable(value: Any) -> Any:
-    if is_dataclass(value): return {key: _jsonable(item) for key, item in asdict(value).items()}
+    if isinstance(value, (LocalFileSourceConfig, LocalDirectorySourceConfig)):
+        return {
+            "config_version": value.config_version,
+            "source_id": value.source_id,
+            "type": value.type,
+            "path": value.path,
+        }
+    if is_dataclass(value):
+        return {
+            key: _jsonable(item)
+            for key, item in asdict(value).items()
+            if not key.startswith("_")
+        }
     if isinstance(value, Enum): return value.value
     if isinstance(value, (tuple, list)): return [_jsonable(item) for item in value]
     if isinstance(value, dict): return {str(key): _jsonable(item) for key, item in value.items()}

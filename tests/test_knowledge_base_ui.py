@@ -110,14 +110,14 @@ def test_create_and_open_delegate_to_injected_knowledge_base_boundary() -> None:
         return opened
 
     controller = KnowledgeBaseUIController(create=create, open_existing=open_existing)
-    controller.create("new-root", "my-kb", "My KB")
+    controller.create("new-root", "My KB")
     controller.open("existing-root")
 
     assert calls == [
         (
             "create",
             "new-root",
-            {"knowledge_base_id": "my-kb", "display_name": "My KB"},
+            {"display_name": "My KB"},
         ),
         ("open", "existing-root"),
     ]
@@ -129,14 +129,15 @@ def test_file_and_directory_registration_do_not_implicitly_sync() -> None:
     fake = FakeKnowledgeBase()
     controller = _controller(fake)
 
-    controller.add_file("file", "notes.md")
-    controller.add_directory("directory", "docs")
+    controller.add_file("notes.md")
+    controller.add_directory("docs")
 
     additions = [call[1] for call in fake.calls if isinstance(call, tuple)]
-    assert additions == [
-        LocalFileSourceConfig(source_id="file", path="notes.md"),
-        LocalDirectorySourceConfig(source_id="directory", path="docs"),
+    assert [type(item) for item in additions] == [
+        LocalFileSourceConfig,
+        LocalDirectorySourceConfig,
     ]
+    assert [item.path for item in additions] == ["notes.md", "docs"]
     assert "sync" not in fake.calls
     assert controller.view.status.registered_source_count == 2
 
@@ -204,6 +205,42 @@ def test_search_preserves_order_limit_and_provenance() -> None:
     assert controller.view.search_results[0].score == 9.0
     assert controller.view.search_results[0].snippet == "match from b.md"
     assert controller.view.search_results[0].chunk_id == "chunk-second"
+
+
+def test_render_translates_internal_source_ids_to_paths() -> None:
+    fake = FakeKnowledgeBase(
+        sources=[
+            LocalDirectorySourceConfig(
+                source_id="internal-android", path=r"C:\knowledge\android"
+            ),
+            LocalDirectorySourceConfig(
+                source_id="internal-qnx", path=r"C:\knowledge\qnx"
+            ),
+        ],
+        search_results=(
+            _search_result("internal-android", "README.md", 9.0),
+            _search_result("internal-qnx", "README.md", 8.0),
+        ),
+    )
+    controller = _controller(fake)
+    controller.sync_all()
+    controller.search("README", limit=2)
+    app, _ = _window(controller)
+
+    app._render()
+
+    sync_output = app.sync_text.items[0]
+    search_output = app.results.items[0]
+    assert r"C:\knowledge\android" in sync_output
+    assert r"C:\knowledge\qnx" in sync_output
+    assert r"[C:\knowledge\android] README.md" in search_output
+    assert r"[C:\knowledge\qnx] README.md" in search_output
+    assert "internal-android" not in sync_output
+    assert "internal-qnx" not in sync_output
+    result_headers = tuple(
+        line for line in search_output.splitlines() if line.startswith("[")
+    )
+    assert all("internal-" not in line for line in result_headers)
 
 
 @pytest.mark.parametrize("query,limit", [("", 10), (" ", 10), ("query", 0), ("query", MAX_SEARCH_LIMIT + 1)])
@@ -360,7 +397,7 @@ def _window(controller: object) -> tuple[KnowledgeBaseTkApp, FakeRoot]:
     return app, root
 
 
-def test_create_form_has_labeled_non_overlapping_id_and_display_name_rows() -> None:
+def test_create_form_hides_internal_id_and_labels_display_name() -> None:
     app, _ = _window(KnowledgeBaseUIController())
     entries = {
         item.kwargs.get("textvariable"): item
@@ -369,14 +406,11 @@ def test_create_form_has_labeled_non_overlapping_id_and_display_name_rows() -> N
     }
     labels = {item.kwargs.get("text") for item in FakeWidget.instances}
 
-    assert {"Destination:", "ID:", "Display name:"} <= labels
-    assert entries[app.kb_id].layout == (
-        "grid",
-        {"row": 1, "column": 1, "sticky": "ew"},
-    )
+    assert {"Destination:", "Display name:"} <= labels
+    assert "ID:" not in labels
     assert entries[app.display_name].layout == (
         "grid",
-        {"row": 2, "column": 1, "sticky": "ew"},
+        {"row": 1, "column": 1, "sticky": "ew"},
     )
 
 

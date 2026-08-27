@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+import nexusmind.knowledge_base_manifest as manifest_module
+
 from nexusmind import (
     KnowledgeBaseClosedError,
     KnowledgeBaseConfigError,
@@ -91,6 +93,37 @@ def test_source_contracts_are_frozen_and_own_fixed_discriminators(source_type: t
         source_type(source_id="docs", path="/tmp", type="wrong")
 
 
+@pytest.mark.parametrize("source_type", [LocalFileSourceConfig, LocalDirectorySourceConfig])
+def test_automatic_source_id_is_stable_for_normalized_path(source_type: type) -> None:
+    direct = source_type(path=str(ABSOLUTE_BASE / "source"))
+    equivalent = source_type(path=str(ABSOLUTE_BASE / "missing" / ".." / "source"))
+
+    assert direct.source_id == equivalent.source_id
+
+
+def test_automatic_source_id_distinguishes_file_and_directory_types() -> None:
+    path = str(ABSOLUTE_BASE / "source")
+
+    assert LocalFileSourceConfig(path=path).source_id != LocalDirectorySourceConfig(
+        path=path
+    ).source_id
+
+
+def test_automatic_source_id_uses_platform_path_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        manifest_module.os.path,
+        "normcase",
+        lambda path: path.replace("/", "\\").lower(),
+    )
+
+    upper = LocalFileSourceConfig(path=str(ABSOLUTE_BASE / "Future.md"))
+    lower = LocalFileSourceConfig(path=str(ABSOLUTE_BASE / "future.md"))
+
+    assert upper.source_id == lower.source_id
+
+
 @pytest.mark.parametrize("source_id", ["", " ", "\t", "\r\n", 1, None])
 def test_source_id_must_be_non_empty_text(source_id: object) -> None:
     with pytest.raises(KnowledgeBaseConfigError):
@@ -158,8 +191,8 @@ def test_codec_is_exact_utf8_deterministic_and_order_independent() -> None:
     limits = KnowledgeBaseLimits()
     empty = manifest()
     assert encode_manifest(empty, limits) == (
-        b'{"display_name":null,"format_version":"1",'
-        b'"knowledge_base_id":"kb","sources":[]}\n'
+        b'{"display_name":null,"format_version":"2",'
+        b'"knowledge_base_id":"kb","retired_sources":[],"sources":[]}\n'
     )
     assert decode_manifest(encode_manifest(empty, limits), limits) == empty
 
@@ -172,8 +205,8 @@ def test_codec_is_exact_utf8_deterministic_and_order_independent() -> None:
     path_a = json.dumps(str(ABSOLUTE_BASE / "\u4e2d"), ensure_ascii=False)
     path_b = json.dumps(str(ABSOLUTE_BASE / "b"), ensure_ascii=False)
     exact_two_source_json = (
-        '{"display_name":"\u77e5\u8bc6","format_version":"1",'
-        '"knowledge_base_id":"kb","sources":['
+        '{"display_name":"\u77e5\u8bc6","format_version":"2",'
+        '"knowledge_base_id":"kb","retired_sources":[],"sources":['
         f'{{"config_version":"1","path":{path_a},"source_id":"a",'
         '"type":"local_file"},'
         f'{{"config_version":"1","path":{path_b},"source_id":"b",'
@@ -233,7 +266,7 @@ def test_decode_checks_byte_limit_before_decoding() -> None:
     [
         {"extra": 1},
         {"remove": "display_name"},
-        {"format_version": "2"},
+        {"format_version": "3"},
         {"format_version": 1},
         {"knowledge_base_id": 1},
         {"display_name": 1},
@@ -253,6 +286,36 @@ def test_decode_rejects_root_schema_violations(change: dict[str, object]) -> Non
         del value[str(removed)]
     value.update(change)
     with pytest.raises(KnowledgeBaseConfigError):
+        decode_manifest(encoded(value), KnowledgeBaseLimits())
+
+
+def test_decode_v1_manifest_migrates_without_retired_sources() -> None:
+    value = {
+        "format_version": "1",
+        "knowledge_base_id": "kb",
+        "display_name": None,
+        "sources": [],
+    }
+
+    decoded = decode_manifest(encoded(value), KnowledgeBaseLimits())
+
+    assert decoded.sources == ()
+    assert decoded.retired_sources == ()
+
+
+@pytest.mark.parametrize("retired_sources", [None, 1, {}])
+def test_decode_v2_manifest_rejects_non_array_retired_sources(
+    retired_sources: object,
+) -> None:
+    value = {
+        "format_version": "2",
+        "knowledge_base_id": "kb",
+        "display_name": None,
+        "sources": [],
+        "retired_sources": retired_sources,
+    }
+
+    with pytest.raises(KnowledgeBaseConfigError, match="retired_sources must be an array"):
         decode_manifest(encoded(value), KnowledgeBaseLimits())
 
 

@@ -1,4 +1,5 @@
 from dataclasses import FrozenInstanceError
+import json
 import os
 from pathlib import Path
 from threading import Event, Thread
@@ -44,6 +45,13 @@ def test_registration_is_sorted_persistent_and_does_not_ingest(
     assert KnowledgeBase.open(str(root)).list_sources() == kb.list_sources()
     with pytest.raises(KnowledgeBaseSourceError):
         kb.add_source(LocalFileSourceConfig(source_id="z", path=str(file_path)))
+    with pytest.raises(KnowledgeBaseSourceError, match="source path is already registered"):
+        kb.add_source(
+            LocalFileSourceConfig(
+                source_id="duplicate-path",
+                path=str(file_path.parent / "missing" / ".." / file_path.name),
+            )
+        )
     with pytest.raises(KnowledgeBaseConfigError):
         kb.add_source(object())  # type: ignore[arg-type]
 
@@ -107,6 +115,235 @@ def test_failed_registration_write_does_not_swap_memory(
     monkeypatch.setattr(module, "write_manifest", real_write)
     kb.add_source(LocalFileSourceConfig(source_id="two", path="two.txt"))
     assert tuple(item.source_id for item in kb.list_sources()) == ("two",)
+
+
+def test_auto_identity_remove_and_readd_preserves_document_version_chain(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "kb"
+    source = tmp_path / "notes.md"
+    source.write_text("first version", encoding="utf-8")
+    kb = KnowledgeBase.create(str(root))
+
+    first_registration = LocalFileSourceConfig(path=str(source))
+    kb.add_source(first_registration)
+    kb.sync()
+    first_snapshot = SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load()
+    first_version = first_snapshot.document_versions[0]
+
+    kb.remove_source(first_registration.source_id)
+    source.write_text("second version", encoding="utf-8")
+    second_registration = LocalFileSourceConfig(path=str(source))
+    assert second_registration.source_id == first_registration.source_id
+    kb.add_source(second_registration)
+    kb.sync()
+
+    versions = SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load().document_versions
+    assert len(versions) == 2
+    assert versions[1].document_id == first_version.document_id
+    assert versions[1].previous_version_id == first_version.version_id
+
+
+def test_auto_identity_uses_registration_cwd_for_relative_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first_cwd = tmp_path / "first"
+    second_cwd = tmp_path / "second"
+    first_cwd.mkdir()
+    second_cwd.mkdir()
+    monkeypatch.chdir(first_cwd)
+    delayed = LocalFileSourceConfig(path="notes.md")
+    monkeypatch.chdir(second_cwd)
+    second_cwd.joinpath("notes.md").write_text("canonical", encoding="utf-8")
+    kb = KnowledgeBase.create(str(tmp_path / "kb"))
+
+    registered = kb.add_source(delayed)
+
+    assert registered.path == str(second_cwd / "notes.md")
+    assert registered.source_id == LocalFileSourceConfig(
+        path=str(second_cwd / "notes.md")
+    ).source_id
+    assert kb.list_sources() == (registered,)
+    assert kb.sync_source(registered.source_id).source_id == registered.source_id
+
+
+def test_delayed_relative_auto_identity_does_not_collide_with_original_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first_cwd = tmp_path / "first"
+    second_cwd = tmp_path / "second"
+    first_cwd.mkdir()
+    second_cwd.mkdir()
+    monkeypatch.chdir(first_cwd)
+    delayed = LocalFileSourceConfig(path="notes.md")
+    monkeypatch.chdir(second_cwd)
+    kb = KnowledgeBase.create(str(tmp_path / "kb"))
+    kb.add_source(delayed)
+
+    kb.add_source(LocalFileSourceConfig(path=str(first_cwd / "notes.md")))
+
+    assert {item.path for item in kb.list_sources()} == {
+        str(first_cwd / "notes.md"),
+        str(second_cwd / "notes.md"),
+    }
+
+
+def test_legacy_identity_remove_and_readd_restores_version_chain(tmp_path: Path) -> None:
+    root = tmp_path / "kb"
+    source = tmp_path / "legacy.md"
+    source.write_text("legacy first version", encoding="utf-8")
+    kb = KnowledgeBase.create(str(root))
+    kb.add_source(LocalFileSourceConfig(source_id="docs", path=str(source)))
+    kb.sync()
+    first_version = SQLiteKnowledgeSnapshotStore(
+        root / "knowledge.db"
+    ).load().document_versions[0]
+
+    kb.remove_source("docs")
+    source.write_text("legacy second version", encoding="utf-8")
+    kb.add_source(LocalFileSourceConfig(path=str(source)))
+    assert kb.list_sources()[0].source_id == "docs"
+    kb.sync()
+
+    versions = SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load().document_versions
+    assert len(versions) == 2
+    assert versions[1].document_id == first_version.document_id
+    assert versions[1].previous_version_id == first_version.version_id
+
+
+@pytest.mark.parametrize("use_automatic_value", [False, True])
+def test_explicit_source_id_replaces_retired_identity(
+    tmp_path: Path, use_automatic_value: bool
+) -> None:
+    root = tmp_path / "kb"
+    source = tmp_path / "legacy.md"
+    source.write_text("legacy", encoding="utf-8")
+    kb = KnowledgeBase.create(str(root))
+    kb.add_source(LocalFileSourceConfig(source_id="docs", path=str(source)))
+    kb.sync()
+    kb.remove_source("docs")
+
+    fresh_id = (
+        LocalFileSourceConfig(path=str(source)).source_id
+        if use_automatic_value
+        else "fresh"
+    )
+    kb.add_source(LocalFileSourceConfig(source_id=fresh_id, path=str(source)))
+
+    assert kb.list_sources()[0].source_id == fresh_id
+    manifest = json.loads(root.joinpath("manifest.json").read_text(encoding="utf-8"))
+    assert manifest["retired_sources"] == []
+
+
+def test_retired_identity_matching_uses_platform_path_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        module,
+        "_path_identity",
+        lambda path: str(Path(path).resolve(strict=False)).lower(),
+    )
+    root = tmp_path / "kb"
+    original = tmp_path / "Legacy.md"
+    alias = tmp_path / "legacy.md"
+    original.write_text("legacy", encoding="utf-8")
+    kb = KnowledgeBase.create(str(root))
+    kb.add_source(LocalFileSourceConfig(source_id="docs", path=str(original)))
+    kb.sync()
+    kb.remove_source("docs")
+
+    kb.add_source(LocalFileSourceConfig(path=str(alias)))
+
+    assert kb.list_sources()[0].source_id == "docs"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows path identity semantics")
+def test_windows_case_alias_for_missing_path_cannot_be_registered_twice(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "kb"
+    upper = tmp_path / "Future.md"
+    lower = tmp_path / "future.md"
+    assert not upper.exists()
+    assert not lower.exists()
+    kb = KnowledgeBase.create(str(root))
+    kb.add_source(LocalFileSourceConfig(source_id="upper", path=str(upper)))
+
+    with pytest.raises(KnowledgeBaseSourceError, match="source path is already registered"):
+        kb.add_source(LocalFileSourceConfig(source_id="lower", path=str(lower)))
+
+
+def test_retired_legacy_identity_does_not_consume_active_source_limit(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "kb"
+    first = tmp_path / "first.md"
+    first.write_text("first", encoding="utf-8")
+    kb = KnowledgeBase.create(
+        str(root), limits=KnowledgeBaseLimits(max_sources=1)
+    )
+    kb.add_source(LocalFileSourceConfig(source_id="legacy", path=str(first)))
+    kb.sync()
+
+    kb.remove_source("legacy")
+    kb.add_source(LocalFileSourceConfig(path=str(tmp_path / "second.md")))
+
+    assert len(kb.list_sources()) == 1
+
+
+@pytest.mark.parametrize("explicit_id", [False, True])
+def test_remove_without_legacy_history_does_not_create_tombstone(
+    tmp_path: Path, explicit_id: bool
+) -> None:
+    root = tmp_path / "kb"
+    source = tmp_path / "unused.md"
+    kb = KnowledgeBase.create(str(root))
+    registration = (
+        LocalFileSourceConfig(source_id="unused", path=str(source))
+        if explicit_id
+        else LocalFileSourceConfig(path=str(source))
+    )
+    kb.add_source(registration)
+
+    kb.remove_source(registration.source_id)
+
+    manifest = json.loads(root.joinpath("manifest.json").read_text(encoding="utf-8"))
+    assert manifest["retired_sources"] == []
+
+
+def test_remove_auto_identity_with_history_does_not_create_tombstone(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "kb"
+    source = tmp_path / "auto.md"
+    source.write_text("auto", encoding="utf-8")
+    kb = KnowledgeBase.create(str(root))
+    registration = LocalFileSourceConfig(path=str(source))
+    kb.add_source(registration)
+    kb.sync()
+
+    kb.remove_source(registration.source_id)
+
+    manifest = json.loads(root.joinpath("manifest.json").read_text(encoding="utf-8"))
+    assert manifest["retired_sources"] == []
+
+
+def test_unregister_readded_legacy_source_preserves_retired_identity(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "kb"
+    source = tmp_path / "legacy.md"
+    source.write_text("legacy", encoding="utf-8")
+    kb = KnowledgeBase.create(str(root))
+    kb.add_source(LocalFileSourceConfig(source_id="docs", path=str(source)))
+    kb.sync()
+    kb.remove_source("docs")
+    kb.add_source(LocalFileSourceConfig(path=str(source)))
+
+    kb.unregister_source("docs")
+    kb.add_source(LocalFileSourceConfig(path=str(source)))
+
+    assert kb.list_sources()[0].source_id == "docs"
 
 
 def test_unlock_failure_after_success_does_not_reverse_commit_or_retain_lock(

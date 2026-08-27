@@ -2,8 +2,16 @@ from __future__ import annotations
 
 import json
 import logging
+from uuid import UUID
 
-from nexusmind import cli
+from nexusmind import (
+    KnowledgeBase,
+    KnowledgeBaseLimits,
+    KnowledgeBaseManifest,
+    LocalDirectorySourceConfig,
+    cli,
+)
+from nexusmind.knowledge_base_manifest import write_manifest
 
 
 def _capture_runtime_logs(monkeypatch, caplog) -> None:
@@ -19,11 +27,15 @@ def test_cli_create_add_sync_search_inspect_and_remove(tmp_path, capsys, caplog,
     (source / "security.md").write_text("密钥轮换需要记录新的版本。", encoding="utf-8")
     root = tmp_path / "kb"
 
-    assert cli.main(["create", str(root), "--id", "security", "--name", "Security"]) == 0
-    assert cli.main(["source", "add", "--knowledge-base", str(root), "--id", "docs", "--path", str(source), "--type", "directory"]) == 0
+    assert cli.main(["create", str(root), "--name", "Security"]) == 0
+    assert cli.main(["source", "add", str(source), "--knowledge-base", str(root)]) == 0
     assert cli.main(["source", "list", "--knowledge-base", str(root), "--json"]) == 0
     sources = json.loads(capsys.readouterr().out.splitlines()[-1])
-    assert sources[0]["source_id"] == "docs"
+    assert set(sources[0]) == {"config_version", "source_id", "type", "path"}
+    assert sources[0]["config_version"] == "1"
+    assert sources[0]["type"] == "local_directory"
+    assert sources[0]["path"] == str(source.resolve())
+    UUID(sources[0]["source_id"])
 
     assert cli.main(["sync", "--knowledge-base", str(root), "--json"]) == 0
     assert [record.event for record in caplog.records[-2:]] == ["sync_started", "sync_completed"]
@@ -38,13 +50,19 @@ def test_cli_create_add_sync_search_inspect_and_remove(tmp_path, capsys, caplog,
 
     assert cli.main(["inspect", "--knowledge-base", str(root), "--json"]) == 0
     inspection = json.loads(capsys.readouterr().out.splitlines()[-1])
+    UUID(inspection["status"]["knowledge_base_id"])
     assert inspection["status"]["document_count"] == 1
+
+    assert cli.main(["inspect", "--knowledge-base", str(root)]) == 0
+    plain_inspection = capsys.readouterr().out
+    assert "KnowledgeBase: Security" in plain_inspection
+    assert inspection["status"]["knowledge_base_id"] not in plain_inspection
 
     assert cli.main(["diagnose", "密钥轮换", "--knowledge-base", str(root), "--json"]) == 0
     diagnostics = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert diagnostics["results"]
 
-    assert cli.main(["source", "remove", "--knowledge-base", str(root), "--id", "docs"]) == 0
+    assert cli.main(["source", "remove", str(source), "--knowledge-base", str(root)]) == 0
 
 
 def test_cli_help_exposes_only_knowledge_commands(capsys) -> None:
@@ -57,3 +75,60 @@ def test_cli_help_exposes_only_knowledge_commands(capsys) -> None:
         assert command in output
     for removed in ("chat", "tools", "runs", "mcp", "skill"):
         assert removed not in output
+
+
+def test_cli_rejects_ambiguous_legacy_source_paths(tmp_path, capsys) -> None:
+    root = tmp_path / "kb"
+    source = tmp_path / "notes"
+    source.mkdir()
+    KnowledgeBase.create(str(root)).close()
+    limits = KnowledgeBaseLimits()
+    write_manifest(
+        root / "manifest.json",
+        KnowledgeBaseManifest(
+            knowledge_base_id="legacy",
+            sources=(
+                LocalDirectorySourceConfig(source_id="docs-a", path=str(source)),
+                LocalDirectorySourceConfig(source_id="docs-b", path=str(source)),
+            ),
+        ),
+        limits,
+    )
+
+    assert (
+        cli.main(
+            ["sync", "--knowledge-base", str(root), "--source", str(source)]
+        )
+        == 1
+    )
+    assert "legacy duplicate registrations" in capsys.readouterr().err
+
+    assert (
+        cli.main(
+            [
+                "source",
+                "remove",
+                "--knowledge-base",
+                str(root),
+                "--id",
+                "docs-a",
+            ]
+        )
+        == 0
+    )
+    assert cli.main(["source", "list", "--knowledge-base", str(root), "--json"]) == 0
+    remaining = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert [item["source_id"] for item in remaining] == ["docs-b"]
+
+    assert (
+        cli.main(
+            ["sync", "--knowledge-base", str(root), "--source", str(source)]
+        )
+        == 0
+    )
+
+    assert cli.main(["source", "remove", str(source), "--knowledge-base", str(root)]) == 0
+    assert cli.main(["source", "add", str(source), "--knowledge-base", str(root)]) == 0
+    assert cli.main(["source", "list", "--knowledge-base", str(root), "--json"]) == 0
+    restored = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert [item["source_id"] for item in restored] == ["docs-b"]
