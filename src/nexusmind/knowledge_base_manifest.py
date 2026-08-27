@@ -137,6 +137,7 @@ class KnowledgeBaseManifest:
             raise KnowledgeBaseConfigError("source count exceeds configured limit")
         normalized_sources: list[RegisteredSourceConfig] = []
         seen: set[str] = set()
+        seen_paths: set[str] = set()
         for item in self.sources:
             if type(item) not in (LocalFileSourceConfig, LocalDirectorySourceConfig):
                 raise KnowledgeBaseConfigError("sources contain an unsupported member")
@@ -149,6 +150,10 @@ class KnowledgeBaseManifest:
             if source_id in seen:
                 raise KnowledgeBaseConfigError("source identifiers must be unique")
             seen.add(source_id)
+            path_identity = _path_identity(path)
+            if path_identity in seen_paths:
+                raise KnowledgeBaseConfigError("source paths must be unique")
+            seen_paths.add(path_identity)
             if len(source_id) > active_limits.max_source_id_chars:
                 raise KnowledgeBaseConfigError("source_id exceeds configured limit")
             normalized_sources.append(normalized)

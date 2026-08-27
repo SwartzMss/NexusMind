@@ -156,6 +156,13 @@ def test_manifest_requires_exact_tuple_supported_unique_sources_and_sorts() -> N
         manifest(sources=(object(),))
     with pytest.raises(KnowledgeBaseConfigError):
         manifest(sources=(a, a))
+    with pytest.raises(KnowledgeBaseConfigError, match="source paths must be unique"):
+        manifest(
+            sources=(
+                LocalFileSourceConfig(path=str(ABSOLUTE_BASE / "shared")),
+                LocalDirectorySourceConfig(path=str(ABSOLUTE_BASE / "shared")),
+            )
+        )
     value = manifest(sources=(b, a))
     assert set(value.sources) == {a, b}
     assert tuple(item.source_id for item in value.sources) == tuple(
