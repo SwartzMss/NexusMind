@@ -51,8 +51,8 @@ jobs:
 
           # Peel annotated tags and check the commit actually being built.
           tagged_commit = commit(f"refs/tags/{tag}")
-          if tagged_commit != commit("HEAD"):
-              raise SystemExit("checked-out commit does not match release tag")
+          if tagged_commit != commit("HEAD") or tagged_commit != os.environ["GITHUB_SHA"]:
+              raise SystemExit("release tag and checkout must match the original GITHUB_SHA")
           main_commit = commit("refs/remotes/origin/main")
           ancestry = subprocess.run(["git", "merge-base", "--is-ancestor", tagged_commit, main_commit])
           if ancestry.returncode != 0:
@@ -296,6 +296,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Query the remote immediately before publication, not the cached tag.
+          python - <<'PY'
+          import os
+          import subprocess
+
+          tag_ref = f"refs/tags/{os.environ['GITHUB_REF_NAME']}"
+          listing = subprocess.check_output(
+              ["git", "ls-remote", "--exit-code", "origin", tag_ref, f"{tag_ref}^{{}}"],
+              text=True,
+          )
+          refs = {ref: oid for oid, ref in (line.split() for line in listing.splitlines())}
+          if tag_ref not in refs:
+              raise SystemExit("remote release tag is missing")
+          # ls-remote advertises the peeled object for annotated tags.
+          remote_commit = refs.get(f"{tag_ref}^{{}}", refs[tag_ref])
+          if remote_commit != os.environ["GITHUB_SHA"]:
+              raise SystemExit("remote release tag no longer matches the original GITHUB_SHA")
+          PY
           gh release create "$GITHUB_REF_NAME" \
             "release-artifacts/nexusmind-${RELEASE_VERSION}-py3-none-any.whl" \
             "release-artifacts/nexusmind-${RELEASE_VERSION}.tar.gz" \

@@ -7,7 +7,6 @@ $executablePath = Join-Path $bundlePath "nexusmind.exe"
 $smokeRuntimeRoot = Join-Path $bundlePath ".nexusmind"
 $archivePath = Join-Path $distRoot "nexusmind-windows-portable.zip"
 $smokeWorkingDirectory = Join-Path $repositoryRoot "build\smoke-cwd"
-$releaseSmokeRoot = Join-Path $repositoryRoot "build\release-smoke"
 
 function Invoke-PortableCommand {
     param(
@@ -20,6 +19,77 @@ function Invoke-PortableCommand {
         throw "Portable command failed: $($Arguments -join ' ')"
     }
     return ($output -join "`n")
+}
+
+function Test-PortableArchive {
+    param(
+        [string]$ArchivePath,
+        [string]$RepositoryRoot
+    )
+
+    $tempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }
+    $tempRoot = (Resolve-Path -LiteralPath $tempRoot).Path
+    $repositoryPath = (Resolve-Path -LiteralPath $RepositoryRoot).Path
+    $separator = [System.IO.Path]::DirectorySeparatorChar
+    $tempPrefix = $tempRoot.TrimEnd('\', '/') + $separator
+    $repositoryPrefix = $repositoryPath.TrimEnd('\', '/') + $separator
+    $releaseSmokeRoot = [System.IO.Path]::GetFullPath(
+        (Join-Path $tempRoot ("nexusmind-release-smoke-" + [guid]::NewGuid().ToString("N")))
+    )
+    if (-not $releaseSmokeRoot.StartsWith($tempPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $releaseSmokeRoot.StartsWith($repositoryPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Portable smoke directory must be outside the source checkout and inside the temporary directory"
+    }
+
+    # Own a fresh directory; never reuse or delete a previous smoke run's data.
+    New-Item -ItemType Directory -Path $releaseSmokeRoot | Out-Null
+    try {
+        $extractionRoot = Join-Path $releaseSmokeRoot "extracted"
+        $fixtureRoot = Join-Path $releaseSmokeRoot "fixture"
+        $knowledgeBasePath = Join-Path $releaseSmokeRoot "knowledge-base"
+        $releaseWorkingDirectory = Join-Path $releaseSmokeRoot "cwd"
+        New-Item -ItemType Directory -Path $extractionRoot, $fixtureRoot, $releaseWorkingDirectory | Out-Null
+        $fixturePath = Join-Path $fixtureRoot "smoke-fixture.md"
+        Set-Content -LiteralPath $fixturePath -Value "NexusMind release-smoke-token portable validation." -Encoding utf8
+
+        Expand-Archive -LiteralPath $ArchivePath -DestinationPath $extractionRoot
+        $smokeExecutable = Join-Path $extractionRoot "nexusmind\nexusmind.exe"
+        if (-not (Test-Path -LiteralPath $smokeExecutable -PathType Leaf)) {
+            throw "Extracted portable executable was not found: $smokeExecutable"
+        }
+
+        Push-Location -LiteralPath $releaseWorkingDirectory
+        try {
+            Write-Host "Portable archive E2E working directory: $releaseWorkingDirectory"
+            Invoke-PortableCommand -Executable $smokeExecutable -Arguments @("create", $knowledgeBasePath, "--name", "Release Smoke") | Out-Null
+            Invoke-PortableCommand -Executable $smokeExecutable -Arguments @("source", "add", $fixturePath, "--knowledge-base", $knowledgeBasePath) | Out-Null
+            Invoke-PortableCommand -Executable $smokeExecutable -Arguments @("sync", "--knowledge-base", $knowledgeBasePath, "--json") | Out-Null
+            $searchJson = Invoke-PortableCommand -Executable $smokeExecutable -Arguments @("search", "release-smoke-token", "--knowledge-base", $knowledgeBasePath, "--json")
+            $search = $searchJson | ConvertFrom-Json
+            $inspectionJson = Invoke-PortableCommand -Executable $smokeExecutable -Arguments @("inspect", "--knowledge-base", $knowledgeBasePath, "--json")
+            $inspection = $inspectionJson | ConvertFrom-Json
+            if (@($search).Count -lt 1 -or $searchJson -notmatch "release-smoke-token") {
+                throw "Portable search did not return the synchronized fixture"
+            }
+            if ($inspection.status.registered_source_count -ne 1 -or
+                $inspection.status.canonical_source_count -ne 1 -or
+                $inspection.status.document_count -ne 1) {
+                throw "Portable inspect did not reopen canonical state"
+            }
+        }
+        finally {
+            Pop-Location
+        }
+    }
+    finally {
+        # Resolve and verify the exact owned target before recursive cleanup.
+        $cleanupPath = (Resolve-Path -LiteralPath $releaseSmokeRoot).Path
+        if (-not $cleanupPath.Equals($releaseSmokeRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not $cleanupPath.StartsWith($tempPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to clean an unexpected portable smoke directory: $cleanupPath"
+        }
+        Remove-Item -LiteralPath $cleanupPath -Recurse -Force
+    }
 }
 
 Push-Location $repositoryRoot
@@ -60,43 +130,9 @@ try {
         throw "Portable archive was not generated: $archivePath"
     }
 
-    if (Test-Path -Path $releaseSmokeRoot) {
-        Remove-Item -Path $releaseSmokeRoot -Recurse -Force
-    }
-    $extractionRoot = Join-Path $releaseSmokeRoot "extracted"
-    $fixtureRoot = Join-Path $releaseSmokeRoot "fixture"
-    $knowledgeBasePath = Join-Path $releaseSmokeRoot "knowledge-base"
-    New-Item -ItemType Directory -Path $extractionRoot -Force | Out-Null
-    New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
-    $fixturePath = Join-Path $fixtureRoot "smoke-fixture.md"
-    Set-Content -Path $fixturePath -Value "NexusMind release-smoke-token portable validation." -Encoding utf8
-
-    Expand-Archive -Path $archivePath -DestinationPath $extractionRoot -Force
-    $smokeExecutable = Join-Path $extractionRoot "nexusmind\nexusmind.exe"
-    if (-not (Test-Path -Path $smokeExecutable -PathType Leaf)) {
-        throw "Extracted portable executable was not found: $smokeExecutable"
-    }
-
-    Invoke-PortableCommand -Executable $smokeExecutable -Arguments @("create", $knowledgeBasePath, "--name", "Release Smoke") | Out-Null
-    Invoke-PortableCommand -Executable $smokeExecutable -Arguments @("source", "add", $fixturePath, "--knowledge-base", $knowledgeBasePath) | Out-Null
-    Invoke-PortableCommand -Executable $smokeExecutable -Arguments @("sync", "--knowledge-base", $knowledgeBasePath, "--json") | Out-Null
-    $searchJson = Invoke-PortableCommand -Executable $smokeExecutable -Arguments @("search", "release-smoke-token", "--knowledge-base", $knowledgeBasePath, "--json")
-    $search = $searchJson | ConvertFrom-Json
-    $inspectionJson = Invoke-PortableCommand -Executable $smokeExecutable -Arguments @("inspect", "--knowledge-base", $knowledgeBasePath, "--json")
-    $inspection = $inspectionJson | ConvertFrom-Json
-    if (@($search).Count -lt 1 -or $searchJson -notmatch "release-smoke-token") {
-        throw "Portable search did not return the synchronized fixture"
-    }
-    if ($inspection.status.registered_source_count -ne 1 -or
-        $inspection.status.canonical_source_count -ne 1 -or
-        $inspection.status.document_count -ne 1) {
-        throw "Portable inspect did not reopen canonical state"
-    }
+    Test-PortableArchive -ArchivePath $archivePath -RepositoryRoot $repositoryRoot
     Write-Host "Portable package: $archivePath"
 }
 finally {
-    if (Test-Path -Path $releaseSmokeRoot) {
-        Remove-Item -Path $releaseSmokeRoot -Recurse -Force
-    }
     Pop-Location
 }

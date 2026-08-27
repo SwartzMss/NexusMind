@@ -112,6 +112,7 @@ def prepare_release(repo: Path, monkeypatch: pytest.MonkeyPatch, commit: str, ve
     git(repo, "tag", *(["-a", "-m", "Release"] if annotated else []), tag, commit)
     git(repo, "checkout", "--detach", tag)
     monkeypatch.setenv("GITHUB_REF_NAME", tag)
+    monkeypatch.setenv("GITHUB_SHA", commit)
     (repo / "pyproject.toml").write_text(
         f'[project]\nversion = "{version}"\nrequires-python = ">=3.11,<3.14"\nlicense = "MIT"\n',
         encoding="utf-8",
@@ -130,7 +131,7 @@ def test_release_gate_accepts_tags_in_main_history(workflow: dict, release_repo,
     assert (repo / "outputs").read_text(encoding="utf-8") == f"version={version}\n"
 
 
-@pytest.mark.parametrize("failure", ["unmerged", "missing-main", "wrong-head", "wrong-version", "wrong-python", "wrong-license", "missing-notes"])
+@pytest.mark.parametrize("failure", ["unmerged", "missing-main", "wrong-head", "wrong-sha", "wrong-version", "wrong-python", "wrong-license", "missing-notes"])
 def test_release_gate_rejects_invalid_release(workflow: dict, release_repo, monkeypatch, failure) -> None:
     repo, commits = release_repo
     prepare_release(repo, monkeypatch, commits["feature" if failure == "unmerged" else "main"], "0.1.1")
@@ -138,6 +139,8 @@ def test_release_gate_rejects_invalid_release(workflow: dict, release_repo, monk
         git(repo, "update-ref", "-d", "refs/remotes/origin/main")
     elif failure == "wrong-head":
         git(repo, "checkout", "--detach", commits["base"])
+    elif failure == "wrong-sha":
+        monkeypatch.setenv("GITHUB_SHA", commits["base"])
     elif failure.startswith("wrong-"):
         old, new = {
             "wrong-version": ("0.1.1", "0.1.0"),
@@ -209,3 +212,36 @@ def test_publication_set_uses_derived_version(workflow, tmp_path, monkeypatch, v
     else:
         with pytest.raises(SystemExit, match="release artifact mismatch"):
             run_embedded_python(verification)
+
+
+@pytest.mark.parametrize("annotated", [False, True])
+@pytest.mark.parametrize("remote_change", [None, "moved", "deleted", "unavailable"])
+def test_publication_rechecks_remote_tag(workflow, release_repo, monkeypatch, annotated, remote_change) -> None:
+    repo, commits = release_repo
+    prepare_release(repo, monkeypatch, commits["main"], "0.1.1", annotated=annotated)
+    run_embedded_python(step(workflow, "validate-release", "Validate main ancestry, tag and source metadata"))
+    remote = repo.parent / "remote.git"
+    git(repo, "clone", "--bare", str(repo), str(remote))
+    git(repo, "remote", "add", "origin", remote.as_uri())
+    tag_ref = "refs/tags/v0.1.1"
+    original_tag = git(repo, "rev-parse", tag_ref)
+    if remote_change == "moved":
+        # Change only the remote; the build checkout still has the original tag.
+        if annotated:
+            git(repo, "tag", "-a", "-m", "Replacement", "replacement", commits["feature"])
+            git(repo, "push", "origin", f"refs/tags/replacement:{tag_ref}", "--force")
+        else:
+            git(remote, "update-ref", tag_ref, commits["feature"])
+    elif remote_change == "deleted":
+        git(remote, "update-ref", "-d", tag_ref)
+    elif remote_change == "unavailable":
+        git(repo, "remote", "set-url", "origin", (repo.parent / "missing.git").as_uri())
+    assert git(repo, "rev-parse", tag_ref) == original_tag
+    publication = step(workflow, "publish", "Create GitHub Release")
+    assert publication["run"].startswith("set -euo pipefail\n")
+    assert publication["run"].index("git") < publication["run"].index("gh release create")
+    if remote_change is None:
+        run_embedded_python(publication)
+    else:
+        with pytest.raises((SystemExit, subprocess.CalledProcessError)):
+            run_embedded_python(publication)

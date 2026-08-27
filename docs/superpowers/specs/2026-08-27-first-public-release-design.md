@@ -31,7 +31,8 @@ jobs retain read-only repository permissions.
 The release workflow derives the expected version by removing the leading `v` from
 the tag. Before publication it verifies that:
 
-- the tagged commit is the checked-out commit and is in `origin/main` history
+- the tagged commit matches the checked-out commit and original `GITHUB_SHA`, and
+  is in `origin/main` history
   (the current tip is not required); full history is fetched and annotated tags
   are peeled to commits;
 - the tag version matches `[project].version` in `pyproject.toml` (`0.1.0` for the
@@ -55,10 +56,19 @@ validation, and release attachment paths. A subsequent release such as `v0.1.1`
 requires updating package metadata and adding its release notes, without editing
 the workflow.
 
+Immediately before `gh release create`, query the remote tag with `git ls-remote`
+and compare its peeled commit to the original `GITHUB_SHA`. A moved or deleted tag,
+or a failed remote lookup, stops the same fail-fast step before release creation.
+This catches tag changes during testing and building; the lookup and GitHub Release
+creation are not atomic, so repository tag protections are still needed to prevent
+concurrent tag mutation during publication.
+
 ## Windows Portable End-to-End Test
 
 Extend the portable build script so the archive is tested after creation from a
-fresh extraction directory. The test creates a small strict UTF-8 Markdown fixture
+fresh extraction directory under `RUNNER_TEMP/nexusmind-release-smoke-<uuid>` (or
+the system temporary directory for local builds). Reject a temporary root inside
+the source checkout. The test creates a small strict UTF-8 Markdown fixture
 and invokes the extracted `nexusmind.exe` as separate processes for:
 
 ```text
@@ -70,7 +80,11 @@ instead of relying only on exit codes. The later `search` and `inspect` invocati
 reopen the KnowledgeBase produced by earlier processes, proving persistence across
 process boundaries. Search output must contain fixture content, and inspection must
 report the synchronized source and document. Temporary smoke data is outside the
-bundle and is never included in the published ZIP.
+bundle and is never included in the published ZIP. The extraction, fixture, and
+KnowledgeBase live under the temporary smoke root, alongside an empty `cwd`
+directory. All five extracted-executable invocations run from that `cwd`, outside
+the source checkout. Restore the caller's working directory and remove only the
+owned temporary root in `finally`, on both success and failure.
 
 ## Documentation
 
@@ -96,12 +110,16 @@ Follow test-driven development for repository changes:
   gates, exact artifacts, clean installs, metadata checks, and release publication;
   execute the workflow's Python validators against temporary Git histories,
   installed metadata fixtures, and publication sets for both `0.1.0` and `0.1.1`;
+- use a real temporary bare remote to test publication with unchanged, moved, and
+  deleted lightweight and annotated tags, including failed remote lookups;
+- exercise portable smoke directory selection, process CWD, and cleanup through
+  PowerShell orchestration tests, then run the actual frozen executable E2E;
 - add documentation contract tests for the first-user quick start, artifact
   guidance, shipped capability notes, and explicit constraints;
 - run focused tests after each change, then run the entire existing suite;
 - validate workflow YAML syntax and PowerShell syntax where local tools permit;
-- rely on the Windows GitHub runner for the real PyInstaller build and portable E2E
-  that cannot execute on the local Linux workspace.
+- run the real PyInstaller build and portable E2E locally when Windows is available,
+  and on the Windows GitHub runner.
 
 ## Failure and Publication Safety
 
