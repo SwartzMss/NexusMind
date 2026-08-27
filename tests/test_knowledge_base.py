@@ -11,6 +11,7 @@ import nexusmind.knowledge_base as knowledge_base_module
 
 from nexusmind import (
     Document,
+    DocumentVersion,
     InMemoryChunkIndex,
     KnowledgeBase,
     KnowledgeBaseClosedError,
@@ -51,6 +52,11 @@ def _write_fixture(
         ),
         KnowledgeBaseLimits(),
     )
+    document = Document(
+        source_id=registration.source_id,
+        logical_path="guide.txt",
+        content=content,
+    )
     SQLiteKnowledgeSnapshotStore(root / "knowledge.db").save(
         KnowledgeSnapshot(
             sources=(
@@ -60,11 +66,12 @@ def _write_fixture(
                     display_name="Docs",
                 ),
             ),
-            documents=(
-                Document(
-                    source_id=registration.source_id,
-                    logical_path="guide.txt",
-                    content=content,
+            documents=(document,),
+            document_versions=(
+                DocumentVersion.from_document(
+                    document,
+                    created_at="2026-08-27T00:00:00.000000Z",
+                    sync_context="fixture",
                 ),
             ),
         )
@@ -85,8 +92,8 @@ def test_create_new_and_existing_empty_directories_with_exact_layout(tmp_path: P
         }
         assert root.joinpath(".knowledge-base.lock").read_bytes() == b"\0"
         assert root.joinpath("manifest.json").read_bytes() == (
-            b'{"display_name":"Security","format_version":"2",'
-            b'"knowledge_base_id":"security","retired_sources":[],"sources":[]}\n'
+            b'{"display_name":"Security","format_version":"1",'
+            b'"knowledge_base_id":"security","sources":[]}\n'
         )
         assert kb.status() == KnowledgeBaseStatus(
             knowledge_base_id="security",
@@ -479,7 +486,7 @@ def test_status_is_frozen(tmp_path: Path) -> None:
 
 def test_open_restores_default_unicode_cjk_index_offline(tmp_path: Path) -> None:
     root = tmp_path / "fixture"
-    registration = LocalFileSourceConfig(source_id="docs", path=str(tmp_path / "docs.txt"))
+    registration = LocalFileSourceConfig(path=str(tmp_path / "docs.txt"))
     _write_fixture(
         root, registration=registration, source_type=KnowledgeSourceType.LOCAL_FILE
     )
@@ -501,7 +508,7 @@ def test_open_accepts_unsynchronized_registration(tmp_path: Path) -> None:
         KnowledgeBaseManifest(
             knowledge_base_id="kb",
             sources=(
-                LocalFileSourceConfig(source_id="docs", path=str(tmp_path / "docs.txt")),
+                LocalFileSourceConfig(path=str(tmp_path / "docs.txt")),
             ),
         ),
         KnowledgeBaseLimits(),
@@ -518,7 +525,7 @@ def test_open_restores_more_than_collection_default_source_limit(tmp_path: Path)
     root.mkdir()
     _write_coordination_file(root)
     registrations = tuple(
-        LocalFileSourceConfig(source_id=f"source-{number:03}", path=str(tmp_path / f"{number}.txt"))
+        LocalFileSourceConfig(path=str(tmp_path / f"{number}.txt"))
         for number in range(101)
     )
     write_manifest(
@@ -559,7 +566,7 @@ def test_open_redacts_injected_index_factory_and_restore_failures(tmp_path: Path
     assert str(empty) not in str(factory_error.value)
 
     fixture = tmp_path / "restore-private-path"
-    registration = LocalFileSourceConfig(source_id="docs", path=str(tmp_path / "docs.txt"))
+    registration = LocalFileSourceConfig(path=str(tmp_path / "docs.txt"))
     _write_fixture(
         fixture, registration=registration, source_type=KnowledgeSourceType.LOCAL_FILE,
         content="private document content",
@@ -597,7 +604,7 @@ def test_open_redacts_injected_store_failure(
 
 def test_injected_index_factory_rebuilds_state_and_is_not_persisted(tmp_path: Path) -> None:
     root = tmp_path / "fixture"
-    registration = LocalDirectorySourceConfig(source_id="docs", path=str(tmp_path / "docs"))
+    registration = LocalDirectorySourceConfig(path=str(tmp_path / "docs"))
     _write_fixture(
         root,
         registration=registration,
@@ -634,9 +641,9 @@ def test_open_rejects_orphan_and_type_conflicting_canonical_sources(
 ) -> None:
     root = tmp_path / "fixture"
     if registration == "directory":
-        config = LocalDirectorySourceConfig(source_id="docs", path=str(tmp_path / "docs"))
+        config = LocalDirectorySourceConfig(path=str(tmp_path / "docs"))
     else:
-        config = LocalFileSourceConfig(source_id="docs", path=str(tmp_path / "docs.txt"))
+        config = LocalFileSourceConfig(path=str(tmp_path / "docs.txt"))
     _write_fixture(root, registration=config, source_type=source_type)
     if registration is None:
         write_manifest(

@@ -15,7 +15,7 @@ from .knowledge import Document, DocumentVersion, KnowledgeSource
 from .knowledge_collection import KnowledgeSnapshot
 
 
-_SCHEMA_VERSION = "2"
+_SCHEMA_VERSION = "1"
 
 
 class KnowledgeSnapshotStoreError(RuntimeError):
@@ -31,7 +31,7 @@ class KnowledgeSnapshotStore(Protocol):
 
 
 class SQLiteKnowledgeSnapshotStore:
-    """SQLite v2 storage for canonical snapshots and document history."""
+    """SQLite v1 storage for canonical snapshots and document history."""
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
         try:
@@ -204,18 +204,6 @@ class SQLiteKnowledgeSnapshotStore:
                         "INSERT INTO knowledge_store_metadata (key, value) VALUES ('schema_version', ?)",
                         (_SCHEMA_VERSION,),
                     )
-                else:
-                    row = db.execute(
-                        "SELECT value FROM knowledge_store_metadata WHERE key = 'schema_version'"
-                    ).fetchone()
-                    if row is not None and row[0] == "1":
-                        self._validate_schema_v1(db)
-                        self._create_versions_table(db)
-                        db.execute(
-                            "UPDATE knowledge_store_metadata SET value = ? "
-                            "WHERE key = 'schema_version'",
-                            (_SCHEMA_VERSION,),
-                        )
                 self._validate_schema(db)
                 db.commit()
         except KnowledgeSnapshotStoreError:
@@ -291,21 +279,6 @@ class SQLiteKnowledgeSnapshotStore:
             for row in foreign_keys
         ):
             raise KnowledgeSnapshotStoreError("knowledge snapshot schema has an invalid foreign key")
-
-    @staticmethod
-    def _validate_schema_v1(db: sqlite3.Connection) -> None:
-        expected_tables = {"knowledge_store_metadata", "sources", "documents"}
-        tables = {
-            row[0]
-            for row in db.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' "
-                "AND name NOT LIKE 'sqlite_%'"
-            )
-        }
-        if tables != expected_tables:
-            raise KnowledgeSnapshotStoreError(
-                "knowledge snapshot schema is incomplete or incompatible"
-            )
 
     @staticmethod
     def _create_versions_table(db: sqlite3.Connection) -> None:

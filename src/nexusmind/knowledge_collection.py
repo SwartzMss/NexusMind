@@ -1005,18 +1005,9 @@ class KnowledgeCollection:
         if not snapshot.document_versions:
             if not documents:
                 return {}
-            created_at = self._format_clock_value(self._clock())
-            sync_context = self._sync_context("restore", created_at, 0)
-            return {
-                document_id: (
-                    DocumentVersion.from_document(
-                        documents[document_id],
-                        created_at=created_at,
-                        sync_context=sync_context,
-                    ),
-                )
-                for document_id in sorted(documents)
-            }
+            raise KnowledgeSnapshotError(
+                "snapshot documents require document versions"
+            )
         if len(snapshot.document_versions) > self._limits.max_document_versions:
             raise KnowledgeCollectionLimitError(
                 "collection exceeds max_document_versions"

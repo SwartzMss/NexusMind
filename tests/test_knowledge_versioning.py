@@ -257,20 +257,23 @@ def test_restore_round_trips_history_and_indexes_only_current_document() -> None
     assert restored.search("current-term")
 
 
-def test_restore_legacy_snapshot_synthesizes_root_versions() -> None:
-    document = _document(content="legacy")
+def test_restore_rejects_documents_without_version_history() -> None:
+    document = _document(content="current")
     snapshot = KnowledgeSnapshot(
         sources=(Adapter((document,)).source(),), documents=(document,)
     )
-    restored = KnowledgeCollection(clock=_fixed_clock(3))
+    restored = KnowledgeCollection()
 
-    restored.restore(snapshot)
+    with pytest.raises(KnowledgeSnapshotError, match="versions"):
+        restored.restore(snapshot)
 
-    versions = restored.snapshot().document_versions
-    assert len(versions) == 1
-    assert versions[0].content == "legacy"
-    assert versions[0].previous_version_id is None
-    assert versions[0].created_at == "2026-08-24T02:03:00.000000Z"
+
+def test_restore_accepts_empty_snapshot_without_versions() -> None:
+    restored = KnowledgeCollection()
+
+    restored.restore(KnowledgeSnapshot(sources=(), documents=()))
+
+    assert restored.snapshot() == KnowledgeSnapshot(sources=(), documents=())
 
 
 @pytest.mark.parametrize("mutation", ["missing_predecessor", "stale_tip"])

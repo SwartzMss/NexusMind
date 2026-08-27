@@ -16,6 +16,7 @@ from nexusmind import (
     KnowledgeAnswer,
     KnowledgeBase,
     KnowledgeBaseSourceError,
+    KnowledgeQueryOptions,
     LocalFileSourceConfig,
     generate_knowledge_answer,
     render_model_context,
@@ -53,9 +54,27 @@ def _knowledge_base(tmp_path: Path, generator: AnswerGenerator | None = None) ->
         knowledge_base_id="test-kb",
         answer_generator=generator,
     )
-    kb.add_source(LocalFileSourceConfig(source_id="android-docs", path=str(source_file)))
-    kb.sync_source("android-docs")
+    registered = kb.add_source(LocalFileSourceConfig(path=str(source_file)))
+    kb.sync_source(registered.source_id)
     return kb
+
+
+def _query_answer(
+    kb: KnowledgeBase,
+    question: str,
+    *,
+    generator: AnswerGenerator | None = None,
+    retrieval_limit: int = 8,
+    limits: AnswerGenerationLimits | None = None,
+) -> KnowledgeAnswer:
+    return kb.query(
+        question,
+        options=KnowledgeQueryOptions(
+            generator=generator,
+            retrieval_limit=retrieval_limit,
+            limits=AnswerGenerationLimits() if limits is None else limits,
+        ),
+    ).answer
 
 
 def test_answer_generator_is_runtime_checkable_and_injected_into_knowledge_base(
@@ -65,7 +84,7 @@ def test_answer_generator_is_runtime_checkable_and_injected_into_knowledge_base(
     assert isinstance(generator, AnswerGenerator)
     kb = _knowledge_base(tmp_path, generator)
 
-    answer = kb.answer("How does Binder authenticate callers?")
+    answer = _query_answer(kb, "How does Binder authenticate callers?")
 
     assert isinstance(answer, KnowledgeAnswer)
     assert answer.text == "Supported answer [K1]"
@@ -73,7 +92,7 @@ def test_answer_generator_is_runtime_checkable_and_injected_into_knowledge_base(
     assert len(generator.calls) == 1
     question, context, record, limits = generator.calls[0]
     assert question == "How does Binder authenticate callers?"
-    assert context.passages[0].source_id == "android-docs"
+    assert context.passages[0].source_id == kb.list_sources()[0].source_id
     assert record == answer.model_context
     assert limits == AnswerGenerationLimits()
 
@@ -97,7 +116,9 @@ def test_model_context_rendering_is_deterministic_and_replayable(tmp_path: Path)
     )
 
     assert first == second
-    assert first.rendered_context.startswith("[K1]\nsource: android-docs")
+    assert first.rendered_context.startswith(
+        f"[K1]\nsource: {kb.list_sources()[0].source_id}"
+    )
     assert first.passages[0].content in first.rendered_context
     assert first.passages[0].document_content_hash
     assert first.passages[0].start_offset == 0
@@ -109,7 +130,7 @@ def test_model_context_rendering_is_deterministic_and_replayable(tmp_path: Path)
 
 
 def test_knowledge_answer_and_nested_records_are_frozen(tmp_path: Path) -> None:
-    answer = _knowledge_base(tmp_path, FakeGenerator()).answer("Binder credentials?")
+    answer = _query_answer(_knowledge_base(tmp_path, FakeGenerator()), "Binder credentials?")
 
     with pytest.raises(FrozenInstanceError):
         answer.text = "changed"  # type: ignore[misc]
@@ -120,7 +141,7 @@ def test_knowledge_answer_and_nested_records_are_frozen(tmp_path: Path) -> None:
 
 
 def test_public_values_reject_forged_citation_or_replay_provenance(tmp_path: Path) -> None:
-    answer = _knowledge_base(tmp_path, FakeGenerator()).answer("Binder credentials?")
+    answer = _query_answer(_knowledge_base(tmp_path, FakeGenerator()), "Binder credentials?")
 
     forged = replace(answer.citations[0], chunk_id="forged-chunk")
     with pytest.raises(ValueError, match="allowed model-context"):
@@ -146,11 +167,11 @@ def test_citations_fail_closed_unless_they_are_unique_allowed_handles(
     kb = _knowledge_base(tmp_path, generator)
 
     with pytest.raises(CitationValidationError):
-        kb.answer("Binder credentials?")
+        _query_answer(kb, "Binder credentials?")
 
 
 def test_validated_citation_matches_supplied_canonical_provenance(tmp_path: Path) -> None:
-    answer = _knowledge_base(tmp_path, FakeGenerator()).answer("Binder credentials?")
+    answer = _query_answer(_knowledge_base(tmp_path, FakeGenerator()), "Binder credentials?")
     passage = answer.model_context.passages[0]
     citation = answer.citations[0]
 
@@ -172,7 +193,7 @@ def test_answer_text_cannot_smuggle_invented_or_malformed_handles(
     generator = FakeGenerator(GeneratedAnswer(text, ("K1",)))
 
     with pytest.raises(CitationValidationError):
-        _knowledge_base(tmp_path, generator).answer("Binder credentials?")
+        _query_answer(_knowledge_base(tmp_path, generator), "Binder credentials?")
 
 
 def test_provider_failure_is_redacted_and_returns_no_partial_answer(tmp_path: Path) -> None:
@@ -180,7 +201,7 @@ def test_provider_failure_is_redacted_and_returns_no_partial_answer(tmp_path: Pa
     kb = _knowledge_base(tmp_path, generator)
 
     with pytest.raises(AnswerGeneratorError) as caught:
-        kb.answer("Binder credentials?")
+        _query_answer(kb, "Binder credentials?")
 
     assert str(caught.value) == "answer generator failed"
     assert "secret-key" not in str(caught.value)
@@ -191,12 +212,12 @@ def test_retrieval_or_context_failure_prevents_generator_invocation(tmp_path: Pa
     kb = _knowledge_base(tmp_path, generator)
 
     with pytest.raises(KnowledgeBaseSourceError):
-        kb.answer("no matching vocabulary here")
+        _query_answer(kb, "no matching vocabulary here")
     assert generator.calls == []
 
     limits = AnswerGenerationLimits(max_context_chars=1)
     with pytest.raises(AnswerGenerationLimitError):
-        kb.answer("Binder credentials?", limits=limits)
+        _query_answer(kb, "Binder credentials?", limits=limits)
     assert generator.calls == []
 
 
@@ -205,15 +226,15 @@ def test_question_answer_and_citation_limits_are_enforced(tmp_path: Path) -> Non
     kb = _knowledge_base(tmp_path, generator)
 
     with pytest.raises(AnswerGenerationLimitError, match="question"):
-        kb.answer("long question", limits=AnswerGenerationLimits(max_question_chars=4))
+        _query_answer(kb, "long question", limits=AnswerGenerationLimits(max_question_chars=4))
     assert generator.calls == []
 
     with pytest.raises(AnswerGenerationLimitError, match="max_answer_tokens"):
-        kb.answer("Binder?", limits=AnswerGenerationLimits(max_answer_tokens=2))
+        _query_answer(kb, "Binder?", limits=AnswerGenerationLimits(max_answer_tokens=2))
 
     generator.result = GeneratedAnswer("answer", ("K1", "K2"))
     with pytest.raises(AnswerGenerationLimitError, match="max_citations"):
-        kb.answer("Binder?", limits=AnswerGenerationLimits(max_citations=1))
+        _query_answer(kb, "Binder?", limits=AnswerGenerationLimits(max_citations=1))
 
 
 def test_answer_generation_does_not_change_canonical_snapshot_or_files(
@@ -225,7 +246,7 @@ def test_answer_generation_does_not_change_canonical_snapshot_or_files(
     database = tmp_path / "kb" / "knowledge.db"
     before_files = (manifest.read_bytes(), database.read_bytes())
 
-    kb.answer("Binder credentials?")
+    _query_answer(kb, "Binder credentials?")
 
     assert kb.list_documents() == before_documents
     assert (manifest.read_bytes(), database.read_bytes()) == before_files
@@ -239,11 +260,11 @@ def test_answer_generator_configuration_is_runtime_only(tmp_path: Path) -> None:
 
     reopened = KnowledgeBase.open(str(root))
     with pytest.raises(AnswerGeneratorError, match="no answer generator"):
-        reopened.answer("Binder credentials?")
+        _query_answer(reopened, "Binder credentials?")
     reopened.close()
 
     configured = KnowledgeBase.open(str(root), answer_generator=FakeGenerator())
-    assert configured.answer("Binder credentials?").citations[0].citation_id == "K1"
+    assert _query_answer(configured, "Binder credentials?").citations[0].citation_id == "K1"
     assert root.joinpath("manifest.json").read_bytes() == manifest_before
 
 

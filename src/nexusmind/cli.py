@@ -23,10 +23,6 @@ from nexusmind.runtime_support import runtime_operation
 RUNTIME_LOGGER = logging.getLogger("nexusmind.runtime")
 
 
-class _AmbiguousSourcePathError(ValueError):
-    """A legacy manifest contains more than one source for a user-facing path."""
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nexusmind", description="Local KnowledgeBase management, retrieval, and cited answers.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -40,9 +36,7 @@ def _parser() -> argparse.ArgumentParser:
     source_list = source_commands.add_parser("list", help="list registered sources")
     source_list.add_argument("--knowledge-base", default="."); source_list.add_argument("--json", action="store_true")
     source_remove = source_commands.add_parser("remove", help="remove a source and its documents")
-    source_remove_selector = source_remove.add_mutually_exclusive_group(required=True)
-    source_remove_selector.add_argument("source_path", metavar="PATH", nargs="?")
-    source_remove_selector.add_argument("--id", dest="source_id", help="remove by internal ID to repair legacy duplicate paths")
+    source_remove.add_argument("source_path", metavar="PATH")
     source_remove.add_argument("--knowledge-base", default=".")
 
     sync = commands.add_parser("sync", help="synchronize registered sources")
@@ -64,13 +58,6 @@ def main(argv: list[str] | None = None) -> int:
         return {"create": _create, "source": _source, "sync": _sync, "search": _search, "query": _query, "inspect": _inspect, "diagnose": _diagnose}[args.command](args)
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr); return 2
-    except _AmbiguousSourcePathError:
-        print(
-            "Source path is ambiguous because this KnowledgeBase contains legacy "
-            "duplicate registrations.",
-            file=sys.stderr,
-        )
-        return 1
     except (KnowledgeBaseError, KnowledgeAnswerError, TypeError, ValueError):
         print("KnowledgeBase operation failed.", file=sys.stderr); return 1
 
@@ -91,11 +78,8 @@ def _source(args: argparse.Namespace) -> int:
             normalized = str(source_path.resolve(strict=True))
             kb.add_source(kind(path=normalized)); print(f"Registered source: {normalized}")
         elif args.source_command == "remove":
-            if args.source_id:
-                kb.remove_source(args.source_id); print("Removed source by internal ID")
-            else:
-                item = _source_by_path(kb, args.source_path)
-                kb.remove_source(item.source_id); print(f"Removed source: {item.path}")
+            item = _source_by_path(kb, args.source_path)
+            kb.remove_source(item.source_id); print(f"Removed source: {item.path}")
         else:
             sources = kb.list_sources()
             if args.json: _print_json(sources)
@@ -133,8 +117,6 @@ def _source_by_path(kb: KnowledgeBase, path: str) -> Any:
     matches = tuple(
         item for item in kb.list_sources() if _path_identity(item.path) == identity
     )
-    if len(matches) > 1:
-        raise _AmbiguousSourcePathError
     if not matches:
         raise ValueError("source path is not registered")
     return matches[0]

@@ -11,6 +11,7 @@ import nexusmind.knowledge_inspection as inspection_module
 
 from nexusmind import (
     Document,
+    DocumentVersion,
     InMemoryChunkIndex,
     KnowledgeBase,
     KnowledgeBaseClosedError,
@@ -104,7 +105,7 @@ def test_public_knowledge_base_inspection_values_are_strict_frozen_and_slotted(
     KnowledgeSourceInspection = nexusmind.KnowledgeSourceInspection
     KnowledgeSourceSyncStatus = nexusmind.KnowledgeSourceSyncStatus
     InspectionKnowledgeBaseStatus = inspection_module.KnowledgeBaseStatus
-    config = LocalFileSourceConfig(source_id="docs", path=str(tmp_path / "docs.txt"))
+    config = LocalFileSourceConfig(path=str(tmp_path / "docs.txt"))
     status = KnowledgeBaseStatus("kb", "Knowledge", 1, 1, 1)
     source = KnowledgeSourceInspection(
         config, KnowledgeSourceSyncStatus.SYNCED, 1, 2
@@ -181,9 +182,8 @@ def test_public_knowledge_base_inspection_values_are_strict_frozen_and_slotted(
 def test_source_inspection_accepts_both_exact_local_config_types(tmp_path: Path) -> None:
     KnowledgeSourceInspection = nexusmind.KnowledgeSourceInspection
     KnowledgeSourceSyncStatus = nexusmind.KnowledgeSourceSyncStatus
-    file_config = LocalFileSourceConfig(source_id="file", path=str(tmp_path / "one.txt"))
-    directory_config = LocalDirectorySourceConfig(
-        source_id="directory", path=str(tmp_path / "directory")
+    file_config = LocalFileSourceConfig(path=str(tmp_path / "one.txt"))
+    directory_config = LocalDirectorySourceConfig(path=str(tmp_path / "directory")
     )
 
     assert type(
@@ -208,8 +208,8 @@ def _create_synced_file_base(
         knowledge_base_id="kb",
         index_factory=index_factory,
     )
-    kb.add_source(LocalFileSourceConfig(source_id="docs", path=str(source_path)))
-    kb.sync_source("docs")
+    registered = kb.add_source(LocalFileSourceConfig(path=str(source_path)))
+    kb.sync_source(registered.source_id)
     return kb, kb.list_documents()[0]
 
 
@@ -224,13 +224,13 @@ def test_inspect_reports_pending_nonempty_and_zero_document_sources_coherently(
     empty.mkdir()
     root = tmp_path / "kb"
     kb = KnowledgeBase.create(str(root), knowledge_base_id="kb", display_name="Docs")
-    kb.add_source(
-        LocalFileSourceConfig(source_id="a-pending", path=str(tmp_path / "missing.txt"))
+    pending = kb.add_source(
+        LocalFileSourceConfig(path=str(tmp_path / "missing.txt"))
     )
-    kb.add_source(LocalDirectorySourceConfig(source_id="b-docs", path=str(docs)))
-    kb.add_source(LocalDirectorySourceConfig(source_id="z-empty", path=str(empty)))
-    kb.sync_source("b-docs")
-    kb.sync_source("z-empty")
+    registered_docs = kb.add_source(LocalDirectorySourceConfig(path=str(docs)))
+    registered_empty = kb.add_source(LocalDirectorySourceConfig(path=str(empty)))
+    kb.sync_source(registered_docs.source_id)
+    kb.sync_source(registered_empty.source_id)
 
     snapshot = SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load()
     enriched_documents = tuple(
@@ -244,7 +244,18 @@ def test_inspect_reports_pending_nonempty_and_zero_document_sources_coherently(
         for document in snapshot.documents
     )
     SQLiteKnowledgeSnapshotStore(root / "knowledge.db").save(
-        KnowledgeSnapshot(snapshot.sources, enriched_documents)
+        KnowledgeSnapshot(
+            snapshot.sources,
+            enriched_documents,
+            tuple(
+                DocumentVersion.from_document(
+                    document,
+                    created_at="2026-08-27T00:00:00.000000Z",
+                    sync_context="fixture",
+                )
+                for document in enriched_documents
+            ),
+        )
     )
     kb.close()
     kb = KnowledgeBase.open(str(root))
@@ -253,22 +264,25 @@ def test_inspect_reports_pending_nonempty_and_zero_document_sources_coherently(
 
     assert type(inspection) is nexusmind.KnowledgeBaseInspection
     assert inspection.status == kb.status() == KnowledgeBaseStatus("kb", "Docs", 3, 2, 2)
-    assert tuple(item.config.source_id for item in inspection.sources) == (
-        "a-pending",
-        "b-docs",
-        "z-empty",
-    )
-    assert tuple(item.sync_status for item in inspection.sources) == (
-        nexusmind.KnowledgeSourceSyncStatus.REGISTERED,
-        nexusmind.KnowledgeSourceSyncStatus.SYNCED,
-        nexusmind.KnowledgeSourceSyncStatus.SYNCED,
-    )
-    assert tuple(
-        (item.document_count, item.chunk_count) for item in inspection.sources
-    ) == ((0, 0), (2, 2), (0, 0))
+    expected_sources = {
+        pending.source_id: (nexusmind.KnowledgeSourceSyncStatus.REGISTERED, 0, 0),
+        registered_docs.source_id: (nexusmind.KnowledgeSourceSyncStatus.SYNCED, 2, 2),
+        registered_empty.source_id: (nexusmind.KnowledgeSourceSyncStatus.SYNCED, 0, 0),
+    }
+    assert {
+        item.config.source_id: (
+            item.sync_status,
+            item.document_count,
+            item.chunk_count,
+        )
+        for item in inspection.sources
+    } == expected_sources
     assert tuple(
         (item.source_id, item.logical_path) for item in inspection.documents
-    ) == (("b-docs", "a.md"), ("b-docs", "z.txt"))
+    ) == (
+        (registered_docs.source_id, "a.md"),
+        (registered_docs.source_id, "z.txt"),
+    )
     assert tuple(item.character_count for item in inspection.documents) == (
         len("alpha knowledge"),
         len("zulu knowledge"),

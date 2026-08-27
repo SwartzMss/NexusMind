@@ -23,6 +23,14 @@ from nexusmind import (
 )
 
 
+def _file_source_id(path: str | Path) -> str:
+    return LocalFileSourceConfig(path=str(path)).source_id
+
+
+def _directory_source_id(path: str | Path) -> str:
+    return LocalDirectorySourceConfig(path=str(path)).source_id
+
+
 def test_registration_is_sorted_persistent_and_does_not_ingest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -36,20 +44,20 @@ def test_registration_is_sorted_persistent_and_does_not_ingest(
             raise AssertionError("registration constructed an adapter")
 
     monkeypatch.setattr(module, "LocalFileAdapter", ForbiddenAdapter)
-    kb.add_source(LocalFileSourceConfig(source_id="z", path=str(file_path)))
-    kb.add_source(LocalDirectorySourceConfig(source_id="a", path="relative-dir"))
+    file_registration = kb.add_source(LocalFileSourceConfig(path=str(file_path)))
+    directory_registration = kb.add_source(LocalDirectorySourceConfig(path="relative-dir"))
 
-    assert tuple(item.source_id for item in kb.list_sources()) == ("a", "z")
+    assert tuple(item.source_id for item in kb.list_sources()) == tuple(
+        sorted((file_registration.source_id, directory_registration.source_id))
+    )
     assert all(Path(item.path).is_absolute() for item in kb.list_sources())
     assert b"secret" not in root.joinpath("manifest.json").read_bytes()
     assert KnowledgeBase.open(str(root)).list_sources() == kb.list_sources()
     with pytest.raises(KnowledgeBaseSourceError):
-        kb.add_source(LocalFileSourceConfig(source_id="z", path=str(file_path)))
+        kb.add_source(LocalFileSourceConfig(path=str(file_path)))
     with pytest.raises(KnowledgeBaseSourceError, match="source path is already registered"):
         kb.add_source(
-            LocalFileSourceConfig(
-                source_id="duplicate-path",
-                path=str(file_path.parent / "missing" / ".." / file_path.name),
+            LocalFileSourceConfig(path=str(file_path.parent / "missing" / ".." / file_path.name),
             )
         )
     with pytest.raises(KnowledgeBaseConfigError):
@@ -91,7 +99,7 @@ def test_registration_writes_once_and_does_not_construct_retrieval_runtime(
         "LocalDirectoryAdapter",
         lambda *args, **kwargs: pytest.fail("adapter constructed"),
     )
-    kb.add_source(LocalFileSourceConfig(source_id="one", path="one.txt"))
+    kb.add_source(LocalFileSourceConfig(path="one.txt"))
 
     assert writes == 1
     assert factory_calls == calls_before
@@ -108,13 +116,13 @@ def test_failed_registration_write_does_not_swap_memory(
 
     monkeypatch.setattr(module, "write_manifest", fail_write)
     with pytest.raises(KnowledgeBasePersistenceError) as caught:
-        kb.add_source(LocalFileSourceConfig(source_id="one", path="one.txt"))
+        kb.add_source(LocalFileSourceConfig(path="one.txt"))
 
     assert "private" not in str(caught.value)
     assert kb.list_sources() == ()
     monkeypatch.setattr(module, "write_manifest", real_write)
-    kb.add_source(LocalFileSourceConfig(source_id="two", path="two.txt"))
-    assert tuple(item.source_id for item in kb.list_sources()) == ("two",)
+    registered = kb.add_source(LocalFileSourceConfig(path="two.txt"))
+    assert kb.list_sources() == (registered,)
 
 
 def test_auto_identity_remove_and_readd_preserves_document_version_chain(
@@ -188,75 +196,6 @@ def test_delayed_relative_auto_identity_does_not_collide_with_original_cwd(
     }
 
 
-def test_legacy_identity_remove_and_readd_restores_version_chain(tmp_path: Path) -> None:
-    root = tmp_path / "kb"
-    source = tmp_path / "legacy.md"
-    source.write_text("legacy first version", encoding="utf-8")
-    kb = KnowledgeBase.create(str(root))
-    kb.add_source(LocalFileSourceConfig(source_id="docs", path=str(source)))
-    kb.sync()
-    first_version = SQLiteKnowledgeSnapshotStore(
-        root / "knowledge.db"
-    ).load().document_versions[0]
-
-    kb.remove_source("docs")
-    source.write_text("legacy second version", encoding="utf-8")
-    kb.add_source(LocalFileSourceConfig(path=str(source)))
-    assert kb.list_sources()[0].source_id == "docs"
-    kb.sync()
-
-    versions = SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load().document_versions
-    assert len(versions) == 2
-    assert versions[1].document_id == first_version.document_id
-    assert versions[1].previous_version_id == first_version.version_id
-
-
-@pytest.mark.parametrize("use_automatic_value", [False, True])
-def test_explicit_source_id_replaces_retired_identity(
-    tmp_path: Path, use_automatic_value: bool
-) -> None:
-    root = tmp_path / "kb"
-    source = tmp_path / "legacy.md"
-    source.write_text("legacy", encoding="utf-8")
-    kb = KnowledgeBase.create(str(root))
-    kb.add_source(LocalFileSourceConfig(source_id="docs", path=str(source)))
-    kb.sync()
-    kb.remove_source("docs")
-
-    fresh_id = (
-        LocalFileSourceConfig(path=str(source)).source_id
-        if use_automatic_value
-        else "fresh"
-    )
-    kb.add_source(LocalFileSourceConfig(source_id=fresh_id, path=str(source)))
-
-    assert kb.list_sources()[0].source_id == fresh_id
-    manifest = json.loads(root.joinpath("manifest.json").read_text(encoding="utf-8"))
-    assert manifest["retired_sources"] == []
-
-
-def test_retired_identity_matching_uses_platform_path_identity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(
-        module,
-        "_path_identity",
-        lambda path: str(Path(path).resolve(strict=False)).lower(),
-    )
-    root = tmp_path / "kb"
-    original = tmp_path / "Legacy.md"
-    alias = tmp_path / "legacy.md"
-    original.write_text("legacy", encoding="utf-8")
-    kb = KnowledgeBase.create(str(root))
-    kb.add_source(LocalFileSourceConfig(source_id="docs", path=str(original)))
-    kb.sync()
-    kb.remove_source("docs")
-
-    kb.add_source(LocalFileSourceConfig(path=str(alias)))
-
-    assert kb.list_sources()[0].source_id == "docs"
-
-
 @pytest.mark.skipif(os.name != "nt", reason="Windows path identity semantics")
 def test_windows_case_alias_for_missing_path_cannot_be_registered_twice(
     tmp_path: Path,
@@ -267,83 +206,10 @@ def test_windows_case_alias_for_missing_path_cannot_be_registered_twice(
     assert not upper.exists()
     assert not lower.exists()
     kb = KnowledgeBase.create(str(root))
-    kb.add_source(LocalFileSourceConfig(source_id="upper", path=str(upper)))
+    kb.add_source(LocalFileSourceConfig(path=str(upper)))
 
     with pytest.raises(KnowledgeBaseSourceError, match="source path is already registered"):
-        kb.add_source(LocalFileSourceConfig(source_id="lower", path=str(lower)))
-
-
-def test_retired_legacy_identity_does_not_consume_active_source_limit(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "kb"
-    first = tmp_path / "first.md"
-    first.write_text("first", encoding="utf-8")
-    kb = KnowledgeBase.create(
-        str(root), limits=KnowledgeBaseLimits(max_sources=1)
-    )
-    kb.add_source(LocalFileSourceConfig(source_id="legacy", path=str(first)))
-    kb.sync()
-
-    kb.remove_source("legacy")
-    kb.add_source(LocalFileSourceConfig(path=str(tmp_path / "second.md")))
-
-    assert len(kb.list_sources()) == 1
-
-
-@pytest.mark.parametrize("explicit_id", [False, True])
-def test_remove_without_legacy_history_does_not_create_tombstone(
-    tmp_path: Path, explicit_id: bool
-) -> None:
-    root = tmp_path / "kb"
-    source = tmp_path / "unused.md"
-    kb = KnowledgeBase.create(str(root))
-    registration = (
-        LocalFileSourceConfig(source_id="unused", path=str(source))
-        if explicit_id
-        else LocalFileSourceConfig(path=str(source))
-    )
-    kb.add_source(registration)
-
-    kb.remove_source(registration.source_id)
-
-    manifest = json.loads(root.joinpath("manifest.json").read_text(encoding="utf-8"))
-    assert manifest["retired_sources"] == []
-
-
-def test_remove_auto_identity_with_history_does_not_create_tombstone(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "kb"
-    source = tmp_path / "auto.md"
-    source.write_text("auto", encoding="utf-8")
-    kb = KnowledgeBase.create(str(root))
-    registration = LocalFileSourceConfig(path=str(source))
-    kb.add_source(registration)
-    kb.sync()
-
-    kb.remove_source(registration.source_id)
-
-    manifest = json.loads(root.joinpath("manifest.json").read_text(encoding="utf-8"))
-    assert manifest["retired_sources"] == []
-
-
-def test_unregister_readded_legacy_source_preserves_retired_identity(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "kb"
-    source = tmp_path / "legacy.md"
-    source.write_text("legacy", encoding="utf-8")
-    kb = KnowledgeBase.create(str(root))
-    kb.add_source(LocalFileSourceConfig(source_id="docs", path=str(source)))
-    kb.sync()
-    kb.remove_source("docs")
-    kb.add_source(LocalFileSourceConfig(path=str(source)))
-
-    kb.unregister_source("docs")
-    kb.add_source(LocalFileSourceConfig(path=str(source)))
-
-    assert kb.list_sources()[0].source_id == "docs"
+        kb.add_source(LocalFileSourceConfig(path=str(lower)))
 
 
 def test_unlock_failure_after_success_does_not_reverse_commit_or_retain_lock(
@@ -357,16 +223,14 @@ def test_unlock_failure_after_success_does_not_reverse_commit_or_retain_lock(
         raise OSError("private unlock detail")
 
     monkeypatch.setattr(module, "_release_advisory_lock", failing_release)
-    kb.add_source(LocalFileSourceConfig(source_id="one", path="one.txt"))
+    registered = kb.add_source(LocalFileSourceConfig(path="one.txt"))
 
-    assert tuple(item.source_id for item in kb.list_sources()) == ("one",)
-    assert tuple(
-        item.source_id for item in KnowledgeBase.open(str(root)).list_sources()
-    ) == ("one",)
+    assert kb.list_sources() == (registered,)
+    assert KnowledgeBase.open(str(root)).list_sources() == (registered,)
 
     monkeypatch.setattr(module, "_release_advisory_lock", real_release)
     KnowledgeBase.open(str(root)).add_source(
-        LocalFileSourceConfig(source_id="two", path="two.txt")
+        LocalFileSourceConfig(path="two.txt")
     )
 
 
@@ -388,7 +252,7 @@ def test_unlock_failure_does_not_mask_primary_controlled_error(
         KnowledgeBasePersistenceError,
         match="unable to persist knowledge-base manifest",
     ) as caught:
-        kb.add_source(LocalFileSourceConfig(source_id="one", path="one.txt"))
+        kb.add_source(LocalFileSourceConfig(path="one.txt"))
 
     assert "private write detail" not in str(caught.value)
     assert "private unlock detail" not in str(caught.value)
@@ -419,7 +283,7 @@ def test_close_failure_after_commit_is_sanitized_and_poisons_handle(
             KnowledgeBasePersistenceError,
             match="mutation cleanup failed; knowledge base is unusable",
         ) as caught:
-            kb.add_source(LocalFileSourceConfig(source_id="one", path="one.txt"))
+            kb.add_source(LocalFileSourceConfig(path="one.txt"))
     finally:
         if mutation_descriptor is not None:
             real_close(mutation_descriptor)
@@ -434,17 +298,17 @@ def test_registration_bounds_leave_memory_and_manifest_unchanged(tmp_path: Path)
     cases = (
         (
             KnowledgeBaseLimits(max_sources=1),
-            LocalFileSourceConfig(source_id="second", path="second.txt"),
-            LocalFileSourceConfig(source_id="first", path="first.txt"),
+            LocalFileSourceConfig(path="second.txt"),
+            LocalFileSourceConfig(path="first.txt"),
         ),
         (
             KnowledgeBaseLimits(max_source_id_chars=3),
-            LocalFileSourceConfig(source_id="four", path="file.txt"),
+            LocalFileSourceConfig(path="file.txt"),
             None,
         ),
         (
             KnowledgeBaseLimits(max_path_chars=len(resolved_child) - 1),
-            LocalFileSourceConfig(source_id="path", path="child.txt"),
+            LocalFileSourceConfig(path="child.txt"),
             None,
         ),
     )
@@ -474,7 +338,7 @@ def test_registration_bounds_leave_memory_and_manifest_unchanged(tmp_path: Path)
     )
     bytes_before = root.joinpath("manifest.json").read_bytes()
     with pytest.raises(KnowledgeBaseConfigError):
-        kb.add_source(LocalFileSourceConfig(source_id="one", path="one.txt"))
+        kb.add_source(LocalFileSourceConfig(path="one.txt"))
     assert kb.list_sources() == ()
     assert root.joinpath("manifest.json").read_bytes() == bytes_before
 
@@ -483,20 +347,20 @@ def test_unregister_fails_closed_for_unknown_or_synchronized_sources(tmp_path: P
     path = tmp_path / "one.txt"
     path.write_text("alpha", encoding="utf-8")
     kb = KnowledgeBase.create(str(tmp_path / "kb"), knowledge_base_id="kb")
-    kb.add_source(LocalFileSourceConfig(source_id="one", path=str(path)))
+    registered = kb.add_source(LocalFileSourceConfig(path=str(path)))
     with pytest.raises(KnowledgeBaseSourceError):
         kb.unregister_source("missing")
-    kb.sync_source("one")
+    kb.sync_source(registered.source_id)
     with pytest.raises(KnowledgeBaseSourceError):
-        kb.unregister_source("one")
+        kb.unregister_source(registered.source_id)
 
 
 def test_unregister_unsynchronized_source_is_persistent(tmp_path: Path) -> None:
     root = tmp_path / "kb"
     kb = KnowledgeBase.create(str(root), knowledge_base_id="kb")
-    kb.add_source(LocalFileSourceConfig(source_id="unused", path="unused.txt"))
+    registered = kb.add_source(LocalFileSourceConfig(path="unused.txt"))
 
-    kb.unregister_source("unused")
+    kb.unregister_source(registered.source_id)
 
     assert kb.list_sources() == ()
     assert KnowledgeBase.open(str(root)).list_sources() == ()
@@ -507,7 +371,7 @@ def test_failed_unregister_write_preserves_memory_and_exact_manifest(
 ) -> None:
     root = tmp_path / "kb"
     kb = KnowledgeBase.create(str(root), knowledge_base_id="kb")
-    kb.add_source(LocalFileSourceConfig(source_id="unused", path="unused.txt"))
+    registered = kb.add_source(LocalFileSourceConfig(path="unused.txt"))
     sources_before = kb.list_sources()
     bytes_before = root.joinpath("manifest.json").read_bytes()
 
@@ -516,7 +380,7 @@ def test_failed_unregister_write_preserves_memory_and_exact_manifest(
 
     monkeypatch.setattr(module, "write_manifest", fail_write)
     with pytest.raises(KnowledgeBasePersistenceError) as caught:
-        kb.unregister_source("unused")
+        kb.unregister_source(registered.source_id)
 
     assert "private" not in str(caught.value)
     assert kb.list_sources() == sources_before
@@ -531,20 +395,23 @@ def test_sync_orders_sources_persists_and_reopens_searchable_state(tmp_path: Pat
     file_path.write_text("file knowledge", encoding="utf-8")
     root = tmp_path / "kb"
     kb = KnowledgeBase.create(str(root), knowledge_base_id="kb")
-    kb.add_source(LocalFileSourceConfig(source_id="z-file", path=str(file_path)))
-    kb.add_source(LocalDirectorySourceConfig(source_id="a-dir", path=str(directory)))
+    file_registration = kb.add_source(LocalFileSourceConfig(path=str(file_path)))
+    directory_registration = kb.add_source(LocalDirectorySourceConfig(path=str(directory)))
     assert kb.status() == KnowledgeBaseStatus("kb", None, 2, 0, 0)
 
     results = kb.sync()
-    assert tuple(item.source_id for item in results) == ("a-dir", "z-file")
+    expected_ids = tuple(
+        sorted((file_registration.source_id, directory_registration.source_id))
+    )
+    assert tuple(item.source_id for item in results) == expected_ids
     documents = kb.list_documents()
-    assert tuple(item.source_id for item in documents) == ("a-dir", "z-file")
+    assert tuple(item.source_id for item in documents) == expected_ids
     documents[0].metadata["mutated"] = True
     assert "mutated" not in kb.list_documents()[0].metadata
 
     reopened = KnowledgeBase.open(str(root))
     assert reopened.status() == KnowledgeBaseStatus("kb", None, 2, 2, 2)
-    assert tuple(item.source_id for item in reopened.list_documents()) == ("a-dir", "z-file")
+    assert tuple(item.source_id for item in reopened.list_documents()) == expected_ids
     assert reopened.search("knowledge")
 
 
@@ -552,19 +419,19 @@ def test_real_file_sync_returns_exact_result_type_and_counters(tmp_path: Path) -
     path = tmp_path / "one.txt"
     path.write_text("one short document", encoding="utf-8")
     kb = KnowledgeBase.create(str(tmp_path / "kb"), knowledge_base_id="kb")
-    kb.add_source(LocalFileSourceConfig(source_id="one", path=str(path)))
+    registered = kb.add_source(LocalFileSourceConfig(path=str(path)))
 
-    assert kb.sync_source("one") == KnowledgeSyncResult(
-        source_id="one",
+    assert kb.sync_source(registered.source_id) == KnowledgeSyncResult(
+        source_id=registered.source_id,
         documents_added=1,
         documents_updated=0,
         documents_unchanged=0,
         documents_removed=0,
         chunks_indexed=1,
     )
-    result = kb.sync_source("one")
+    result = kb.sync_source(registered.source_id)
     assert type(result) is KnowledgeSyncResult
-    assert result == KnowledgeSyncResult("one", 0, 0, 1, 0, 0)
+    assert result == KnowledgeSyncResult(registered.source_id, 0, 0, 1, 0, 0)
 
 
 def test_sync_source_preserves_other_canonical_sources(tmp_path: Path) -> None:
@@ -573,13 +440,13 @@ def test_sync_source_preserves_other_canonical_sources(tmp_path: Path) -> None:
     first.write_text("first old", encoding="utf-8")
     second.write_text("second stable", encoding="utf-8")
     kb = KnowledgeBase.create(str(tmp_path / "kb"), knowledge_base_id="kb")
-    kb.add_source(LocalFileSourceConfig(source_id="first", path=str(first)))
-    kb.add_source(LocalFileSourceConfig(source_id="second", path=str(second)))
+    first_registration = kb.add_source(LocalFileSourceConfig(path=str(first)))
+    kb.add_source(LocalFileSourceConfig(path=str(second)))
     kb.sync()
     first.write_text("first new", encoding="utf-8")
 
-    result = kb.sync_source("first")
-    assert result.source_id == "first"
+    result = kb.sync_source(first_registration.source_id)
+    assert result.source_id == first_registration.source_id
     assert {item.content for item in kb.list_documents()} == {"first new", "second stable"}
     with pytest.raises(KnowledgeBaseSourceError):
         kb.sync_source("unknown")
@@ -593,8 +460,8 @@ def test_sync_source_constructs_and_loads_only_selected_adapter(
     other = tmp_path / "other"
     other.mkdir()
     kb = KnowledgeBase.create(str(tmp_path / "kb"), knowledge_base_id="kb")
-    kb.add_source(LocalDirectorySourceConfig(source_id="other", path=str(other)))
-    kb.add_source(LocalFileSourceConfig(source_id="selected", path=str(selected)))
+    kb.add_source(LocalDirectorySourceConfig(path=str(other)))
+    selected_registration = kb.add_source(LocalFileSourceConfig(path=str(selected)))
     real_adapter = module.LocalFileAdapter
     events: list[str] = []
 
@@ -618,9 +485,13 @@ def test_sync_source_constructs_and_loads_only_selected_adapter(
         lambda *args, **kwargs: pytest.fail("unselected adapter constructed"),
     )
 
-    kb.sync_source("selected")
+    kb.sync_source(selected_registration.source_id)
 
-    assert events == ["construct:selected", "source:selected", "load:selected"]
+    assert events == [
+        f"construct:{selected_registration.source_id}",
+        "source:selected",
+        "load:selected",
+    ]
 
 
 def test_later_source_failure_rolls_back_staging_and_database(tmp_path: Path) -> None:
@@ -629,9 +500,9 @@ def test_later_source_failure_rolls_back_staging_and_database(tmp_path: Path) ->
     missing = tmp_path / "missing.txt"
     root = tmp_path / "kb"
     kb = KnowledgeBase.create(str(root), knowledge_base_id="kb")
-    kb.add_source(LocalFileSourceConfig(source_id="a-good", path=str(good)))
-    kb.sync_source("a-good")
-    kb.add_source(LocalFileSourceConfig(source_id="z-missing", path=str(missing)))
+    good_registration = kb.add_source(LocalFileSourceConfig(path=str(good)))
+    kb.sync_source(good_registration.source_id)
+    kb.add_source(LocalFileSourceConfig(path=str(missing)))
     good.write_text("new", encoding="utf-8")
     before = SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load()
 
@@ -660,7 +531,7 @@ def test_empty_sync_skips_store_and_save_failure_keeps_live_state(
 
     path = tmp_path / "doc.txt"
     path.write_text("content", encoding="utf-8")
-    kb.add_source(LocalFileSourceConfig(source_id="doc", path=str(path)))
+    kb.add_source(LocalFileSourceConfig(path=str(path)))
     before = kb.list_documents()
     stored_before = original(root / "knowledge.db").load()
     save_calls = 0
@@ -694,7 +565,7 @@ def test_closed_guards_registration_inspection_and_sync(tmp_path: Path) -> None:
     kb.close()
 
     operations = (
-        lambda: kb.add_source(LocalFileSourceConfig(source_id="one", path="one.txt")),
+        lambda: kb.add_source(LocalFileSourceConfig(path="one.txt")),
         lambda: kb.unregister_source("one"),
         kb.sync,
         lambda: kb.sync_source("one"),
@@ -707,12 +578,14 @@ def test_closed_guards_registration_inspection_and_sync(tmp_path: Path) -> None:
 
 def test_list_sources_is_sorted_tuple_of_frozen_configs(tmp_path: Path) -> None:
     kb = KnowledgeBase.create(str(tmp_path / "kb"), knowledge_base_id="kb")
-    kb.add_source(LocalFileSourceConfig(source_id="z", path="z.txt"))
-    kb.add_source(LocalDirectorySourceConfig(source_id="a", path="a"))
+    file_registration = kb.add_source(LocalFileSourceConfig(path="z.txt"))
+    directory_registration = kb.add_source(LocalDirectorySourceConfig(path="a"))
 
     sources = kb.list_sources()
     assert type(sources) is tuple
-    assert tuple(item.source_id for item in sources) == ("a", "z")
+    assert tuple(item.source_id for item in sources) == tuple(
+        sorted((file_registration.source_id, directory_registration.source_id))
+    )
     with pytest.raises(FrozenInstanceError):
         sources[0].path = "mutated"  # type: ignore[misc]
 
@@ -724,7 +597,7 @@ def test_all_mutations_fail_closed_while_cross_handle_lock_is_held(
     path = tmp_path / "one.txt"
     path.write_text("one", encoding="utf-8")
     first = KnowledgeBase.create(str(root), knowledge_base_id="kb")
-    first.add_source(LocalFileSourceConfig(source_id="one", path=str(path)))
+    first.add_source(LocalFileSourceConfig(path=str(path)))
     contender = KnowledgeBase.open(str(root))
     manifest_before = root.joinpath("manifest.json").read_bytes()
     snapshot_before = SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load()
@@ -734,7 +607,7 @@ def test_all_mutations_fail_closed_while_cross_handle_lock_is_held(
 
     operations = (
         lambda: contender.add_source(
-            LocalFileSourceConfig(source_id="two", path="two.txt")
+            LocalFileSourceConfig(path="two.txt")
         ),
         lambda: contender.unregister_source("one"),
         contender.sync,
@@ -761,9 +634,9 @@ def test_unlocked_stale_coordination_file_does_not_block_mutation(tmp_path: Path
     lock_path = root / ".knowledge-base.lock"
     lock_path.write_bytes(b"stale-looking lock contents")
 
-    kb.add_source(LocalFileSourceConfig(source_id="one", path="one.txt"))
+    registered = kb.add_source(LocalFileSourceConfig(path="one.txt"))
 
-    assert tuple(item.source_id for item in kb.list_sources()) == ("one",)
+    assert kb.list_sources() == (registered,)
     assert lock_path.exists()
 
 
@@ -774,9 +647,9 @@ def test_advisory_lock_is_released_when_holder_closes_descriptor(tmp_path: Path)
     module._acquire_advisory_lock(descriptor)
     os.close(descriptor)
 
-    kb.add_source(LocalFileSourceConfig(source_id="one", path="one.txt"))
+    registered = kb.add_source(LocalFileSourceConfig(path="one.txt"))
 
-    assert tuple(item.source_id for item in kb.list_sources()) == ("one",)
+    assert kb.list_sources() == (registered,)
 
 
 def test_open_requires_real_coordination_file(tmp_path: Path) -> None:
@@ -803,7 +676,7 @@ def test_mutation_does_not_recreate_missing_coordination_file(tmp_path: Path) ->
     root.joinpath(".knowledge-base.lock").unlink()
 
     with pytest.raises(KnowledgeBasePersistenceError):
-        kb.add_source(LocalFileSourceConfig(source_id="one", path="one.txt"))
+        kb.add_source(LocalFileSourceConfig(path="one.txt"))
 
     assert not root.joinpath(".knowledge-base.lock").exists()
     assert root.joinpath("manifest.json").read_bytes() == manifest_before
@@ -828,7 +701,7 @@ def test_coordination_file_replacement_during_acquisition_fails_closed(
 
     monkeypatch.setattr(module, "_acquire_advisory_lock", replace_after_acquire)
     with pytest.raises(KnowledgeBasePersistenceError) as caught:
-        kb.add_source(LocalFileSourceConfig(source_id="one", path="one.txt"))
+        kb.add_source(LocalFileSourceConfig(path="one.txt"))
 
     assert str(root) not in str(caught.value)
     assert root.joinpath("manifest.json").read_bytes() == manifest_before
@@ -857,7 +730,7 @@ def test_instance_mutations_are_serialized_without_lost_registration(
 
     def register(source_id: str) -> None:
         try:
-            kb.add_source(LocalFileSourceConfig(source_id=source_id, path=f"{source_id}.txt"))
+            kb.add_source(LocalFileSourceConfig(path=f"{source_id}.txt"))
         except BaseException as exc:
             errors.append(exc)
 
@@ -874,7 +747,9 @@ def test_instance_mutations_are_serialized_without_lost_registration(
     assert not first.is_alive() and not second.is_alive()
     assert errors == []
     assert calls == 2
-    assert tuple(item.source_id for item in kb.list_sources()) == ("a", "b")
+    assert tuple(item.source_id for item in kb.list_sources()) == tuple(
+        sorted((_file_source_id("a.txt"), _file_source_id("b.txt")))
+    )
 
 
 def test_serialized_stale_handles_refresh_manifest_before_mutation(tmp_path: Path) -> None:
@@ -882,11 +757,13 @@ def test_serialized_stale_handles_refresh_manifest_before_mutation(tmp_path: Pat
     first = KnowledgeBase.create(str(root), knowledge_base_id="kb")
     second = KnowledgeBase.open(str(root))
 
-    first.add_source(LocalFileSourceConfig(source_id="a", path="a.txt"))
-    second.add_source(LocalFileSourceConfig(source_id="b", path="b.txt"))
+    first.add_source(LocalFileSourceConfig(path="a.txt"))
+    second.add_source(LocalFileSourceConfig(path="b.txt"))
 
     reopened = KnowledgeBase.open(str(root))
-    assert tuple(item.source_id for item in reopened.list_sources()) == ("a", "b")
+    assert tuple(item.source_id for item in reopened.list_sources()) == tuple(
+        sorted((_file_source_id("a.txt"), _file_source_id("b.txt")))
+    )
 
 
 def test_search_wraps_private_runtime_failure_but_preserves_input_validation(
@@ -938,7 +815,7 @@ def test_sync_and_reopen_reuse_injected_cloneable_index_factory(tmp_path: Path) 
     kb = KnowledgeBase.create(
         str(root), knowledge_base_id="kb", index_factory=factory
     )
-    kb.add_source(LocalFileSourceConfig(source_id="source", path=str(source)))
+    kb.add_source(LocalFileSourceConfig(path=str(source)))
     calls_before_sync = len(instances)
 
     kb.sync()
@@ -983,7 +860,7 @@ def test_create_relative_root_remains_stable_after_working_directory_change(
     kb = KnowledgeBase.create("kb", knowledge_base_id="kb")
     monkeypatch.chdir(second_cwd)
 
-    kb.add_source(LocalFileSourceConfig(source_id="source", path=str(source)))
+    kb.add_source(LocalFileSourceConfig(path=str(source)))
     kb.sync()
 
     assert kb.status().document_count == 1
@@ -1002,14 +879,14 @@ def test_open_relative_root_remains_stable_after_working_directory_change(
     source.write_text("stable relative open searchable", encoding="utf-8")
     root = first_cwd / "kb"
     original = KnowledgeBase.create(str(root), knowledge_base_id="kb")
-    original.add_source(LocalFileSourceConfig(source_id="source", path=str(source)))
+    registration = original.add_source(LocalFileSourceConfig(path=str(source)))
     original.sync()
     original.close()
     monkeypatch.chdir(first_cwd)
     reopened = KnowledgeBase.open("kb")
     monkeypatch.chdir(second_cwd)
 
-    reopened.sync_source("source")
+    reopened.sync_source(registration.source_id)
 
     assert reopened.search("searchable")
     assert reopened.status().document_count == 1
@@ -1022,7 +899,7 @@ def test_ambiguous_save_is_compensated_to_exact_old_snapshot(
     source = tmp_path / "source.txt"
     source.write_text("old canonical", encoding="utf-8")
     kb = KnowledgeBase.create(str(root), knowledge_base_id="kb")
-    kb.add_source(LocalFileSourceConfig(source_id="source", path=str(source)))
+    registration = kb.add_source(LocalFileSourceConfig(path=str(source)))
     kb.sync()
     old_snapshot = SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load()
     source.write_text("new private canonical", encoding="utf-8")
@@ -1044,7 +921,7 @@ def test_ambiguous_save_is_compensated_to_exact_old_snapshot(
 
     monkeypatch.setattr(module, "SQLiteKnowledgeSnapshotStore", AmbiguousStore)
     with pytest.raises(KnowledgeBasePersistenceError) as caught:
-        kb.sync_source("source")
+        kb.sync_source(registration.source_id)
 
     assert "private" not in str(caught.value)
     assert len(calls) == 2
@@ -1063,7 +940,7 @@ def test_failed_ambiguous_save_compensation_poisons_object(
     source = tmp_path / "source.txt"
     source.write_text("old", encoding="utf-8")
     kb = KnowledgeBase.create(str(root), knowledge_base_id="kb")
-    kb.add_source(LocalFileSourceConfig(source_id="source", path=str(source)))
+    kb.add_source(LocalFileSourceConfig(path=str(source)))
     kb.sync()
     old_snapshot = SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load()
     source.write_text("new private provider value", encoding="utf-8")

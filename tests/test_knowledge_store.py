@@ -8,6 +8,7 @@ import pytest
 
 from nexusmind import (
     Document,
+    DocumentVersion,
     EmbeddingVector,
     InMemorySemanticChunkIndex,
     KnowledgeCollection,
@@ -54,9 +55,17 @@ def _document(
 
 
 def _snapshot(source_id: str, content: str = "searchable") -> KnowledgeSnapshot:
+    document = _document(source_id, "notes.md", content)
     return KnowledgeSnapshot(
         sources=(_source(source_id),),
-        documents=(_document(source_id, "notes.md", content),),
+        documents=(document,),
+        document_versions=(
+            DocumentVersion.from_document(
+                document,
+                created_at="2026-08-27T00:00:00.000000Z",
+                sync_context="fixture",
+            ),
+        ),
     )
 
 
@@ -276,7 +285,17 @@ def test_sqlite_restart_rebuilds_chinese_search_state_from_canonical_data(tmp_pa
     path = tmp_path / "knowledge.db"
     source = _source("docs")
     document = _document("docs", "guide.md", "知识图谱支持语义检索")
-    snapshot = KnowledgeSnapshot((source,), (document,))
+    snapshot = KnowledgeSnapshot(
+        (source,),
+        (document,),
+        (
+            DocumentVersion.from_document(
+                document,
+                created_at="2026-08-27T00:00:00.000000Z",
+                sync_context="fixture",
+            ),
+        ),
+    )
     SQLiteKnowledgeSnapshotStore(path).save(snapshot)
 
     restarted = KnowledgeCollection()
@@ -368,7 +387,7 @@ def test_unsupported_and_malformed_schema_fail_closed(tmp_path) -> None:
         SQLiteKnowledgeSnapshotStore(malformed)
 
 
-def test_schema_v1_database_migrates_without_changing_canonical_rows(tmp_path) -> None:
+def test_incomplete_schema_v1_database_is_rejected_without_migration(tmp_path) -> None:
     path = tmp_path / "v1.db"
     source = _source("docs")
     document = _document("docs", "notes.md", "legacy persisted")
@@ -413,14 +432,17 @@ def test_schema_v1_database_migrates_without_changing_canonical_rows(tmp_path) -
             ),
         )
 
-    loaded = SQLiteKnowledgeSnapshotStore(path).load()
+    with pytest.raises(KnowledgeSnapshotStoreError, match="schema"):
+        SQLiteKnowledgeSnapshotStore(path)
 
-    assert loaded == KnowledgeSnapshot((source,), (document,))
     with sqlite3.connect(path) as db:
         assert db.execute(
             "SELECT value FROM knowledge_store_metadata WHERE key = 'schema_version'"
-        ).fetchone() == ("2",)
-        assert db.execute("SELECT count(*) FROM document_versions").fetchone() == (0,)
+        ).fetchone() == ("1",)
+        assert db.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'document_versions'"
+        ).fetchone() == (0,)
 
 
 def test_orphan_database_row_fails_closed(tmp_path) -> None:

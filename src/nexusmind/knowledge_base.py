@@ -16,10 +16,8 @@ from uuid import uuid4
 from .knowledge import Document, KnowledgeSource, KnowledgeSourceType
 from .knowledge_answer import (
     AnswerGenerationLimitError,
-    AnswerGenerationLimits,
     AnswerGenerator,
     AnswerGeneratorError,
-    KnowledgeAnswer,
     generate_knowledge_answer,
 )
 from .knowledge_base_manifest import (
@@ -747,26 +745,6 @@ class KnowledgeBase:
         except Exception as exc:
             raise KnowledgeBaseSourceError("unable to search knowledge base") from exc
 
-    def answer(
-        self,
-        question: str,
-        *,
-        generator: AnswerGenerator | None = None,
-        retrieval_limit: int = 8,
-        limits: AnswerGenerationLimits | None = None,
-    ) -> KnowledgeAnswer:
-        """Backward-compatible answer API delegated to the unified query pipeline."""
-
-        self._require_open()
-        return self.query(
-            question,
-            options=KnowledgeQueryOptions(
-                retrieval_limit=retrieval_limit,
-                limits=AnswerGenerationLimits() if limits is None else limits,
-                generator=generator,
-            ),
-        ).answer
-
     def query(
         self,
         question: str,
@@ -867,44 +845,25 @@ class KnowledgeBase:
     def _add_source(self, config: RegisteredSourceConfig) -> RegisteredSourceConfig:
         if type(config) not in (LocalFileSourceConfig, LocalDirectorySourceConfig):
             raise KnowledgeBaseConfigError("source config type is unsupported")
-        source_id_was_auto = config._source_id_was_auto
         normalized = KnowledgeBaseManifest(
             knowledge_base_id=self._manifest.knowledge_base_id,
             sources=(config,),
             limits=self._limits,
         ).sources[0]
-        retired_matches = tuple(
-            item
-            for item in self._manifest.retired_sources
-            if item.type == normalized.type
-            and _path_identity(item.path) == _path_identity(normalized.path)
-        )
-        if len(retired_matches) > 1:
-            raise KnowledgeBaseSourceError("retired source identity is ambiguous")
-        if retired_matches and source_id_was_auto:
-            normalized = type(normalized)(
-                source_id=retired_matches[0].source_id,
-                path=normalized.path,
-            )
+        normalized_identity = _path_identity(normalized.path)
+        if any(
+            _path_identity(item.path) == normalized_identity
+            for item in self._manifest.sources
+        ):
+            raise KnowledgeBaseSourceError("source path is already registered")
         if any(item.source_id == normalized.source_id for item in self._manifest.sources):
             raise KnowledgeBaseSourceError("source_id is already registered")
         candidate = KnowledgeBaseManifest(
             knowledge_base_id=self._manifest.knowledge_base_id,
             display_name=self._manifest.display_name,
             sources=self._manifest.sources + (normalized,),
-            retired_sources=tuple(
-                item
-                for item in self._manifest.retired_sources
-                if not retired_matches or item.source_id != retired_matches[0].source_id
-            ),
             limits=self._limits,
         )
-        normalized_identity = _path_identity(normalized.path)
-        if sum(
-            _path_identity(item.path) == normalized_identity
-            for item in candidate.sources
-        ) > 1:
-            raise KnowledgeBaseSourceError("source path is already registered")
         self._persist_manifest(candidate)
         self._manifest = candidate
         return next(
@@ -938,7 +897,6 @@ class KnowledgeBase:
 
         old_manifest = self._manifest
         old_snapshot = self._collection.snapshot()
-        preserve_identity = self._requires_retired_identity(registration, old_snapshot)
         try:
             staging = self._new_collection(self._index_factory, self._limits)
             staging.restore(old_snapshot)
@@ -949,13 +907,6 @@ class KnowledgeBase:
                 sources=tuple(
                     item for item in self._manifest.sources if item.source_id != source_id
                 ),
-                retired_sources=tuple(
-                    item
-                    for item in self._manifest.retired_sources
-                    if item.type != registration.type
-                    or _path_identity(item.path) != _path_identity(registration.path)
-                )
-                + ((registration,) if preserve_identity else ()),
                 limits=self._limits,
             )
             encode_manifest(candidate, self._limits)
@@ -1022,38 +973,16 @@ class KnowledgeBase:
         snapshot = self._collection.snapshot()
         if any(item.source_id == source_id for item in snapshot.sources):
             raise KnowledgeBaseSourceError("synchronized source cannot be unregistered")
-        preserve_identity = self._requires_retired_identity(registration, snapshot)
         candidate = KnowledgeBaseManifest(
             knowledge_base_id=self._manifest.knowledge_base_id,
             display_name=self._manifest.display_name,
             sources=tuple(
                 item for item in self._manifest.sources if item.source_id != source_id
             ),
-            retired_sources=tuple(
-                item
-                for item in self._manifest.retired_sources
-                if item.type != registration.type
-                or _path_identity(item.path) != _path_identity(registration.path)
-            )
-            + ((registration,) if preserve_identity else ()),
             limits=self._limits,
         )
         self._persist_manifest(candidate)
         self._manifest = candidate
-
-    @staticmethod
-    def _requires_retired_identity(
-        registration: RegisteredSourceConfig,
-        snapshot: KnowledgeSnapshot,
-    ) -> bool:
-        automatic_id = type(registration)(path=registration.path).source_id
-        has_history = any(
-            source.source_id == registration.source_id for source in snapshot.sources
-        ) or any(
-            version.source_id == registration.source_id
-            for version in snapshot.document_versions
-        )
-        return registration.source_id != automatic_id and has_history
 
     def _persist_manifest(self, candidate: KnowledgeBaseManifest) -> None:
         try:

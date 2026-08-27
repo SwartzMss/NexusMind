@@ -16,6 +16,14 @@ from nexusmind import (
 )
 
 
+def _source_id(tmp_path: Path, name: str) -> str:
+    return LocalFileSourceConfig(path=str(tmp_path / name)).source_id
+
+
+def _ordered_source_ids(tmp_path: Path, *names: str) -> tuple[str, ...]:
+    return tuple(sorted(_source_id(tmp_path, name) for name in names))
+
+
 def _synced_pair(tmp_path: Path) -> tuple[KnowledgeBase, Path]:
     first = tmp_path / "first.txt"
     second = tmp_path / "second.txt"
@@ -23,8 +31,8 @@ def _synced_pair(tmp_path: Path) -> tuple[KnowledgeBase, Path]:
     second.write_text("beta retained", encoding="utf-8")
     root = tmp_path / "kb"
     kb = KnowledgeBase.create(str(root), knowledge_base_id="kb")
-    kb.add_source(LocalFileSourceConfig(source_id="first", path=str(first)))
-    kb.add_source(LocalFileSourceConfig(source_id="second", path=str(second)))
+    kb.add_source(LocalFileSourceConfig(path=str(first)))
+    kb.add_source(LocalFileSourceConfig(path=str(second)))
     kb.sync()
     return kb, root
 
@@ -32,18 +40,18 @@ def _synced_pair(tmp_path: Path) -> tuple[KnowledgeBase, Path]:
 def test_remove_source_removes_registration_canonical_and_search_state(tmp_path: Path) -> None:
     kb, root = _synced_pair(tmp_path)
 
-    kb.remove_source("first")
+    kb.remove_source(_source_id(tmp_path, "first.txt"))
 
-    assert tuple(item.source_id for item in kb.list_sources()) == ("second",)
-    assert tuple(item.source_id for item in kb.list_documents()) == ("second",)
+    assert tuple(item.source_id for item in kb.list_sources()) == (_source_id(tmp_path, "second.txt"),)
+    assert tuple(item.source_id for item in kb.list_documents()) == (_source_id(tmp_path, "second.txt"),)
     assert kb.search("removable") == ()
     assert kb.search("retained")
     stored = SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load()
-    assert tuple(item.source_id for item in stored.sources) == ("second",)
-    assert tuple(item.source_id for item in stored.documents) == ("second",)
+    assert tuple(item.source_id for item in stored.sources) == (_source_id(tmp_path, "second.txt"),)
+    assert tuple(item.source_id for item in stored.documents) == (_source_id(tmp_path, "second.txt"),)
     reopened = KnowledgeBase.open(str(root))
-    assert tuple(item.source_id for item in reopened.list_sources()) == ("second",)
-    assert tuple(item.source_id for item in reopened.list_documents()) == ("second",)
+    assert tuple(item.source_id for item in reopened.list_sources()) == (_source_id(tmp_path, "second.txt"),)
+    assert tuple(item.source_id for item in reopened.list_documents()) == (_source_id(tmp_path, "second.txt"),)
     assert b"alpha removable" not in root.joinpath("manifest.json").read_bytes()
     with sqlite3.connect(root / "knowledge.db") as database:
         tables = {
@@ -119,12 +127,12 @@ def test_initial_canonical_failure_preserves_both_stores_and_memory(
     monkeypatch.setattr(module, "write_manifest", lambda *args, **kwargs: calls.append("manifest"))
 
     with pytest.raises(KnowledgeBasePersistenceError) as caught:
-        kb.remove_source("first")
+        kb.remove_source(_source_id(tmp_path, "first.txt"))
 
-    assert tuple(item.source_id for item in calls[0].sources) == ("second",)
+    assert tuple(item.source_id for item in calls[0].sources) == (_source_id(tmp_path, "second.txt"),)
     assert calls[1] == snapshot_before
     assert "private" not in str(caught.value)
-    assert tuple(item.source_id for item in kb.list_sources()) == ("first", "second")
+    assert tuple(item.source_id for item in kb.list_sources()) == _ordered_source_ids(tmp_path, "first.txt", "second.txt")
     assert kb.status() == status_before
     assert kb.list_documents() == documents_before
     assert kb.search("removable") == search_before
@@ -152,9 +160,9 @@ def test_post_commit_initial_save_failure_compensates_exact_old_snapshot(
 
     monkeypatch.setattr(module.SQLiteKnowledgeSnapshotStore, "save", commit_then_fail)
     with pytest.raises(KnowledgeBasePersistenceError) as caught:
-        kb.remove_source("first")
+        kb.remove_source(_source_id(tmp_path, "first.txt"))
 
-    assert tuple(item.source_id for item in calls[0].sources) == ("second",)
+    assert tuple(item.source_id for item in calls[0].sources) == (_source_id(tmp_path, "second.txt"),)
     assert calls[1] == snapshot_before
     assert "private" not in str(caught.value)
     assert kb.status() == status_before
@@ -177,10 +185,10 @@ def test_initial_save_and_compensation_failure_poisons_handle(
 
     monkeypatch.setattr(module.SQLiteKnowledgeSnapshotStore, "save", fail_both_saves)
     with pytest.raises(KnowledgeBasePersistenceError, match="recovery") as caught:
-        kb.remove_source("first")
+        kb.remove_source(_source_id(tmp_path, "first.txt"))
 
-    assert tuple(item.source_id for item in calls[0].sources) == ("second",)
-    assert tuple(item.source_id for item in calls[1].sources) == ("first", "second")
+    assert tuple(item.source_id for item in calls[0].sources) == (_source_id(tmp_path, "second.txt"),)
+    assert tuple(item.source_id for item in calls[1].sources) == _ordered_source_ids(tmp_path, "first.txt", "second.txt")
     assert "private" not in str(caught.value)
     with pytest.raises(KnowledgeBaseClosedError):
         kb.status()
@@ -209,15 +217,15 @@ def test_canonical_store_initialization_failure_is_sanitized_and_releases_lock(
 
     monkeypatch.setattr(module, "SQLiteKnowledgeSnapshotStore", FailingStore)
     with pytest.raises(KnowledgeBasePersistenceError) as caught:
-        kb.remove_source("first")
+        kb.remove_source(_source_id(tmp_path, "first.txt"))
 
     assert "private" not in str(caught.value)
-    assert tuple(item.source_id for item in kb.list_sources()) == ("first", "second")
+    assert tuple(item.source_id for item in kb.list_sources()) == _ordered_source_ids(tmp_path, "first.txt", "second.txt")
     assert root.joinpath("manifest.json").read_bytes() == manifest_before
     assert real_store(root / "knowledge.db").load() == snapshot_before
 
     monkeypatch.setattr(module, "SQLiteKnowledgeSnapshotStore", real_store)
-    KnowledgeBase.open(str(root)).remove_source("first")
+    KnowledgeBase.open(str(root)).remove_source(_source_id(tmp_path, "first.txt"))
 
 
 def test_manifest_failure_compensates_exact_old_canonical_snapshot(
@@ -248,18 +256,18 @@ def test_manifest_failure_compensates_exact_old_canonical_snapshot(
     monkeypatch.setattr(module, "write_manifest", commit_candidate_then_restore_old)
 
     with pytest.raises(KnowledgeBasePersistenceError) as caught:
-        kb.remove_source("first")
+        kb.remove_source(_source_id(tmp_path, "first.txt"))
 
-    assert tuple(item.source_id for item in calls[0].sources) == ("second",)
+    assert tuple(item.source_id for item in calls[0].sources) == (_source_id(tmp_path, "second.txt"),)
     assert calls[1][0] == "manifest"
-    assert tuple(item.source_id for item in calls[1][1].sources) == ("second",)
+    assert tuple(item.source_id for item in calls[1][1].sources) == (_source_id(tmp_path, "second.txt"),)
     assert calls[2][0] == "manifest"
-    assert tuple(item.source_id for item in calls[2][1].sources) == ("first", "second")
+    assert tuple(item.source_id for item in calls[2][1].sources) == _ordered_source_ids(tmp_path, "first.txt", "second.txt")
     assert calls[3] == snapshot_before
     assert "private" not in str(caught.value)
     assert root.joinpath("manifest.json").read_bytes() == manifest_before
     assert SQLiteKnowledgeSnapshotStore(root / "knowledge.db").load() == snapshot_before
-    assert tuple(item.source_id for item in kb.list_sources()) == ("first", "second")
+    assert tuple(item.source_id for item in kb.list_sources()) == _ordered_source_ids(tmp_path, "first.txt", "second.txt")
     assert KnowledgeBase.open(str(root)).status() == kb.status()
 
 
@@ -288,7 +296,7 @@ def test_manifest_recovery_failure_poisons_even_when_database_recovers(
     monkeypatch.setattr(module, "write_manifest", fail_manifest_recovery)
     monkeypatch.setattr(module.SQLiteKnowledgeSnapshotStore, "save", recording_save)
     with pytest.raises(KnowledgeBasePersistenceError, match="recovery") as caught:
-        kb.remove_source("first")
+        kb.remove_source(_source_id(tmp_path, "first.txt"))
 
     assert calls == ["database", "manifest-1", "manifest-2", "database"]
     assert "private" not in str(caught.value)
@@ -326,7 +334,7 @@ def test_database_recovery_failure_still_attempts_manifest_recovery_and_poisons(
     monkeypatch.setattr(module, "write_manifest", candidate_commit_then_fail)
     monkeypatch.setattr(module.SQLiteKnowledgeSnapshotStore, "save", fail_database_recovery)
     with pytest.raises(KnowledgeBasePersistenceError, match="recovery") as caught:
-        kb.remove_source("first")
+        kb.remove_source(_source_id(tmp_path, "first.txt"))
 
     assert calls == ["database-1", "manifest-1", "manifest-2", "database-2"]
     assert "private" not in str(caught.value)
@@ -352,17 +360,17 @@ def test_failed_compensation_poisons_handle_and_reports_recovery_failure(
     monkeypatch.setattr(module, "write_manifest", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("private")))
 
     with pytest.raises(KnowledgeBasePersistenceError, match="recovery") as caught:
-        kb.remove_source("first")
+        kb.remove_source(_source_id(tmp_path, "first.txt"))
     assert "private" not in str(caught.value)
     assert saves == 2
     for operation in (kb.status, kb.list_sources, kb.list_documents, lambda: kb.search("x"), kb.sync):
         with pytest.raises(KnowledgeBaseClosedError):
             operation()
     for operation in (
-        lambda: kb.add_source(LocalFileSourceConfig(source_id="third", path="third.txt")),
-        lambda: kb.unregister_source("second"),
-        lambda: kb.remove_source("second"),
-        lambda: kb.sync_source("second"),
+        lambda: kb.add_source(LocalFileSourceConfig(path="third.txt")),
+        lambda: kb.unregister_source(_source_id(tmp_path, "second.txt")),
+        lambda: kb.remove_source(_source_id(tmp_path, "second.txt")),
+        lambda: kb.sync_source(_source_id(tmp_path, "second.txt")),
     ):
         with pytest.raises(KnowledgeBaseClosedError):
             operation()
@@ -375,14 +383,14 @@ def test_stale_handle_refreshes_before_removal(tmp_path: Path) -> None:
     stale = KnowledgeBase.open(str(root))
     third = tmp_path / "third.txt"
     third.write_text("gamma", encoding="utf-8")
-    kb.add_source(LocalFileSourceConfig(source_id="third", path=str(third)))
-    kb.sync_source("third")
+    kb.add_source(LocalFileSourceConfig(path=str(third)))
+    kb.sync_source(_source_id(tmp_path, "third.txt"))
 
-    stale.remove_source("first")
+    stale.remove_source(_source_id(tmp_path, "first.txt"))
 
     reopened = KnowledgeBase.open(str(root))
-    assert tuple(item.source_id for item in reopened.list_sources()) == ("second", "third")
-    assert tuple(item.source_id for item in reopened.list_documents()) == ("second", "third")
+    assert tuple(item.source_id for item in reopened.list_sources()) == _ordered_source_ids(tmp_path, "second.txt", "third.txt")
+    assert tuple(item.source_id for item in reopened.list_documents()) == _ordered_source_ids(tmp_path, "second.txt", "third.txt")
 
 
 def test_remove_source_rejects_advisory_lock_contender_and_releases_after_failure(
@@ -393,7 +401,7 @@ def test_remove_source_rejects_advisory_lock_contender_and_releases_after_failur
     module._acquire_advisory_lock(descriptor)
     try:
         with pytest.raises(KnowledgeBasePersistenceError):
-            kb.remove_source("first")
+            kb.remove_source(_source_id(tmp_path, "first.txt"))
     finally:
         module._release_advisory_lock(descriptor)
         os.close(descriptor)
@@ -405,7 +413,7 @@ def test_remove_source_rejects_advisory_lock_contender_and_releases_after_failur
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("failure")),
     )
     with pytest.raises(KnowledgeBasePersistenceError):
-        kb.remove_source("first")
+        kb.remove_source(_source_id(tmp_path, "first.txt"))
     monkeypatch.setattr(module.SQLiteKnowledgeSnapshotStore, "save", real_save)
     other = KnowledgeBase.open(str(root))
-    other.remove_source("first")
+    other.remove_source(_source_id(tmp_path, "first.txt"))

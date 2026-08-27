@@ -39,7 +39,7 @@ def _knowledge_base(tmp_path: Path) -> KnowledgeBase:
         knowledge_base_id="query-test",
         answer_generator=FakeGenerator(),
     )
-    knowledge.add_source(LocalFileSourceConfig(source_id="docs", path=str(document)))
+    knowledge.add_source(LocalFileSourceConfig(path=str(document)))
     knowledge.sync()
     return knowledge
 
@@ -62,16 +62,11 @@ def test_query_runs_existing_pipeline_and_returns_validated_debug_trace(
     assert result.trace.context_character_count > 0
 
 
-def test_answer_remains_backward_compatible_and_delegates_to_query(tmp_path: Path) -> None:
+def test_knowledge_base_exposes_only_the_query_answer_api(tmp_path: Path) -> None:
     knowledge = _knowledge_base(tmp_path)
-    options = KnowledgeQueryOptions(
-        retrieval_limit=1,
-        limits=AnswerGenerationLimits(max_passages=1),
-    )
 
-    assert knowledge.answer("Binder credentials?").text == knowledge.query(
-        "Binder credentials?", options=options
-    ).answer.text
+    assert not hasattr(knowledge, "answer")
+    assert knowledge.query("Binder credentials?").answer.text
 
 
 def test_query_result_has_stable_json_schema_and_is_frozen(tmp_path: Path) -> None:

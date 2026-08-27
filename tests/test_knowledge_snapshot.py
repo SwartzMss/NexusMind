@@ -10,6 +10,7 @@ from nexusmind import (
     ChunkIndexLimitError,
     ChunkIndexLimits,
     Document,
+    DocumentVersion,
     EmbeddingVector,
     InMemoryChunkIndex,
     InMemorySemanticChunkIndex,
@@ -45,6 +46,23 @@ def _document(source_id: str, logical_path: str, content: str) -> Document:
 
 def _source(source_id: str) -> KnowledgeSource:
     return KnowledgeSource(source_id=source_id, source_type="fake", display_name=source_id)
+
+
+def _snapshot(
+    sources: tuple[KnowledgeSource, ...], documents: tuple[Document, ...]
+) -> KnowledgeSnapshot:
+    return KnowledgeSnapshot(
+        sources=sources,
+        documents=documents,
+        document_versions=tuple(
+            DocumentVersion.from_document(
+                document,
+                created_at="2026-08-24T02:00:00.000000Z",
+                sync_context="snapshot-fixture",
+            )
+            for document in documents
+        ),
+    )
 
 
 @dataclass
@@ -105,7 +123,7 @@ def test_empty_collection_snapshot_is_stable_and_restorable() -> None:
 
 
 def test_semantic_restore_reembeds_with_current_runtime_provider() -> None:
-    snapshot = KnowledgeSnapshot(
+    snapshot = _snapshot(
         sources=(_source("docs"),),
         documents=(_document("docs", "semantic.md", "canonical semantic content"),),
     )
@@ -168,7 +186,7 @@ def test_restore_replaces_existing_state_and_rebuilds_searchable_chunks() -> Non
     collection.sync(FakeAdapter("old", (_document("old", "old.txt", "old content"),)))
     restored = _document("docs", "new.txt", "new searchable")
 
-    result = collection.restore(KnowledgeSnapshot((_source("docs"),), (restored,)))
+    result = collection.restore(_snapshot((_source("docs"),), (restored,)))
 
     assert result == KnowledgeRestoreResult(1, 1, 1)
     assert collection.search("old") == ()
@@ -186,7 +204,7 @@ def test_restore_replaces_existing_state_and_rebuilds_searchable_chunks() -> Non
 def test_restore_rebuilds_chinese_search_state_with_current_index_analyzer() -> None:
     source = _source("docs")
     document = _document("docs", "guide.txt", "知识图谱支持语义检索")
-    snapshot = KnowledgeSnapshot((source,), (document,))
+    snapshot = _snapshot((source,), (document,))
 
     default_collection = KnowledgeCollection()
     default_collection.restore(snapshot)
@@ -253,7 +271,7 @@ def test_restore_rechunks_canonical_documents_in_deterministic_order() -> None:
     chunker = RecordingChunker()
     collection = KnowledgeCollection(chunker=chunker)
 
-    collection.restore(KnowledgeSnapshot((_source("docs"),), documents))
+    collection.restore(_snapshot((_source("docs"),), documents))
 
     assert chunker.document_ids == sorted(document.document_id for document in documents)
     assert not hasattr(collection.snapshot(), "chunks")
@@ -267,7 +285,7 @@ def test_restore_chunker_cannot_mutate_snapshot_or_canonical_state() -> None:
         content="hello",
         metadata={"tag": "original"},
     )
-    snapshot = KnowledgeSnapshot((_source("docs"),), (document,))
+    snapshot = _snapshot((_source("docs"),), (document,))
     collection = KnowledgeCollection(chunker=MutatingMetadataChunker())
 
     collection.restore(snapshot)
@@ -282,7 +300,7 @@ def test_restore_then_sync_detects_unchanged_changed_added_and_removed() -> None
     removed = _document("docs", "removed.txt", "removed")
     collection = KnowledgeCollection()
     collection.restore(
-        KnowledgeSnapshot((_source("docs"),), (stable, changing, removed))
+        _snapshot((_source("docs"),), (stable, changing, removed))
     )
 
     unchanged = collection.sync(FakeAdapter("docs", (stable, changing, removed)))
@@ -362,7 +380,7 @@ def test_chunking_and_index_failures_during_restore_are_atomic() -> None:
     collection.sync(FakeAdapter("old", (_document("old", "old.txt", "preserved"),)))
     with pytest.raises(RuntimeError, match="chunking failed"):
         collection.restore(
-            KnowledgeSnapshot((_source("docs"),), (_document("docs", "a.txt", "broken"),))
+            _snapshot((_source("docs"),), (_document("docs", "a.txt", "broken"),))
         )
     assert collection.search("preserved")
 
@@ -372,7 +390,7 @@ def test_chunking_and_index_failures_during_restore_are_atomic() -> None:
     limited.sync(FakeAdapter("old", (_document("old", "old.txt", "old"),)))
     with pytest.raises(ChunkIndexLimitError):
         limited.restore(
-            KnowledgeSnapshot((_source("docs"),), (_document("docs", "a.txt", "too long"),))
+            _snapshot((_source("docs"),), (_document("docs", "a.txt", "too long"),))
         )
     assert limited.search("old")
 
@@ -393,7 +411,7 @@ def test_analyzed_character_limit_failure_during_restore_is_atomic() -> None:
 
     with pytest.raises(ChunkIndexLimitError, match="max_total_analyzed_token_chars"):
         collection.restore(
-            KnowledgeSnapshot((_source("docs"),), (_document("docs", "a.txt", "attack"),))
+            _snapshot((_source("docs"),), (_document("docs", "a.txt", "attack"),))
         )
 
     assert collection.search("old") == before
@@ -402,7 +420,7 @@ def test_analyzed_character_limit_failure_during_restore_is_atomic() -> None:
 def test_chunk_identity_conflict_during_restore_is_atomic() -> None:
     collection = KnowledgeCollection(chunker=ConflictingChunker())
     collection.sync(FakeAdapter("old", (_document("old", "old.txt", "preserved"),)))
-    snapshot = KnowledgeSnapshot(
+    snapshot = _snapshot(
         (_source("docs"),),
         (_document("docs", "a.txt", "one"), _document("docs", "b.txt", "two")),
     )

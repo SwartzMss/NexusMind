@@ -43,9 +43,11 @@ ABSOLUTE_BASE = Path.cwd().resolve() / "manifest-test-data"
 
 
 def source(
-    source_id: str = "source", path: str = str(ABSOLUTE_BASE / "source")
+    name: str = "source", path: str | None = None
 ) -> LocalFileSourceConfig:
-    return LocalFileSourceConfig(source_id=source_id, path=path)
+    return LocalFileSourceConfig(
+        path=str(ABSOLUTE_BASE / name) if path is None else path
+    )
 
 
 def manifest(**changes: object) -> KnowledgeBaseManifest:
@@ -82,15 +84,17 @@ def test_limits_require_positive_plain_integers(field: str, value: object) -> No
 
 @pytest.mark.parametrize("source_type", [LocalFileSourceConfig, LocalDirectorySourceConfig])
 def test_source_contracts_are_frozen_and_own_fixed_discriminators(source_type: type) -> None:
-    config = source_type(source_id="docs", path="relative/path")
+    config = source_type(path="relative/path")
     assert config.config_version == "1"
     assert config.type == ("local_file" if source_type is LocalFileSourceConfig else "local_directory")
     with pytest.raises(FrozenInstanceError):
         config.path = "elsewhere"
     with pytest.raises(TypeError):
-        source_type(source_id="docs", path="/tmp", config_version="2")
+        source_type(path="/tmp", config_version="2")
     with pytest.raises(TypeError):
-        source_type(source_id="docs", path="/tmp", type="wrong")
+        source_type(path="/tmp", type="wrong")
+    with pytest.raises(TypeError):
+        source_type(source_id="docs", path="/tmp")
 
 
 @pytest.mark.parametrize("source_type", [LocalFileSourceConfig, LocalDirectorySourceConfig])
@@ -124,17 +128,11 @@ def test_automatic_source_id_uses_platform_path_identity(
     assert upper.source_id == lower.source_id
 
 
-@pytest.mark.parametrize("source_id", ["", " ", "\t", "\r\n", 1, None])
-def test_source_id_must_be_non_empty_text(source_id: object) -> None:
-    with pytest.raises(KnowledgeBaseConfigError):
-        LocalFileSourceConfig(source_id=source_id, path="/tmp")  # type: ignore[arg-type]
-
-
 @pytest.mark.parametrize("source_type", [LocalFileSourceConfig, LocalDirectorySourceConfig])
 @pytest.mark.parametrize("path", ["", " ", "\t", "\r\n", 1, None, b"/tmp"])
 def test_source_path_must_be_non_empty_text(source_type: type, path: object) -> None:
     with pytest.raises(KnowledgeBaseConfigError):
-        source_type(source_id="docs", path=path)  # type: ignore[arg-type]
+        source_type(path=path)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("knowledge_base_id", ["", " ", "\t", "\r\n", 1, None])
@@ -151,21 +149,24 @@ def test_display_name_must_be_none_or_non_empty_text(display_name: object) -> No
 
 def test_manifest_requires_exact_tuple_supported_unique_sources_and_sorts() -> None:
     a = source("a", str(ABSOLUTE_BASE / "a"))
-    b = LocalDirectorySourceConfig(source_id="b", path=str(ABSOLUTE_BASE / "b"))
+    b = LocalDirectorySourceConfig(path=str(ABSOLUTE_BASE / "b"))
     with pytest.raises(KnowledgeBaseConfigError):
         manifest(sources=[a])
     with pytest.raises(KnowledgeBaseConfigError):
         manifest(sources=(object(),))
     with pytest.raises(KnowledgeBaseConfigError):
-        manifest(sources=(a, source("a", "/tmp/other")))
+        manifest(sources=(a, a))
     value = manifest(sources=(b, a))
-    assert value.sources == (a, b)
+    assert set(value.sources) == {a, b}
+    assert tuple(item.source_id for item in value.sources) == tuple(
+        sorted((a.source_id, b.source_id))
+    )
     with pytest.raises(FrozenInstanceError):
         value.display_name = "changed"
 
 
 def test_manifest_normalizes_paths_and_enforces_all_configured_bounds(tmp_path: Path) -> None:
-    relative = LocalFileSourceConfig(source_id="s", path="relative/../file.txt")
+    relative = LocalFileSourceConfig(path="relative/../file.txt")
     value = KnowledgeBaseManifest(
         knowledge_base_id="kb",
         display_name="name",
@@ -178,7 +179,7 @@ def test_manifest_normalizes_paths_and_enforces_all_configured_bounds(tmp_path: 
     cases = [
         ({"knowledge_base_id": "xx"}, KnowledgeBaseLimits(max_knowledge_base_id_chars=1)),
         ({"display_name": "xx"}, KnowledgeBaseLimits(max_display_name_chars=1)),
-        ({"sources": (source("xx"),)}, KnowledgeBaseLimits(max_source_id_chars=1)),
+        ({"sources": (source("xx"),)}, KnowledgeBaseLimits(max_source_id_chars=35)),
         ({"sources": (source(path="/too-long"),)}, KnowledgeBaseLimits(max_path_chars=1)),
         ({"sources": (source("a"), source("b"))}, KnowledgeBaseLimits(max_sources=1)),
     ]
@@ -191,55 +192,41 @@ def test_codec_is_exact_utf8_deterministic_and_order_independent() -> None:
     limits = KnowledgeBaseLimits()
     empty = manifest()
     assert encode_manifest(empty, limits) == (
-        b'{"display_name":null,"format_version":"2",'
-        b'"knowledge_base_id":"kb","retired_sources":[],"sources":[]}\n'
+        b'{"display_name":null,"format_version":"1",'
+        b'"knowledge_base_id":"kb","sources":[]}\n'
     )
     assert decode_manifest(encode_manifest(empty, limits), limits) == empty
 
     a = source("a", str(ABSOLUTE_BASE / "\u4e2d"))
-    b = LocalDirectorySourceConfig(source_id="b", path=str(ABSOLUTE_BASE / "b"))
+    b = LocalDirectorySourceConfig(path=str(ABSOLUTE_BASE / "b"))
     first = manifest(display_name="\u77e5\u8bc6", sources=(b, a))
     second = manifest(display_name="\u77e5\u8bc6", sources=(a, b))
     assert encode_manifest(first, limits) == encode_manifest(second, limits)
     assert b"\\u" not in encode_manifest(first, limits)
-    path_a = json.dumps(str(ABSOLUTE_BASE / "\u4e2d"), ensure_ascii=False)
-    path_b = json.dumps(str(ABSOLUTE_BASE / "b"), ensure_ascii=False)
+    encoded_sources = []
+    for item in first.sources:
+        encoded_sources.append(
+            '{"config_version":"1","path":%s,"source_id":"%s","type":"%s"}'
+            % (json.dumps(item.path, ensure_ascii=False), item.source_id, item.type)
+        )
     exact_two_source_json = (
-        '{"display_name":"\u77e5\u8bc6","format_version":"2",'
-        '"knowledge_base_id":"kb","retired_sources":[],"sources":['
-        f'{{"config_version":"1","path":{path_a},"source_id":"a",'
-        '"type":"local_file"},'
-        f'{{"config_version":"1","path":{path_b},"source_id":"b",'
-        '"type":"local_directory"}]}\n'
+        '{"display_name":"\u77e5\u8bc6","format_version":"1",'
+        '"knowledge_base_id":"kb","sources":[' + ",".join(encoded_sources) + "]}\n"
     ).encode("utf-8")
     assert encode_manifest(first, limits) == exact_two_source_json
     assert decode_manifest(encode_manifest(first, limits), limits) == first
 
 
-@pytest.mark.parametrize("source_id", [" ", "\t", "\r\n"])
-def test_codec_rejects_blank_source_ids(source_id: str) -> None:
+def test_encode_rederives_source_id_from_type_and_normalized_path() -> None:
     limits = KnowledgeBaseLimits()
     invalid_source = source()
-    object.__setattr__(invalid_source, "source_id", source_id)
+    object.__setattr__(invalid_source, "source_id", "tampered")
     invalid_manifest = manifest()
     object.__setattr__(invalid_manifest, "sources", (invalid_source,))
-    with pytest.raises(KnowledgeBaseConfigError):
-        encode_manifest(invalid_manifest, limits)
 
-    item = {
-        "config_version": "1",
-        "source_id": source_id,
-        "type": "local_file",
-        "path": str(ABSOLUTE_BASE / "docs"),
-    }
-    root = {
-        "format_version": "1",
-        "knowledge_base_id": "kb",
-        "display_name": None,
-        "sources": [item],
-    }
-    with pytest.raises(KnowledgeBaseConfigError):
-        decode_manifest(encoded(root), limits)
+    decoded = decode_manifest(encode_manifest(invalid_manifest, limits), limits)
+
+    assert decoded.sources == (source(),)
 
 
 @pytest.mark.parametrize(
@@ -289,33 +276,22 @@ def test_decode_rejects_root_schema_violations(change: dict[str, object]) -> Non
         decode_manifest(encoded(value), KnowledgeBaseLimits())
 
 
-def test_decode_v1_manifest_migrates_without_retired_sources() -> None:
+def test_decode_rejects_source_id_not_derived_from_type_and_path() -> None:
     value = {
         "format_version": "1",
         "knowledge_base_id": "kb",
         "display_name": None,
-        "sources": [],
+        "sources": [
+            {
+                "config_version": "1",
+                "source_id": "manual",
+                "type": "local_file",
+                "path": str(ABSOLUTE_BASE / "source"),
+            }
+        ],
     }
 
-    decoded = decode_manifest(encoded(value), KnowledgeBaseLimits())
-
-    assert decoded.sources == ()
-    assert decoded.retired_sources == ()
-
-
-@pytest.mark.parametrize("retired_sources", [None, 1, {}])
-def test_decode_v2_manifest_rejects_non_array_retired_sources(
-    retired_sources: object,
-) -> None:
-    value = {
-        "format_version": "2",
-        "knowledge_base_id": "kb",
-        "display_name": None,
-        "sources": [],
-        "retired_sources": retired_sources,
-    }
-
-    with pytest.raises(KnowledgeBaseConfigError, match="retired_sources must be an array"):
+    with pytest.raises(KnowledgeBaseConfigError, match="source_id"):
         decode_manifest(encoded(value), KnowledgeBaseLimits())
 
 
@@ -336,11 +312,12 @@ def test_decode_v2_manifest_rejects_non_array_retired_sources(
     ],
 )
 def test_decode_rejects_source_schema_violations(change: dict[str, object]) -> None:
+    path = str(ABSOLUTE_BASE / "docs")
     item: dict[str, object] = {
         "config_version": "1",
-        "source_id": "docs",
+        "source_id": LocalFileSourceConfig(path=path).source_id,
         "type": "local_file",
-        "path": str(ABSOLUTE_BASE / "docs"),
+        "path": path,
     }
     removed = change.pop("remove", None)
     if removed:
@@ -352,7 +329,8 @@ def test_decode_rejects_source_schema_violations(change: dict[str, object]) -> N
 
 
 def test_decode_rejects_duplicate_source_ids_and_oversized_decoded_values() -> None:
-    item = {"config_version": "1", "source_id": "a", "type": "local_file", "path": str(ABSOLUTE_BASE / "a")}
+    path = str(ABSOLUTE_BASE / "a")
+    item = {"config_version": "1", "source_id": LocalFileSourceConfig(path=path).source_id, "type": "local_file", "path": path}
     root = {"format_version": "1", "knowledge_base_id": "kb", "display_name": None, "sources": [item, item]}
     with pytest.raises(KnowledgeBaseConfigError):
         decode_manifest(encoded(root), KnowledgeBaseLimits())
