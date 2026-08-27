@@ -6,6 +6,37 @@ NexusMind 是一个面向本地知识的 KnowledgeBase 工具。它可以注册�
 
 > 当前支持 Windows 与 Python 3.11、3.12、3.13。Linux 和 macOS 暂不属于支持平台。
 
+## 选择发布产物
+
+- Windows 用户希望直接运行时，下载 `nexusmind-windows-portable.zip`，解压后运行 `nexusmind\nexusmind.exe`。它自带 Python 运行时，不需要安装 Python。
+- 已安装 Python 3.11、3.12 或 3.13 时，下载 `nexusmind-0.1.0-py3-none-any.whl`，然后运行 `python -m pip install .\nexusmind-0.1.0-py3-none-any.whl`。
+- `nexusmind-0.1.0.tar.gz` 是供需要从源码发行包安装或重新打包的用户使用的 sdist。
+
+所有产物都附在 [GitHub Releases](https://github.com/SwartzMss/NexusMind/releases) 的 `v0.1.0` 发布页中。以下示例中的 `nexusmind`，在 portable 版本中应替换为 `nexusmind\nexusmind.exe`。
+
+## 五步快速开始
+
+先准备一个严格 UTF-8 编码的文本来源：
+
+```powershell
+New-Item -ItemType Directory -Force .\security-notes | Out-Null
+Set-Content -Encoding utf8 .\security-notes\keys.md "密钥轮换需要记录负责人和生效时间。"
+```
+
+然后创建 KnowledgeBase、注册来源、显式同步、搜索并检查 canonical 状态：
+
+```powershell
+nexusmind create .\security-kb --name "Security Notes"
+nexusmind source add .\security-notes --knowledge-base .\security-kb
+nexusmind sync --knowledge-base .\security-kb
+nexusmind search "密钥轮换" --knowledge-base .\security-kb --limit 5
+nexusmind inspect --knowledge-base .\security-kb
+```
+
+当前版本支持本地文件和目录中的严格 UTF-8 `.txt`、`.md`、`.markdown` 文件；注册来源后必须运行 `sync`，内容才会进入 KnowledgeBase。默认 BM25 检索完全离线，Semantic、Hybrid-RRF、reranking 和模型问答属于可选能力。
+
+首个版本不支持 Git/GitHub 来源、PDF/Office 解析、后台同步或文件监控、云端 KnowledgeBase，也不会持久化派生的 Chunk、embedding 或检索索引；重新打开时会从 canonical documents 重建它们。
+
 ## 核心能力
 
 - 创建和重新打开本地持久化 KnowledgeBase
@@ -18,7 +49,7 @@ NexusMind 是一个面向本地知识的 KnowledgeBase 工具。它可以注册�
 
 底层数据流、存储格式、检索实现和安全边界请参阅[技术架构](docs/architecture.md)。
 
-## 快速开始
+## 开发环境安装与桌面界面
 
 ### 1. 安装
 
