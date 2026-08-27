@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from contextlib import closing
 from enum import Enum
 import json
@@ -241,33 +242,38 @@ class SQLiteKnowledgeSnapshotStore:
             raise KnowledgeSnapshotStoreError(
                 "knowledge snapshot schema is incomplete or incompatible"
             )
-        version_indexes = db.execute(
-            "PRAGMA index_list(document_versions)"
-        ).fetchall()
-        expected_index = next(
-            (
-                row
-                for row in version_indexes
-                if row[1] == "document_versions_document_id"
+        expected_indexes = {
+            "knowledge_store_metadata": Counter(
+                {("pk", 1, 0, (("key", 0, "BINARY"),)): 1}
             ),
-            None,
-        )
-        indexed_columns = tuple(
-            row[2]
-            for row in db.execute(
-                "PRAGMA index_info(document_versions_document_id)"
-            )
-        )
-        if (
-            expected_index is None
-            or expected_index[2] != 0
-            or expected_index[3] != "c"
-            or expected_index[4] != 0
-            or indexed_columns != ("document_id",)
-        ):
-            raise KnowledgeSnapshotStoreError(
-                "knowledge snapshot schema has an invalid document version index"
-            )
+            "sources": Counter(
+                {("pk", 1, 0, (("source_id", 0, "BINARY"),)): 1}
+            ),
+            "documents": Counter(
+                {("pk", 1, 0, (("document_id", 0, "BINARY"),)): 1}
+            ),
+            "document_versions": Counter(
+                {
+                    ("pk", 1, 0, (("version_id", 0, "BINARY"),)): 1,
+                    ("c", 0, 0, (("document_id", 0, "BINARY"),)): 1,
+                }
+            ),
+        }
+        for table, expected_table_indexes in expected_indexes.items():
+            actual_table_indexes: Counter[tuple[object, ...]] = Counter()
+            for index in db.execute(f"PRAGMA index_list({table})"):
+                key_columns = tuple(
+                    (row[2], row[3], row[4])
+                    for row in db.execute(f"PRAGMA index_xinfo({index[1]})")
+                    if row[5] == 1
+                )
+                actual_table_indexes[
+                    (index[3], index[2], index[4], key_columns)
+                ] += 1
+            if actual_table_indexes != expected_table_indexes:
+                raise KnowledgeSnapshotStoreError(
+                    "knowledge snapshot schema has an invalid index contract"
+                )
         try:
             row = db.execute(
                 "SELECT value FROM knowledge_store_metadata WHERE key = 'schema_version'"
