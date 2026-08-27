@@ -170,7 +170,9 @@ def test_open_rejects_invalid_database_without_mutating_it(
     assert str(root) not in str(caught.value)
 
 
-@pytest.mark.parametrize("sentinel", ["missing", "wrong-version", "wrong-table"])
+@pytest.mark.parametrize(
+    "sentinel", ["missing", "wrong-version", "version-two", "wrong-table"]
+)
 def test_open_rejects_sqlite_without_valid_store_sentinel_without_mutation(
     tmp_path: Path, sentinel: str
 ) -> None:
@@ -184,14 +186,17 @@ def test_open_rejects_sqlite_without_valid_store_sentinel_without_mutation(
     )
     database = root / "knowledge.db"
     with sqlite3.connect(database) as db:
-        if sentinel == "wrong-version":
+        if sentinel in {"wrong-version", "version-two"}:
             db.execute(
                 "CREATE TABLE knowledge_store_metadata "
                 "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
             )
             db.execute(
                 "INSERT INTO knowledge_store_metadata (key, value) VALUES (?, ?)",
-                ("schema_version", "private-version"),
+                (
+                    "schema_version",
+                    "2" if sentinel == "version-two" else "private-version",
+                ),
             )
         elif sentinel == "wrong-table":
             db.execute("CREATE TABLE private_table (value TEXT)")

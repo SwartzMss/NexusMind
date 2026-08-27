@@ -168,10 +168,12 @@ class SQLiteKnowledgeSnapshotStore:
                 raise KnowledgeSnapshotStoreError(
                     "stored DocumentVersion is invalid"
                 ) from exc
+        ordered_versions = self._order_versions(versions)
+        self._require_current_document_versions(documents, ordered_versions)
         return KnowledgeSnapshot(
             sources=tuple(sources),
             documents=tuple(documents),
-            document_versions=self._order_versions(versions),
+            document_versions=ordered_versions,
         )
 
     def _initialize(self) -> None:
@@ -221,6 +223,24 @@ class SQLiteKnowledgeSnapshotStore:
 
     @staticmethod
     def _validate_schema(db: sqlite3.Connection) -> None:
+        objects = {
+            (row[0], row[1])
+            for row in db.execute(
+                "SELECT type, name FROM sqlite_master "
+                "WHERE name NOT LIKE 'sqlite_%'"
+            )
+        }
+        expected_objects = {
+            ("table", "knowledge_store_metadata"),
+            ("table", "sources"),
+            ("table", "documents"),
+            ("table", "document_versions"),
+            ("index", "document_versions_document_id"),
+        }
+        if objects != expected_objects:
+            raise KnowledgeSnapshotStoreError(
+                "knowledge snapshot schema is incomplete or incompatible"
+            )
         try:
             row = db.execute(
                 "SELECT value FROM knowledge_store_metadata WHERE key = 'schema_version'"
@@ -347,6 +367,7 @@ class SQLiteKnowledgeSnapshotStore:
                 )
             )
         documents: list[tuple[Any, ...]] = []
+        validated_documents: list[Document] = []
         document_ids: set[str] = set()
         for document in snapshot.documents:
             if not isinstance(document, Document):
@@ -370,6 +391,7 @@ class SQLiteKnowledgeSnapshotStore:
             if document.content_hash != validated_document.content_hash:
                 raise KnowledgeSnapshotStoreError("snapshot Document content hash is incoherent")
             document_ids.add(validated_document.document_id)
+            validated_documents.append(validated_document)
             documents.append(
                 (
                     validated_document.document_id,
@@ -384,6 +406,7 @@ class SQLiteKnowledgeSnapshotStore:
         sources.sort(key=lambda row: row[0])
         documents.sort(key=lambda row: row[0])
         versions: list[tuple[Any, ...]] = []
+        validated_versions: list[DocumentVersion] = []
         version_ids: set[str] = set()
         for version in snapshot.document_versions:
             if type(version) is not DocumentVersion:
@@ -411,6 +434,7 @@ class SQLiteKnowledgeSnapshotStore:
                     "snapshot contains duplicate DocumentVersion IDs"
                 )
             version_ids.add(validated.version_id)
+            validated_versions.append(validated)
             versions.append(
                 (
                     validated.version_id,
@@ -424,7 +448,32 @@ class SQLiteKnowledgeSnapshotStore:
                     validated.sync_context,
                 )
             )
+        cls._require_current_document_versions(
+            validated_documents,
+            cls._order_versions(validated_versions),
+        )
         return sources, documents, versions
+
+    @staticmethod
+    def _require_current_document_versions(
+        documents: list[Document], versions: tuple[DocumentVersion, ...]
+    ) -> None:
+        latest = {version.document_id: version for version in versions}
+        for document in documents:
+            version = latest.get(document.document_id)
+            if version is None:
+                raise KnowledgeSnapshotStoreError(
+                    "snapshot documents require document versions"
+                )
+            if (
+                version.source_id != document.source_id
+                or version.logical_path != document.logical_path
+                or version.content != document.content
+                or version.content_hash != document.content_hash
+            ):
+                raise KnowledgeSnapshotStoreError(
+                    "snapshot current document does not match its latest version"
+                )
 
     @staticmethod
     def _order_versions(
