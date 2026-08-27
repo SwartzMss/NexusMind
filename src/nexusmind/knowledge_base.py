@@ -32,6 +32,7 @@ from .knowledge_base_manifest import (
     LocalDirectorySourceConfig,
     LocalFileSourceConfig,
     RegisteredSourceConfig,
+    _path_identity,
     encode_manifest,
     read_manifest,
     write_manifest,
@@ -866,6 +867,7 @@ class KnowledgeBase:
     def _add_source(self, config: RegisteredSourceConfig) -> None:
         if type(config) not in (LocalFileSourceConfig, LocalDirectorySourceConfig):
             raise KnowledgeBaseConfigError("source config type is unsupported")
+        source_id_was_auto = config._source_id_was_auto
         normalized = KnowledgeBaseManifest(
             knowledge_base_id=self._manifest.knowledge_base_id,
             sources=(config,),
@@ -874,11 +876,12 @@ class KnowledgeBase:
         retired_matches = tuple(
             item
             for item in self._manifest.retired_sources
-            if item.type == normalized.type and item.path == normalized.path
+            if item.type == normalized.type
+            and _path_identity(item.path) == _path_identity(normalized.path)
         )
         if len(retired_matches) > 1:
             raise KnowledgeBaseSourceError("retired source identity is ambiguous")
-        if retired_matches:
+        if retired_matches and source_id_was_auto:
             normalized = type(normalized)(
                 source_id=retired_matches[0].source_id,
                 path=normalized.path,
@@ -896,7 +899,11 @@ class KnowledgeBase:
             ),
             limits=self._limits,
         )
-        if sum(item.path == normalized.path for item in candidate.sources) > 1:
+        normalized_identity = _path_identity(normalized.path)
+        if sum(
+            _path_identity(item.path) == normalized_identity
+            for item in candidate.sources
+        ) > 1:
             raise KnowledgeBaseSourceError("source path is already registered")
         self._persist_manifest(candidate)
         self._manifest = candidate
@@ -942,7 +949,8 @@ class KnowledgeBase:
                 retired_sources=tuple(
                     item
                     for item in self._manifest.retired_sources
-                    if item.type != registration.type or item.path != registration.path
+                    if item.type != registration.type
+                    or _path_identity(item.path) != _path_identity(registration.path)
                 )
                 + ((registration,) if preserve_identity else ()),
                 limits=self._limits,
@@ -1021,7 +1029,8 @@ class KnowledgeBase:
             retired_sources=tuple(
                 item
                 for item in self._manifest.retired_sources
-                if item.type != registration.type or item.path != registration.path
+                if item.type != registration.type
+                or _path_identity(item.path) != _path_identity(registration.path)
             )
             + ((registration,) if preserve_identity else ()),
             limits=self._limits,

@@ -15,7 +15,7 @@ from nexusmind.answer_provider import OpenAICompatibleAnswerProvider
 from nexusmind.config import ConfigError, load_model_config_from_env
 from nexusmind.knowledge_answer import KnowledgeAnswerError
 from nexusmind.knowledge_base import KnowledgeBase
-from nexusmind.knowledge_base_manifest import KnowledgeBaseError, LocalDirectorySourceConfig, LocalFileSourceConfig
+from nexusmind.knowledge_base_manifest import KnowledgeBaseError, LocalDirectorySourceConfig, LocalFileSourceConfig, _path_identity
 from nexusmind.knowledge_query import knowledge_query_result_dict
 from nexusmind.runtime_support import runtime_operation
 
@@ -129,8 +129,10 @@ def _sync(args: argparse.Namespace) -> int:
 
 
 def _source_by_path(kb: KnowledgeBase, path: str) -> Any:
-    normalized = str(Path(path).resolve(strict=False))
-    matches = tuple(item for item in kb.list_sources() if item.path == normalized)
+    identity = _path_identity(path)
+    matches = tuple(
+        item for item in kb.list_sources() if _path_identity(item.path) == identity
+    )
     if len(matches) > 1:
         raise _AmbiguousSourcePathError
     if not matches:

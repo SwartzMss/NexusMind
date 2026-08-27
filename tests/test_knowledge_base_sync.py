@@ -167,6 +167,68 @@ def test_legacy_identity_remove_and_readd_restores_version_chain(tmp_path: Path)
     assert versions[1].previous_version_id == first_version.version_id
 
 
+@pytest.mark.parametrize("use_automatic_value", [False, True])
+def test_explicit_source_id_replaces_retired_identity(
+    tmp_path: Path, use_automatic_value: bool
+) -> None:
+    root = tmp_path / "kb"
+    source = tmp_path / "legacy.md"
+    source.write_text("legacy", encoding="utf-8")
+    kb = KnowledgeBase.create(str(root))
+    kb.add_source(LocalFileSourceConfig(source_id="docs", path=str(source)))
+    kb.sync()
+    kb.remove_source("docs")
+
+    fresh_id = (
+        LocalFileSourceConfig(path=str(source)).source_id
+        if use_automatic_value
+        else "fresh"
+    )
+    kb.add_source(LocalFileSourceConfig(source_id=fresh_id, path=str(source)))
+
+    assert kb.list_sources()[0].source_id == fresh_id
+    manifest = json.loads(root.joinpath("manifest.json").read_text(encoding="utf-8"))
+    assert manifest["retired_sources"] == []
+
+
+def test_retired_identity_matching_uses_platform_path_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        module,
+        "_path_identity",
+        lambda path: str(Path(path).resolve(strict=False)).lower(),
+    )
+    root = tmp_path / "kb"
+    original = tmp_path / "Legacy.md"
+    alias = tmp_path / "legacy.md"
+    original.write_text("legacy", encoding="utf-8")
+    kb = KnowledgeBase.create(str(root))
+    kb.add_source(LocalFileSourceConfig(source_id="docs", path=str(original)))
+    kb.sync()
+    kb.remove_source("docs")
+
+    kb.add_source(LocalFileSourceConfig(path=str(alias)))
+
+    assert kb.list_sources()[0].source_id == "docs"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows path identity semantics")
+def test_windows_case_alias_for_missing_path_cannot_be_registered_twice(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "kb"
+    upper = tmp_path / "Future.md"
+    lower = tmp_path / "future.md"
+    assert not upper.exists()
+    assert not lower.exists()
+    kb = KnowledgeBase.create(str(root))
+    kb.add_source(LocalFileSourceConfig(source_id="upper", path=str(upper)))
+
+    with pytest.raises(KnowledgeBaseSourceError, match="source path is already registered"):
+        kb.add_source(LocalFileSourceConfig(source_id="lower", path=str(lower)))
+
+
 def test_retired_legacy_identity_does_not_consume_active_source_limit(
     tmp_path: Path,
 ) -> None:

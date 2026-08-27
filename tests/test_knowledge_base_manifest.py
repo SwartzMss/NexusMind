@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+import nexusmind.knowledge_base_manifest as manifest_module
+
 from nexusmind import (
     KnowledgeBaseClosedError,
     KnowledgeBaseConfigError,
@@ -105,6 +107,21 @@ def test_automatic_source_id_distinguishes_file_and_directory_types() -> None:
     assert LocalFileSourceConfig(path=path).source_id != LocalDirectorySourceConfig(
         path=path
     ).source_id
+
+
+def test_automatic_source_id_uses_platform_path_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        manifest_module.os.path,
+        "normcase",
+        lambda path: path.replace("/", "\\").lower(),
+    )
+
+    upper = LocalFileSourceConfig(path=str(ABSOLUTE_BASE / "Future.md"))
+    lower = LocalFileSourceConfig(path=str(ABSOLUTE_BASE / "future.md"))
+
+    assert upper.source_id == lower.source_id
 
 
 @pytest.mark.parametrize("source_id", ["", " ", "\t", "\r\n", 1, None])

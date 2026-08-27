@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import InitVar, dataclass, replace
+from dataclasses import InitVar, dataclass, field, replace
 import json
 import os
 from pathlib import Path
@@ -61,20 +61,23 @@ class LocalFileSourceConfig:
     type: ClassVar[str] = "local_file"
     source_id: str = _AUTO_SOURCE_ID  # type: ignore[assignment]
     path: str
+    _source_id_was_auto: bool = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         _require_non_empty_text(self.path, "path")
-        if self.source_id is _AUTO_SOURCE_ID:
+        source_id_was_auto = self.source_id is _AUTO_SOURCE_ID
+        if source_id_was_auto:
             object.__setattr__(
                 self,
                 "source_id",
                 str(
                     uuid5(
                         NAMESPACE_URL,
-                        f"nexusmind-source:{self.type}:{_normalized_path(self.path)}",
+                        f"nexusmind-source:{self.type}:{_path_identity(self.path)}",
                     )
                 ),
             )
+        object.__setattr__(self, "_source_id_was_auto", source_id_was_auto)
         _require_non_empty_text(self.source_id, "source_id")
 
 
@@ -84,20 +87,23 @@ class LocalDirectorySourceConfig:
     type: ClassVar[str] = "local_directory"
     source_id: str = _AUTO_SOURCE_ID  # type: ignore[assignment]
     path: str
+    _source_id_was_auto: bool = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         _require_non_empty_text(self.path, "path")
-        if self.source_id is _AUTO_SOURCE_ID:
+        source_id_was_auto = self.source_id is _AUTO_SOURCE_ID
+        if source_id_was_auto:
             object.__setattr__(
                 self,
                 "source_id",
                 str(
                     uuid5(
                         NAMESPACE_URL,
-                        f"nexusmind-source:{self.type}:{_normalized_path(self.path)}",
+                        f"nexusmind-source:{self.type}:{_path_identity(self.path)}",
                     )
                 ),
             )
+        object.__setattr__(self, "_source_id_was_auto", source_id_was_auto)
         _require_non_empty_text(self.source_id, "source_id")
 
 
@@ -111,6 +117,10 @@ def _normalized_path(path: str) -> str:
         return str(Path(path).resolve(strict=False))
     except (OSError, RuntimeError, ValueError) as exc:
         raise KnowledgeBaseConfigError("source path cannot be normalized") from exc
+
+
+def _path_identity(path: str) -> str:
+    return os.path.normcase(_normalized_path(path))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
