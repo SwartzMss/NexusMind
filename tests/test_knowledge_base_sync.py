@@ -1,4 +1,5 @@
 from dataclasses import FrozenInstanceError
+import json
 import os
 from pathlib import Path
 from threading import Event, Thread
@@ -164,6 +165,79 @@ def test_legacy_identity_remove_and_readd_restores_version_chain(tmp_path: Path)
     assert len(versions) == 2
     assert versions[1].document_id == first_version.document_id
     assert versions[1].previous_version_id == first_version.version_id
+
+
+def test_retired_legacy_identity_does_not_consume_active_source_limit(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "kb"
+    first = tmp_path / "first.md"
+    first.write_text("first", encoding="utf-8")
+    kb = KnowledgeBase.create(
+        str(root), limits=KnowledgeBaseLimits(max_sources=1)
+    )
+    kb.add_source(LocalFileSourceConfig(source_id="legacy", path=str(first)))
+    kb.sync()
+
+    kb.remove_source("legacy")
+    kb.add_source(LocalFileSourceConfig(path=str(tmp_path / "second.md")))
+
+    assert len(kb.list_sources()) == 1
+
+
+@pytest.mark.parametrize("explicit_id", [False, True])
+def test_remove_without_legacy_history_does_not_create_tombstone(
+    tmp_path: Path, explicit_id: bool
+) -> None:
+    root = tmp_path / "kb"
+    source = tmp_path / "unused.md"
+    kb = KnowledgeBase.create(str(root))
+    registration = (
+        LocalFileSourceConfig(source_id="unused", path=str(source))
+        if explicit_id
+        else LocalFileSourceConfig(path=str(source))
+    )
+    kb.add_source(registration)
+
+    kb.remove_source(registration.source_id)
+
+    manifest = json.loads(root.joinpath("manifest.json").read_text(encoding="utf-8"))
+    assert manifest["retired_sources"] == []
+
+
+def test_remove_auto_identity_with_history_does_not_create_tombstone(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "kb"
+    source = tmp_path / "auto.md"
+    source.write_text("auto", encoding="utf-8")
+    kb = KnowledgeBase.create(str(root))
+    registration = LocalFileSourceConfig(path=str(source))
+    kb.add_source(registration)
+    kb.sync()
+
+    kb.remove_source(registration.source_id)
+
+    manifest = json.loads(root.joinpath("manifest.json").read_text(encoding="utf-8"))
+    assert manifest["retired_sources"] == []
+
+
+def test_unregister_readded_legacy_source_preserves_retired_identity(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "kb"
+    source = tmp_path / "legacy.md"
+    source.write_text("legacy", encoding="utf-8")
+    kb = KnowledgeBase.create(str(root))
+    kb.add_source(LocalFileSourceConfig(source_id="docs", path=str(source)))
+    kb.sync()
+    kb.remove_source("docs")
+    kb.add_source(LocalFileSourceConfig(path=str(source)))
+
+    kb.unregister_source("docs")
+    kb.add_source(LocalFileSourceConfig(path=str(source)))
+
+    assert kb.list_sources()[0].source_id == "docs"
 
 
 def test_unlock_failure_after_success_does_not_reverse_commit_or_retain_lock(

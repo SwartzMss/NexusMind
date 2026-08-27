@@ -286,6 +286,22 @@ def test_decode_v1_manifest_migrates_without_retired_sources() -> None:
     assert decoded.retired_sources == ()
 
 
+@pytest.mark.parametrize("retired_sources", [None, 1, {}])
+def test_decode_v2_manifest_rejects_non_array_retired_sources(
+    retired_sources: object,
+) -> None:
+    value = {
+        "format_version": "2",
+        "knowledge_base_id": "kb",
+        "display_name": None,
+        "sources": [],
+        "retired_sources": retired_sources,
+    }
+
+    with pytest.raises(KnowledgeBaseConfigError, match="retired_sources must be an array"):
+        decode_manifest(encoded(value), KnowledgeBaseLimits())
+
+
 @pytest.mark.parametrize(
     "change",
     [

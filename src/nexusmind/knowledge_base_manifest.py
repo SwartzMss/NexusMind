@@ -137,7 +137,7 @@ class KnowledgeBaseManifest:
                 raise KnowledgeBaseConfigError("display_name exceeds configured limit")
         if type(self.sources) is not tuple or type(self.retired_sources) is not tuple:
             raise KnowledgeBaseConfigError("source collections must be exact tuples")
-        if len(self.sources) + len(self.retired_sources) > active_limits.max_sources:
+        if len(self.sources) > active_limits.max_sources:
             raise KnowledgeBaseConfigError("source count exceeds configured limit")
         normalized_active: list[RegisteredSourceConfig] = []
         normalized_retired: list[RegisteredSourceConfig] = []
@@ -298,6 +298,8 @@ def decode_manifest(data: bytes, limits: KnowledgeBaseLimits) -> KnowledgeBaseMa
         raise KnowledgeBaseConfigError("display_name must be text or null")
     if type(root["sources"]) is not list:
         raise KnowledgeBaseConfigError("sources must be an array")
+    if version == "2" and type(root["retired_sources"]) is not list:
+        raise KnowledgeBaseConfigError("retired_sources must be an array")
     sources = tuple(_decode_source(item) for item in root["sources"])
     retired_sources = (
         tuple(_decode_source(item) for item in root["retired_sources"])

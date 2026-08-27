@@ -928,6 +928,7 @@ class KnowledgeBase:
 
         old_manifest = self._manifest
         old_snapshot = self._collection.snapshot()
+        preserve_identity = self._requires_retired_identity(registration, old_snapshot)
         try:
             staging = self._new_collection(self._index_factory, self._limits)
             staging.restore(old_snapshot)
@@ -943,7 +944,7 @@ class KnowledgeBase:
                     for item in self._manifest.retired_sources
                     if item.type != registration.type or item.path != registration.path
                 )
-                + (registration,),
+                + ((registration,) if preserve_identity else ()),
                 limits=self._limits,
             )
             encode_manifest(candidate, self._limits)
@@ -1007,19 +1008,40 @@ class KnowledgeBase:
         )
         if registration is None:
             raise KnowledgeBaseSourceError("source_id is not registered")
-        if any(item.source_id == source_id for item in self._collection.snapshot().sources):
+        snapshot = self._collection.snapshot()
+        if any(item.source_id == source_id for item in snapshot.sources):
             raise KnowledgeBaseSourceError("synchronized source cannot be unregistered")
+        preserve_identity = self._requires_retired_identity(registration, snapshot)
         candidate = KnowledgeBaseManifest(
             knowledge_base_id=self._manifest.knowledge_base_id,
             display_name=self._manifest.display_name,
             sources=tuple(
                 item for item in self._manifest.sources if item.source_id != source_id
             ),
-            retired_sources=self._manifest.retired_sources,
+            retired_sources=tuple(
+                item
+                for item in self._manifest.retired_sources
+                if item.type != registration.type or item.path != registration.path
+            )
+            + ((registration,) if preserve_identity else ()),
             limits=self._limits,
         )
         self._persist_manifest(candidate)
         self._manifest = candidate
+
+    @staticmethod
+    def _requires_retired_identity(
+        registration: RegisteredSourceConfig,
+        snapshot: KnowledgeSnapshot,
+    ) -> bool:
+        automatic_id = type(registration)(path=registration.path).source_id
+        has_history = any(
+            source.source_id == registration.source_id for source in snapshot.sources
+        ) or any(
+            version.source_id == registration.source_id
+            for version in snapshot.document_versions
+        )
+        return registration.source_id != automatic_id and has_history
 
     def _persist_manifest(self, candidate: KnowledgeBaseManifest) -> None:
         try:
