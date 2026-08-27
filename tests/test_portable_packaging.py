@@ -60,3 +60,23 @@ def test_ci_uploads_portable_directory_without_nested_zip() -> None:
 
     assert "path: dist/nexusmind/" in text
     assert "path: dist/nexusmind-windows-portable.zip" not in text
+
+
+def test_portable_script_runs_extracted_archive_knowledge_base_e2e() -> None:
+    text = Path("scripts/build-portable.ps1").read_text(encoding="utf-8")
+
+    required = (
+        "Expand-Archive",
+        "smoke-fixture.md",
+        '"create"',
+        '"source", "add"',
+        '"sync"',
+        '"search"',
+        '"inspect"',
+        '"--json"',
+        "ConvertFrom-Json",
+        "document_count",
+    )
+    for marker in required:
+        assert marker in text
+    assert text.index("Compress-Archive") < text.index("Expand-Archive")
