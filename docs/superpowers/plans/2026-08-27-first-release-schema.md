@@ -21,14 +21,14 @@
 
 - [ ] **Step 1: Write failing first-release source and manifest contract tests**
 
-Require source constructors to reject `source_id`, require encoded manifests to contain only `format_version`, `knowledge_base_id`, `display_name`, and `sources`, and require decoding to reject format v2 and mismatched persisted IDs.
+Require source constructors to reject `source_id`, require encoded manifests to contain only `format_version`, `knowledge_base_id`, and `sources`, and require decoding to reject format v2 and mismatched persisted IDs.
 
 ```python
 with pytest.raises(TypeError):
     LocalFileSourceConfig(source_id="manual", path="notes.md")
 
 assert set(json.loads(encode_manifest(manifest(), limits))) == {
-    "format_version", "knowledge_base_id", "display_name", "sources"
+    "format_version", "knowledge_base_id", "sources"
 }
 ```
 

@@ -26,7 +26,7 @@ Set-Content -Encoding utf8 .\security-notes\keys.md "密钥轮换需要记录负
 然后创建 KnowledgeBase、注册来源、显式同步、搜索并检查 canonical 状态：
 
 ```powershell
-nexusmind create .\security-kb --name "Security Notes"
+nexusmind create .\security-kb
 nexusmind source add .\security-notes --knowledge-base .\security-kb
 nexusmind sync --knowledge-base .\security-kb
 nexusmind search "密钥轮换" --knowledge-base .\security-kb --limit 5
@@ -87,7 +87,7 @@ nexusmind-kb
 CLI 覆盖 KnowledgeBase 的创建、来源管理、同步、搜索、问答、检查与诊断：
 
 ```powershell
-nexusmind create ./security-kb --name "Security Notes"
+nexusmind create ./security-kb
 nexusmind source add ./security-notes --knowledge-base ./security-kb
 nexusmind source list --knowledge-base ./security-kb
 nexusmind sync --knowledge-base ./security-kb
@@ -100,7 +100,7 @@ nexusmind diagnose "密钥轮换" --knowledge-base ./security-kb --limit 5
 
 | 命令 | 用途 | 是否修改 KnowledgeBase |
 | --- | --- | --- |
-| `create` | 在 `./security-kb` 创建一个 KnowledgeBase，内部 ID 由程序自动生成。`--name "Security Notes"` 是展示名称。目标目录必须不存在或为空。 | 是 |
+| `create` | 在 `./security-kb` 创建一个 KnowledgeBase，内部 ID 由程序自动生成。目标目录必须不存在或为空。 | 是 |
 | `source add` | 注册 `./security-notes` 来源。程序会根据路径自动判断它是文件还是目录，并生成内部来源 ID。注册只保存配置，不会读取或索引文件。 | 是，仅注册来源 |
 | `source list` | 列出已经注册的来源类型和路径。它适合确认 `source add` 是否成功，但不能说明内容是否已经同步。 | 否 |
 | `sync` | 读取所有已注册来源，把当前文件内容提交为 canonical documents，并重建用于检索的分块和索引。以后新增、修改或删除来源文件后，需要再次运行此命令。使用 `--source ./security-notes` 可以只同步一个来源。 | 是 |
@@ -172,10 +172,7 @@ NexusMind 提供公开的 KnowledgeBase Python API。它适合将本地知识检
 ```python
 from nexusmind import KnowledgeBase, LocalDirectorySourceConfig
 
-kb = KnowledgeBase.create(
-    "./security-kb",
-    display_name="Security Notes",
-)
+kb = KnowledgeBase.create("./security-kb")
 
 registered = kb.add_source(
     LocalDirectorySourceConfig(
