@@ -31,6 +31,11 @@ from .knowledge_retrieval import (
     RetrievalStage,
     SearchHit,
 )
+from .search_diversification import (
+    RankedDocumentCandidate,
+    search_candidate_depth,
+    select_document_aware_indices,
+)
 
 
 class KnowledgeCollectionError(Exception):
@@ -329,10 +334,17 @@ class KnowledgeCollection:
         del self._sources[source_id]
 
     def search(self, query: str, *, limit: int = 10) -> tuple[KnowledgeSearchResult, ...]:
-        hits = self._index.search(query, limit=limit)
+        candidate_depth = search_candidate_depth(limit)
+        hits = self._index.search(query, limit=candidate_depth)
         if type(hits) is not tuple:
             raise KnowledgeSearchResolutionError("index search result must be a tuple")
-        return tuple(self._resolve_hit(hit) for hit in hits)
+        resolved = tuple(self._resolve_hit(hit) for hit in hits)
+        ranked = tuple(
+            RankedDocumentCandidate(item.document.document_id, item.hit.score)
+            for item in resolved
+        )
+        selected = select_document_aware_indices(ranked, limit=limit)
+        return tuple(resolved[index] for index in selected)
 
     def build_context(
         self,

@@ -117,6 +117,53 @@ class HostileIndex:
         return HostileIndex(self.returned)
 
 
+@dataclass
+class _ScriptedSearchState:
+    returned: tuple[object, ...]
+    search_calls: list[tuple[str, int]]
+
+
+class _ScriptedSearchIndex:
+    def __init__(self, state: _ScriptedSearchState) -> None:
+        self.state = state
+
+    def add(self, chunks: tuple[Chunk, ...]) -> None:
+        pass
+
+    def replace_document(self, document_id: str, chunks: tuple[Chunk, ...]) -> None:
+        pass
+
+    def remove_document(self, document_id: str) -> None:
+        pass
+
+    def search(self, query: str, *, limit: int = 10) -> tuple[object, ...]:
+        self.state.search_calls.append((query, limit))
+        return self.state.returned[:limit]
+
+    def clone(self) -> "_ScriptedSearchIndex":
+        return _ScriptedSearchIndex(self.state)
+
+
+def _scripted_hit(
+    document: Document,
+    token: str,
+    score: float,
+    matched_terms: tuple[str, ...],
+) -> SearchHit:
+    start = document.content.index(token)
+    return SearchHit(
+        Chunk(
+            document.document_id,
+            f"chunk:{token}",
+            token,
+            start,
+            start + len(token),
+        ),
+        score,
+        matched_terms,
+    )
+
+
 def test_first_sync_indexes_one_document_and_returns_summary() -> None:
     document = _document("docs", "a.txt", "checkpoint resume")
     collection = KnowledgeCollection()
@@ -224,6 +271,91 @@ def test_resolved_search_metadata_cannot_mutate_canonical_state() -> None:
     second = collection.search("searchable")[0]
     assert second.source.metadata == {"owner": "canonical"}
     assert second.document.metadata == {"tag": "canonical"}
+
+
+def test_search_diversifies_resolved_documents_without_rewriting_backend_values() -> None:
+    one = _document("docs", "one.txt", "a0 a1 a2 a3 a4")
+    two = _document("docs", "two.txt", "b0")
+    three = _document("docs", "three.txt", "c0")
+    raw_hits = (
+        _scripted_hit(one, "a0", 10.0, ("broad", "a0")),
+        _scripted_hit(one, "a1", 9.0, ("broad", "a1")),
+        _scripted_hit(one, "a2", 8.0, ("broad", "a2")),
+        _scripted_hit(one, "a3", 7.0, ("broad", "a3")),
+        _scripted_hit(one, "a4", 6.0, ("broad", "a4")),
+        _scripted_hit(two, "b0", 5.5, ("broad", "b0")),
+        _scripted_hit(three, "c0", 5.0, ("broad", "c0")),
+    )
+    state = _ScriptedSearchState(raw_hits, [])
+    collection = KnowledgeCollection(
+        index_factory=lambda: _ScriptedSearchIndex(state)  # type: ignore[arg-type]
+    )
+    collection.sync(FakeAdapter("docs", (one, two, three)))
+
+    results = collection.search("broad", limit=5)
+
+    assert state.search_calls == [("broad", 20)]
+    assert tuple(item.document.document_id for item in results) == (
+        one.document_id,
+        one.document_id,
+        one.document_id,
+        two.document_id,
+        three.document_id,
+    )
+    assert tuple(item.hit.score for item in results) == (10.0, 9.0, 8.0, 5.5, 5.0)
+    assert tuple(item.hit.matched_terms for item in results) == tuple(
+        raw_hits[index].matched_terms for index in (0, 1, 2, 5, 6)
+    )
+
+
+def test_search_backfills_one_document_and_returns_fewer_than_limit() -> None:
+    document = _document("docs", "one.txt", "a0 a1 a2")
+    raw_hits = tuple(
+        _scripted_hit(document, token, score, (token,))
+        for token, score in (("a0", 3.0), ("a1", 2.0), ("a2", 1.0))
+    )
+    state = _ScriptedSearchState(raw_hits, [])
+    collection = KnowledgeCollection(
+        index_factory=lambda: _ScriptedSearchIndex(state)  # type: ignore[arg-type]
+    )
+    collection.sync(FakeAdapter("docs", (document,)))
+
+    results = collection.search("a", limit=5)
+
+    assert tuple(item.hit for item in results) == raw_hits
+    assert state.search_calls == [("a", 20)]
+
+
+def test_search_validates_every_oversampled_candidate_before_selection() -> None:
+    document = _document("docs", "one.txt", "a0 a1 a2")
+    returned: tuple[object, ...] = (
+        _scripted_hit(document, "a0", 3.0, ("a0",)),
+        _scripted_hit(document, "a1", 2.0, ("a1",)),
+        _scripted_hit(document, "a2", 1.0, ("a2",)),
+        object(),
+    )
+    state = _ScriptedSearchState(returned, [])
+    collection = KnowledgeCollection(
+        index_factory=lambda: _ScriptedSearchIndex(state)  # type: ignore[arg-type]
+    )
+    collection.sync(FakeAdapter("docs", (document,)))
+
+    with pytest.raises(KnowledgeSearchResolutionError, match="SearchHit"):
+        collection.search("a", limit=1)
+
+    assert state.search_calls == [("a", 4)]
+
+
+def test_search_rejects_limit_above_candidate_bound_before_backend_call() -> None:
+    state = _ScriptedSearchState((), [])
+    collection = KnowledgeCollection(
+        index_factory=lambda: _ScriptedSearchIndex(state)  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(ValueError, match="at most 100"):
+        collection.search("query", limit=101)
+
+    assert state.search_calls == []
 
 
 @pytest.mark.parametrize(
