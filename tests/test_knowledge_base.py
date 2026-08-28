@@ -47,7 +47,6 @@ def _write_fixture(
         root / "manifest.json",
         KnowledgeBaseManifest(
             knowledge_base_id="fixture",
-            display_name="Fixture",
             sources=(registration,),
         ),
         KnowledgeBaseLimits(),
@@ -82,9 +81,7 @@ def test_create_new_and_existing_empty_directories_with_exact_layout(tmp_path: P
     for root in (tmp_path / "new", tmp_path / "empty"):
         if root.name == "empty":
             root.mkdir()
-        kb = KnowledgeBase.create(
-            str(root), knowledge_base_id="security", display_name="Security"
-        )
+        kb = KnowledgeBase.create(str(root), knowledge_base_id="security")
         assert set(item.name for item in root.iterdir()) == {
             "manifest.json",
             "knowledge.db",
@@ -92,12 +89,10 @@ def test_create_new_and_existing_empty_directories_with_exact_layout(tmp_path: P
         }
         assert root.joinpath(".knowledge-base.lock").read_bytes() == b"\0"
         assert root.joinpath("manifest.json").read_bytes() == (
-            b'{"display_name":"Security","format_version":"1",'
-            b'"knowledge_base_id":"security","sources":[]}\n'
+            b'{"format_version":"1","knowledge_base_id":"security","sources":[]}\n'
         )
         assert kb.status() == KnowledgeBaseStatus(
             knowledge_base_id="security",
-            display_name="Security",
             registered_source_count=0,
             canonical_source_count=0,
             document_count=0,
@@ -124,9 +119,10 @@ def test_create_rejects_invalid_roots_and_non_text_paths(tmp_path: Path) -> None
 
 def test_open_reopens_identity_and_rejects_missing_or_corrupt_layout(tmp_path: Path) -> None:
     root = tmp_path / "base"
-    KnowledgeBase.create(str(root), knowledge_base_id="kb", display_name="Name").close()
-    assert KnowledgeBase.open(str(root)).status().knowledge_base_id == "kb"
-    assert KnowledgeBase.open(str(root)).status().display_name == "Name"
+    KnowledgeBase.create(str(root), knowledge_base_id="kb").close()
+    status = KnowledgeBase.open(str(root)).status()
+    assert status.knowledge_base_id == "kb"
+    assert not hasattr(status, "display_name")
 
     for missing in ("manifest.json", "knowledge.db"):
         broken = tmp_path / f"missing-{missing}"
@@ -144,6 +140,13 @@ def test_open_reopens_identity_and_rejects_missing_or_corrupt_layout(tmp_path: P
         KnowledgeBase.open(str(corrupt))
     assert "private" not in str(caught.value)
     assert str(corrupt) not in str(caught.value)
+
+
+def test_create_rejects_removed_display_name(tmp_path: Path) -> None:
+    with pytest.raises(TypeError, match="display_name"):
+        KnowledgeBase.create(  # type: ignore[call-arg]
+            str(tmp_path / "kb"), display_name="Name"
+        )
 
 
 @pytest.mark.parametrize("payload", [b"", b"not a sqlite database: private-token"])
@@ -498,7 +501,7 @@ def test_open_restores_default_unicode_cjk_index_offline(tmp_path: Path) -> None
 
     kb = KnowledgeBase.open(str(root))
 
-    assert kb.status() == KnowledgeBaseStatus("fixture", "Fixture", 1, 1, 1)
+    assert kb.status() == KnowledgeBaseStatus("fixture", 1, 1, 1)
     result = kb.search("语义检索")[0]
     assert result.document.content == "知识图谱支持语义检索"
     assert result.hit.matched_terms == ("语义", "义检", "检索")
@@ -520,9 +523,7 @@ def test_open_accepts_unsynchronized_registration(tmp_path: Path) -> None:
     )
     SQLiteKnowledgeSnapshotStore(root / "knowledge.db")
 
-    assert KnowledgeBase.open(str(root)).status() == KnowledgeBaseStatus(
-        "kb", None, 1, 0, 0
-    )
+    assert KnowledgeBase.open(str(root)).status() == KnowledgeBaseStatus("kb", 1, 0, 0)
 
 
 def test_open_restores_more_than_collection_default_source_limit(tmp_path: Path) -> None:

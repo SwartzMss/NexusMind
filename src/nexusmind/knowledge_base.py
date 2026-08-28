@@ -202,7 +202,6 @@ class KnowledgeBase:
         path: str,
         *,
         knowledge_base_id: str | None = None,
-        display_name: str | None = None,
         index_factory: Callable[[], CloneableChunkIndex] | None = None,
         limits: KnowledgeBaseLimits | None = None,
         answer_generator: AnswerGenerator | None = None,
@@ -225,7 +224,6 @@ class KnowledgeBase:
             knowledge_base_id=(
                 knowledge_base_id if knowledge_base_id is not None else str(uuid4())
             ),
-            display_name=display_name,
             limits=active_limits,
         )
         factory = cls._validate_factory(index_factory)
@@ -580,7 +578,6 @@ class KnowledgeBase:
         snapshot = self._collection.snapshot()
         return KnowledgeBaseStatus(
             self._manifest.knowledge_base_id,
-            self._manifest.display_name,
             len(self._manifest.sources),
             len(snapshot.sources),
             len(snapshot.documents),
@@ -659,7 +656,6 @@ class KnowledgeBase:
             )
             status = KnowledgeBaseStatus(
                 manifest.knowledge_base_id,
-                manifest.display_name,
                 len(manifest.sources),
                 len(snapshot.sources),
                 len(document_inspections),
@@ -860,7 +856,6 @@ class KnowledgeBase:
             raise KnowledgeBaseSourceError("source_id is already registered")
         candidate = KnowledgeBaseManifest(
             knowledge_base_id=self._manifest.knowledge_base_id,
-            display_name=self._manifest.display_name,
             sources=self._manifest.sources + (normalized,),
             limits=self._limits,
         )
@@ -903,7 +898,6 @@ class KnowledgeBase:
             staging.remove_source(source_id)
             candidate = KnowledgeBaseManifest(
                 knowledge_base_id=self._manifest.knowledge_base_id,
-                display_name=self._manifest.display_name,
                 sources=tuple(
                     item for item in self._manifest.sources if item.source_id != source_id
                 ),
@@ -975,7 +969,6 @@ class KnowledgeBase:
             raise KnowledgeBaseSourceError("synchronized source cannot be unregistered")
         candidate = KnowledgeBaseManifest(
             knowledge_base_id=self._manifest.knowledge_base_id,
-            display_name=self._manifest.display_name,
             sources=tuple(
                 item for item in self._manifest.sources if item.source_id != source_id
             ),
