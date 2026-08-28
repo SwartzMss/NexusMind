@@ -111,12 +111,9 @@ class KnowledgeBaseUIController:
     def view(self) -> KnowledgeBaseUIView:
         return self._view
 
-    def create(self, root: str, display_name: str = "") -> None:
+    def create(self, root: str) -> None:
         self._replace_knowledge_base(
-            lambda: self._create(
-                root,
-                display_name=display_name or None,
-            ),
+            lambda: self._create(root),
             "KnowledgeBase created.",
         )
 
@@ -369,7 +366,6 @@ class KnowledgeBaseTkApp:
         lifecycle = _ttk.LabelFrame(shell, text="KnowledgeBase", padding=8)
         lifecycle.pack(fill="x")
         self.root_path = _tk.StringVar()
-        self.display_name = _tk.StringVar()
         self.search_query = _tk.StringVar()
         self.search_limit = _tk.StringVar(value=str(DEFAULT_SEARCH_LIMIT))
         self.message = _tk.StringVar(value="Create or open a KnowledgeBase.")
@@ -382,14 +378,8 @@ class KnowledgeBaseTkApp:
         _ttk.Button(
             lifecycle, text="Choose directory", command=self._choose_root
         ).grid(row=0, column=2)
-        _ttk.Label(lifecycle, text="Display name:").grid(
-            row=1, column=0, sticky="w"
-        )
-        _ttk.Entry(lifecycle, textvariable=self.display_name, width=30).grid(
-            row=1, column=1, sticky="ew"
-        )
-        self._button(lifecycle, "Create", self._start_create).grid(row=2, column=1, sticky="e")
-        self._button(lifecycle, "Open", self._start_open).grid(row=2, column=2)
+        self._button(lifecycle, "Create", self._start_create).grid(row=1, column=1, sticky="e")
+        self._button(lifecycle, "Open", self._start_open).grid(row=1, column=2)
         _ttk.Label(shell, textvariable=self.status_text).pack(fill="x", pady=(8, 0))
         _ttk.Label(shell, textvariable=self.message, foreground="#8b1a1a").pack(fill="x")
 
@@ -435,10 +425,7 @@ class KnowledgeBaseTkApp:
 
     def _start_create(self) -> None:
         root = self.root_path.get()
-        display_name = self.display_name.get()
-        self._background(
-            lambda: self._controller.create(root, display_name)
-        )
+        self._background(lambda: self._controller.create(root))
 
     def _start_open(self) -> None:
         root = self.root_path.get()
@@ -510,9 +497,7 @@ class KnowledgeBaseTkApp:
         if view.status is None:
             self.status_text.set("No KnowledgeBase open")
         else:
-            display = view.status.display_name or "—"
             self.status_text.set(
-                f"Name: {display} | "
                 f"Registered: {view.status.registered_source_count} | "
                 f"Canonical: {view.status.canonical_source_count} | "
                 f"Documents: {view.status.document_count}"

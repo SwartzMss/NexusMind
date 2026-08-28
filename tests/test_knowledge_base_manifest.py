@@ -34,7 +34,6 @@ LIMIT_DEFAULTS = {
     "max_manifest_bytes": 1_000_000,
     "max_sources": 1_000,
     "max_knowledge_base_id_chars": 256,
-    "max_display_name_chars": 1_024,
     "max_source_id_chars": 256,
     "max_path_chars": 32_768,
 }
@@ -53,7 +52,6 @@ def source(
 def manifest(**changes: object) -> KnowledgeBaseManifest:
     values: dict[str, object] = {
         "knowledge_base_id": "kb",
-        "display_name": None,
         "sources": (),
     }
     values.update(changes)
@@ -141,12 +139,6 @@ def test_manifest_id_must_be_non_empty_text(knowledge_base_id: object) -> None:
         manifest(knowledge_base_id=knowledge_base_id)
 
 
-@pytest.mark.parametrize("display_name", ["", " ", "\t", "\r\n", 1, False])
-def test_display_name_must_be_none_or_non_empty_text(display_name: object) -> None:
-    with pytest.raises(KnowledgeBaseConfigError):
-        manifest(display_name=display_name)
-
-
 def test_manifest_requires_exact_tuple_supported_unique_sources_and_sorts() -> None:
     a = source("a", str(ABSOLUTE_BASE / "a"))
     b = LocalDirectorySourceConfig(path=str(ABSOLUTE_BASE / "b"))
@@ -168,15 +160,10 @@ def test_manifest_requires_exact_tuple_supported_unique_sources_and_sorts() -> N
     assert tuple(item.source_id for item in value.sources) == tuple(
         sorted((a.source_id, b.source_id))
     )
-    with pytest.raises(FrozenInstanceError):
-        value.display_name = "changed"
-
-
 def test_manifest_normalizes_paths_and_enforces_all_configured_bounds(tmp_path: Path) -> None:
     relative = LocalFileSourceConfig(path="relative/../file.txt")
     value = KnowledgeBaseManifest(
         knowledge_base_id="kb",
-        display_name="name",
         sources=(relative,),
         limits=KnowledgeBaseLimits(max_sources=1, max_path_chars=32_768),
     )
@@ -185,29 +172,27 @@ def test_manifest_normalizes_paths_and_enforces_all_configured_bounds(tmp_path: 
 
     cases = [
         ({"knowledge_base_id": "xx"}, KnowledgeBaseLimits(max_knowledge_base_id_chars=1)),
-        ({"display_name": "xx"}, KnowledgeBaseLimits(max_display_name_chars=1)),
         ({"sources": (source("xx"),)}, KnowledgeBaseLimits(max_source_id_chars=35)),
         ({"sources": (source(path="/too-long"),)}, KnowledgeBaseLimits(max_path_chars=1)),
         ({"sources": (source("a"), source("b"))}, KnowledgeBaseLimits(max_sources=1)),
     ]
     for changes, limits in cases:
         with pytest.raises(KnowledgeBaseConfigError):
-            KnowledgeBaseManifest(limits=limits, **({"knowledge_base_id": "kb", "display_name": None, "sources": ()} | changes))
+            KnowledgeBaseManifest(limits=limits, **({"knowledge_base_id": "kb", "sources": ()} | changes))
 
 
 def test_codec_is_exact_utf8_deterministic_and_order_independent() -> None:
     limits = KnowledgeBaseLimits()
     empty = manifest()
     assert encode_manifest(empty, limits) == (
-        b'{"display_name":null,"format_version":"1",'
-        b'"knowledge_base_id":"kb","sources":[]}\n'
+        b'{"format_version":"1","knowledge_base_id":"kb","sources":[]}\n'
     )
     assert decode_manifest(encode_manifest(empty, limits), limits) == empty
 
     a = source("a", str(ABSOLUTE_BASE / "\u4e2d"))
     b = LocalDirectorySourceConfig(path=str(ABSOLUTE_BASE / "b"))
-    first = manifest(display_name="\u77e5\u8bc6", sources=(b, a))
-    second = manifest(display_name="\u77e5\u8bc6", sources=(a, b))
+    first = manifest(sources=(b, a))
+    second = manifest(sources=(a, b))
     assert encode_manifest(first, limits) == encode_manifest(second, limits)
     assert b"\\u" not in encode_manifest(first, limits)
     encoded_sources = []
@@ -217,8 +202,9 @@ def test_codec_is_exact_utf8_deterministic_and_order_independent() -> None:
             % (json.dumps(item.path, ensure_ascii=False), item.source_id, item.type)
         )
     exact_two_source_json = (
-        '{"display_name":"\u77e5\u8bc6","format_version":"1",'
-        '"knowledge_base_id":"kb","sources":[' + ",".join(encoded_sources) + "]}\n"
+        '{"format_version":"1","knowledge_base_id":"kb","sources":['
+        + ",".join(encoded_sources)
+        + "]}\n"
     ).encode("utf-8")
     assert encode_manifest(first, limits) == exact_two_source_json
     assert decode_manifest(encode_manifest(first, limits), limits) == first
@@ -259,11 +245,11 @@ def test_decode_checks_byte_limit_before_decoding() -> None:
     "change",
     [
         {"extra": 1},
-        {"remove": "display_name"},
+        {"remove": "knowledge_base_id"},
+        {"display_name": None},
         {"format_version": "3"},
         {"format_version": 1},
         {"knowledge_base_id": 1},
-        {"display_name": 1},
         {"sources": None},
         {"sources": {}},
     ],
@@ -272,7 +258,6 @@ def test_decode_rejects_root_schema_violations(change: dict[str, object]) -> Non
     value: dict[str, object] = {
         "format_version": "1",
         "knowledge_base_id": "kb",
-        "display_name": None,
         "sources": [],
     }
     removed = change.pop("remove", None)
@@ -287,7 +272,6 @@ def test_decode_rejects_source_id_not_derived_from_type_and_path() -> None:
     value = {
         "format_version": "1",
         "knowledge_base_id": "kb",
-        "display_name": None,
         "sources": [
             {
                 "config_version": "1",
@@ -330,7 +314,7 @@ def test_decode_rejects_source_schema_violations(change: dict[str, object]) -> N
     if removed:
         del item[str(removed)]
     item.update(change)
-    root = {"format_version": "1", "knowledge_base_id": "kb", "display_name": None, "sources": [item]}
+    root = {"format_version": "1", "knowledge_base_id": "kb", "sources": [item]}
     with pytest.raises(KnowledgeBaseConfigError):
         decode_manifest(encoded(root), KnowledgeBaseLimits())
 
@@ -338,7 +322,7 @@ def test_decode_rejects_source_schema_violations(change: dict[str, object]) -> N
 def test_decode_rejects_duplicate_source_ids_and_oversized_decoded_values() -> None:
     path = str(ABSOLUTE_BASE / "a")
     item = {"config_version": "1", "source_id": LocalFileSourceConfig(path=path).source_id, "type": "local_file", "path": path}
-    root = {"format_version": "1", "knowledge_base_id": "kb", "display_name": None, "sources": [item, item]}
+    root = {"format_version": "1", "knowledge_base_id": "kb", "sources": [item, item]}
     with pytest.raises(KnowledgeBaseConfigError):
         decode_manifest(encoded(root), KnowledgeBaseLimits())
     with pytest.raises(KnowledgeBaseConfigError):
@@ -379,7 +363,6 @@ def test_embedded_nul_path_is_controlled_during_construction_and_decode() -> Non
     root = {
         "format_version": "1",
         "knowledge_base_id": "kb",
-        "display_name": None,
         "sources": [item],
     }
     with pytest.raises(KnowledgeBaseConfigError):
@@ -501,7 +484,7 @@ def test_atomic_writer_cleans_up_after_each_failure(
 
 def test_write_and_read_manifest_atomically_without_leaving_temporary_files(tmp_path: Path) -> None:
     path = tmp_path / "manifest.json"
-    value = manifest(display_name="Knowledge")
+    value = manifest()
     write_manifest(path, value, KnowledgeBaseLimits())
     assert path.read_bytes() == encode_manifest(value, KnowledgeBaseLimits())
     assert read_manifest(path, KnowledgeBaseLimits()) == value

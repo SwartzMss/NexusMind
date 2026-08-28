@@ -61,10 +61,6 @@ class _SearchOnlyIndex:
         ("knowledge_base_id", _TextSubclass("kb"), TypeError),
         ("knowledge_base_id", "", ValueError),
         ("knowledge_base_id", "  ", ValueError),
-        ("display_name", 1, TypeError),
-        ("display_name", _TextSubclass("Docs"), TypeError),
-        ("display_name", "", ValueError),
-        ("display_name", "\t", ValueError),
         ("registered_source_count", True, TypeError),
         ("registered_source_count", 1.0, TypeError),
         ("registered_source_count", -1, ValueError),
@@ -81,7 +77,6 @@ def test_knowledge_base_status_rejects_invalid_exact_public_fields(
 ) -> None:
     values: dict[str, object] = {
         "knowledge_base_id": "kb",
-        "display_name": None,
         "registered_source_count": 0,
         "canonical_source_count": 0,
         "document_count": 0,
@@ -106,7 +101,7 @@ def test_public_knowledge_base_inspection_values_are_strict_frozen_and_slotted(
     KnowledgeSourceSyncStatus = nexusmind.KnowledgeSourceSyncStatus
     InspectionKnowledgeBaseStatus = inspection_module.KnowledgeBaseStatus
     config = LocalFileSourceConfig(path=str(tmp_path / "docs.txt"))
-    status = KnowledgeBaseStatus("kb", "Knowledge", 1, 1, 1)
+    status = KnowledgeBaseStatus("kb", 1, 1, 1)
     source = KnowledgeSourceInspection(
         config, KnowledgeSourceSyncStatus.SYNCED, 1, 2
     )
@@ -223,7 +218,7 @@ def test_inspect_reports_pending_nonempty_and_zero_document_sources_coherently(
     empty = tmp_path / "empty"
     empty.mkdir()
     root = tmp_path / "kb"
-    kb = KnowledgeBase.create(str(root), knowledge_base_id="kb", display_name="Docs")
+    kb = KnowledgeBase.create(str(root), knowledge_base_id="kb")
     pending = kb.add_source(
         LocalFileSourceConfig(path=str(tmp_path / "missing.txt"))
     )
@@ -263,7 +258,7 @@ def test_inspect_reports_pending_nonempty_and_zero_document_sources_coherently(
     inspection = kb.inspect()
 
     assert type(inspection) is nexusmind.KnowledgeBaseInspection
-    assert inspection.status == kb.status() == KnowledgeBaseStatus("kb", "Docs", 3, 2, 2)
+    assert inspection.status == kb.status() == KnowledgeBaseStatus("kb", 3, 2, 2)
     expected_sources = {
         pending.source_id: (nexusmind.KnowledgeSourceSyncStatus.REGISTERED, 0, 0),
         registered_docs.source_id: (nexusmind.KnowledgeSourceSyncStatus.SYNCED, 2, 2),

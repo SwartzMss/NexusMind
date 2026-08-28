@@ -37,3 +37,11 @@ def test_readme_documents_windows_portable_runtime() -> None:
     ):
         assert required in readme
     assert "%USERPROFILE%\\.nexusmind\\" not in readme
+
+
+def test_readme_documents_path_only_knowledge_base_creation() -> None:
+    readme = (Path(__file__).parents[1] / "README.md").read_text(encoding="utf-8")
+
+    assert "nexusmind create ./security-kb\n" in readme
+    assert '--name "Security Notes"' not in readme
+    assert 'display_name="Security Notes"' not in readme

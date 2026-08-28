@@ -4,6 +4,8 @@ import json
 import logging
 from uuid import UUID
 
+import pytest
+
 from nexusmind import (
     cli,
 )
@@ -22,7 +24,7 @@ def test_cli_create_add_sync_search_inspect_and_remove(tmp_path, capsys, caplog,
     (source / "security.md").write_text("密钥轮换需要记录新的版本。", encoding="utf-8")
     root = tmp_path / "kb"
 
-    assert cli.main(["create", str(root), "--name", "Security"]) == 0
+    assert cli.main(["create", str(root)]) == 0
     assert cli.main(["source", "add", str(source), "--knowledge-base", str(root)]) == 0
     assert cli.main(["source", "list", "--knowledge-base", str(root), "--json"]) == 0
     sources = json.loads(capsys.readouterr().out.splitlines()[-1])
@@ -46,11 +48,12 @@ def test_cli_create_add_sync_search_inspect_and_remove(tmp_path, capsys, caplog,
     assert cli.main(["inspect", "--knowledge-base", str(root), "--json"]) == 0
     inspection = json.loads(capsys.readouterr().out.splitlines()[-1])
     UUID(inspection["status"]["knowledge_base_id"])
+    assert "display_name" not in inspection["status"]
     assert inspection["status"]["document_count"] == 1
 
     assert cli.main(["inspect", "--knowledge-base", str(root)]) == 0
     plain_inspection = capsys.readouterr().out
-    assert "KnowledgeBase: Security" in plain_inspection
+    assert f"KnowledgeBase: {root.resolve()}" in plain_inspection
     assert inspection["status"]["knowledge_base_id"] not in plain_inspection
 
     assert cli.main(["diagnose", "密钥轮换", "--knowledge-base", str(root), "--json"]) == 0
@@ -70,6 +73,20 @@ def test_cli_help_exposes_only_knowledge_commands(capsys) -> None:
         assert command in output
     for removed in ("chat", "tools", "runs", "mcp", "skill"):
         assert removed not in output
+
+
+def test_create_help_has_no_name_option(capsys) -> None:
+    with pytest.raises(SystemExit) as raised:
+        cli._parser().parse_args(["create", "--help"])
+    assert raised.value.code == 0
+    assert "--name" not in capsys.readouterr().out
+
+
+def test_create_rejects_name_option(capsys) -> None:
+    with pytest.raises(SystemExit) as raised:
+        cli._parser().parse_args(["create", "kb", "--name", "Name"])
+    assert raised.value.code == 2
+    assert "unrecognized arguments: --name Name" in capsys.readouterr().err
 
 
 def test_cli_source_remove_rejects_internal_id_selector(capsys) -> None:

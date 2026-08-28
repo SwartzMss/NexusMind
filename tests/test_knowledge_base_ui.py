@@ -39,7 +39,7 @@ class FakeKnowledgeBase:
     def status(self) -> KnowledgeBaseStatus:
         self.calls.append("status")
         return KnowledgeBaseStatus(
-            "kb", "Docs", len(self.sources), self.canonical_source_count, self.document_count
+            "kb", len(self.sources), self.canonical_source_count, self.document_count
         )
 
     def list_sources(self):
@@ -110,19 +110,15 @@ def test_create_and_open_delegate_to_injected_knowledge_base_boundary() -> None:
         return opened
 
     controller = KnowledgeBaseUIController(create=create, open_existing=open_existing)
-    controller.create("new-root", "My KB")
+    controller.create("new-root")
     controller.open("existing-root")
 
     assert calls == [
-        (
-            "create",
-            "new-root",
-            {"display_name": "My KB"},
-        ),
+        ("create", "new-root", {}),
         ("open", "existing-root"),
     ]
     assert created.calls[-1] == "close"
-    assert controller.view.status == KnowledgeBaseStatus("kb", "Docs", 0, 0, 0)
+    assert controller.view.status == KnowledgeBaseStatus("kb", 0, 0, 0)
 
 
 def test_file_and_directory_registration_do_not_implicitly_sync() -> None:
@@ -182,7 +178,7 @@ def test_status_is_rendered_only_from_knowledge_base_status() -> None:
     )
     controller = _controller(fake)
 
-    assert controller.view.status == KnowledgeBaseStatus("kb", "Docs", 1, 1, 7)
+    assert controller.view.status == KnowledgeBaseStatus("kb", 1, 1, 7)
 
 
 def test_search_preserves_order_limit_and_provenance() -> None:
@@ -224,6 +220,7 @@ def test_render_translates_internal_source_ids_to_paths() -> None:
 
     app._render()
 
+    assert app.status_text.get() == "Registered: 2 | Canonical: 2 | Documents: 0"
     sync_output = app.sync_text.items[0]
     search_output = app.results.items[0]
     assert r"C:\knowledge\android" in sync_output
@@ -393,7 +390,7 @@ def _window(controller: object) -> tuple[KnowledgeBaseTkApp, FakeRoot]:
     return app, root
 
 
-def test_create_form_hides_internal_id_and_labels_display_name() -> None:
+def test_create_form_only_asks_for_root() -> None:
     app, _ = _window(KnowledgeBaseUIController())
     entries = {
         item.kwargs.get("textvariable"): item
@@ -402,11 +399,13 @@ def test_create_form_hides_internal_id_and_labels_display_name() -> None:
     }
     labels = {item.kwargs.get("text") for item in FakeWidget.instances}
 
-    assert {"Destination:", "Display name:"} <= labels
+    assert "Destination:" in labels
+    assert "Display name:" not in labels
     assert "ID:" not in labels
-    assert entries[app.display_name].layout == (
+    assert not hasattr(app, "display_name")
+    assert entries[app.root_path].layout == (
         "grid",
-        {"row": 1, "column": 1, "sticky": "ew"},
+        {"row": 0, "column": 1, "sticky": "ew"},
     )
 
 

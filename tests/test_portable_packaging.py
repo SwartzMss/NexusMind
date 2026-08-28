@@ -88,6 +88,8 @@ def test_portable_script_runs_extracted_archive_knowledge_base_e2e() -> None:
     )
     for marker in required:
         assert marker in text
+    assert '@("create", $knowledgeBasePath)' in text
+    assert '"--name"' not in text
     assert text.index("Compress-Archive") < text.index("Test-PortableArchive -ArchivePath")
 
 

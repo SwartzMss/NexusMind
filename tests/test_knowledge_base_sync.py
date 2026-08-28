@@ -397,7 +397,7 @@ def test_sync_orders_sources_persists_and_reopens_searchable_state(tmp_path: Pat
     kb = KnowledgeBase.create(str(root), knowledge_base_id="kb")
     file_registration = kb.add_source(LocalFileSourceConfig(path=str(file_path)))
     directory_registration = kb.add_source(LocalDirectorySourceConfig(path=str(directory)))
-    assert kb.status() == KnowledgeBaseStatus("kb", None, 2, 0, 0)
+    assert kb.status() == KnowledgeBaseStatus("kb", 2, 0, 0)
 
     results = kb.sync()
     expected_ids = tuple(
@@ -410,7 +410,7 @@ def test_sync_orders_sources_persists_and_reopens_searchable_state(tmp_path: Pat
     assert "mutated" not in kb.list_documents()[0].metadata
 
     reopened = KnowledgeBase.open(str(root))
-    assert reopened.status() == KnowledgeBaseStatus("kb", None, 2, 2, 2)
+    assert reopened.status() == KnowledgeBaseStatus("kb", 2, 2, 2)
     assert tuple(item.source_id for item in reopened.list_documents()) == expected_ids
     assert reopened.search("knowledge")
 

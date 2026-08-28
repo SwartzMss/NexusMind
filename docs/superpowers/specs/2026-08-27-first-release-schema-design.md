@@ -31,7 +31,7 @@ must be rebased onto `main` after #105 merges.
 ## Manifest and source identity
 
 `KnowledgeBaseManifest.format_version` becomes `"1"`. Its only root fields are
-`format_version`, `knowledge_base_id`, `display_name`, and `sources`.
+`format_version`, `knowledge_base_id`, and `sources`.
 `retired_sources` and all tombstone matching, consumption, quota, and lifecycle
 logic are removed.
 

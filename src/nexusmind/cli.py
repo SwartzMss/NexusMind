@@ -27,7 +27,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nexusmind", description="Local KnowledgeBase management, retrieval, and cited answers.")
     commands = parser.add_subparsers(dest="command", required=True)
     create = commands.add_parser("create", help="create a knowledge base")
-    create.add_argument("path"); create.add_argument("--name", dest="display_name")
+    create.add_argument("path")
 
     source = commands.add_parser("source", help="manage registered sources")
     source_commands = source.add_subparsers(dest="source_command", required=True)
@@ -63,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _create(args: argparse.Namespace) -> int:
-    kb = KnowledgeBase.create(args.path, display_name=args.display_name)
+    kb = KnowledgeBase.create(args.path)
     kb.close(); print(f"Created KnowledgeBase: {args.path}"); return 0
 
 
@@ -161,8 +161,8 @@ def _inspect(args: argparse.Namespace) -> int:
             print(f"Document: {result.document.logical_path}")
             for chunk in result.chunks: print(f"{chunk.ordinal}\t{chunk.start_offset}:{chunk.end_offset}\t{chunk.preview}")
         else:
-            display = result.status.display_name or Path(args.knowledge_base).resolve(strict=False).name
-            print(f"KnowledgeBase: {display}"); print(f"Sources: {len(result.sources)}"); print(f"Documents: {len(result.documents)}")
+            root = Path(args.knowledge_base).resolve(strict=False)
+            print(f"KnowledgeBase: {root}"); print(f"Sources: {len(result.sources)}"); print(f"Documents: {len(result.documents)}")
     finally: kb.close()
     return 0
 

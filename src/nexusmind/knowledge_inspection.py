@@ -30,15 +30,12 @@ class KnowledgeBaseStatus:
     """Bounded counters describing the current canonical knowledge state."""
 
     knowledge_base_id: str
-    display_name: str | None
     registered_source_count: int
     canonical_source_count: int
     document_count: int
 
     def __post_init__(self) -> None:
         _require_nonblank_string(self.knowledge_base_id, "knowledge_base_id")
-        if self.display_name is not None:
-            _require_nonblank_string(self.display_name, "display_name")
         for field_name in (
             "registered_source_count",
             "canonical_source_count",

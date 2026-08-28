@@ -120,6 +120,10 @@ security-kb/
 
 `create()` 只接受不存在或已存在但为空的真实目录。`open()` 严格要求三个 artifact 存在、类型和身份有效，不会将缺失状态补成空库。
 
+KnowledgeBase 的公开定位符是 root path；manifest 内生成的 `knowledge_base_id`
+只承担内部持久化身份。Manifest v1 的根字段严格限定为
+`format_version`, `knowledge_base_id`, and `sources`，不维护额外的用户名称。
+
 Manifest 与 SQLite 使用各自唯一的 version 1 schema。来源 ID 由来源类型和规范化路径确定性派生；manifest 中保存的 ID 是完整性校验值，不接受调用者指定。SQLite 的完整 schema 同时包含 current sources、current documents 与不可变 document versions。非空 snapshot 必须携带 coherent version history；未知版本、不完整 schema 和缺失历史均直接拒绝，不执行迁移或历史合成。
 
 同一实例的 mutation 由进程内锁串行化；不同 handle/process 使用 no-wait OS advisory lock。锁文件缺失、成为 symlink/reparse point 或 identity 被替换时均 fail closed。

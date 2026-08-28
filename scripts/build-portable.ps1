@@ -61,7 +61,7 @@ function Test-PortableArchive {
         Push-Location -LiteralPath $releaseWorkingDirectory
         try {
             Write-Host "Portable archive E2E working directory: $releaseWorkingDirectory"
-            Invoke-PortableCommand -Executable $smokeExecutable -Arguments @("create", $knowledgeBasePath, "--name", "Release Smoke") | Out-Null
+            Invoke-PortableCommand -Executable $smokeExecutable -Arguments @("create", $knowledgeBasePath) | Out-Null
             Invoke-PortableCommand -Executable $smokeExecutable -Arguments @("source", "add", $fixturePath, "--knowledge-base", $knowledgeBasePath) | Out-Null
             Invoke-PortableCommand -Executable $smokeExecutable -Arguments @("sync", "--knowledge-base", $knowledgeBasePath, "--json") | Out-Null
             $searchJson = Invoke-PortableCommand -Executable $smokeExecutable -Arguments @("search", "release-smoke-token", "--knowledge-base", $knowledgeBasePath, "--json")

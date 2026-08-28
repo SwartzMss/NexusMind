@@ -35,7 +35,6 @@ class KnowledgeBaseLimits:
     max_manifest_bytes: int = 1_000_000
     max_sources: int = 1_000
     max_knowledge_base_id_chars: int = 256
-    max_display_name_chars: int = 1_024
     max_source_id_chars: int = 256
     max_path_chars: int = 32_768
 
@@ -114,7 +113,6 @@ def _path_identity(path: str) -> str:
 class KnowledgeBaseManifest:
     format_version: ClassVar[str] = "1"
     knowledge_base_id: str
-    display_name: str | None = None
     sources: tuple[RegisteredSourceConfig, ...] = ()
     limits: InitVar[KnowledgeBaseLimits | None] = None
 
@@ -127,10 +125,6 @@ class KnowledgeBaseManifest:
         )
         if len(knowledge_base_id) > active_limits.max_knowledge_base_id_chars:
             raise KnowledgeBaseConfigError("knowledge_base_id exceeds configured limit")
-        if self.display_name is not None:
-            display_name = _require_non_empty_text(self.display_name, "display_name")
-            if len(display_name) > active_limits.max_display_name_chars:
-                raise KnowledgeBaseConfigError("display_name exceeds configured limit")
         if type(self.sources) is not tuple:
             raise KnowledgeBaseConfigError("sources must be an exact tuple")
         if len(self.sources) > active_limits.max_sources:
@@ -164,7 +158,7 @@ class KnowledgeBaseManifest:
         )
 
 
-_ROOT_KEYS = frozenset({"format_version", "knowledge_base_id", "display_name", "sources"})
+_ROOT_KEYS = frozenset({"format_version", "knowledge_base_id", "sources"})
 _SOURCE_KEYS = frozenset({"config_version", "source_id", "type", "path"})
 _READ_CHUNK_BYTES = 64 * 1024
 
@@ -175,7 +169,6 @@ def _manifest_mapping(manifest: KnowledgeBaseManifest) -> dict[str, object]:
     return {
         "format_version": manifest.format_version,
         "knowledge_base_id": manifest.knowledge_base_id,
-        "display_name": manifest.display_name,
         "sources": [
             {
                 "config_version": item.config_version,
@@ -196,7 +189,6 @@ def encode_manifest(manifest: KnowledgeBaseManifest, limits: KnowledgeBaseLimits
         raise KnowledgeBaseConfigError("manifest must be KnowledgeBaseManifest")
     validated = KnowledgeBaseManifest(
         knowledge_base_id=manifest.knowledge_base_id,
-        display_name=manifest.display_name,
         sources=manifest.sources,
         limits=limits,
     )
@@ -285,14 +277,11 @@ def decode_manifest(data: bytes, limits: KnowledgeBaseLimits) -> KnowledgeBaseMa
     _require_exact_keys(root, _ROOT_KEYS, "manifest")
     if type(root["knowledge_base_id"]) is not str:
         raise KnowledgeBaseConfigError("knowledge_base_id must be text")
-    if root["display_name"] is not None and type(root["display_name"]) is not str:
-        raise KnowledgeBaseConfigError("display_name must be text or null")
     if type(root["sources"]) is not list:
         raise KnowledgeBaseConfigError("sources must be an array")
     sources = tuple(_decode_source(item) for item in root["sources"])
     return KnowledgeBaseManifest(
         knowledge_base_id=root["knowledge_base_id"],
-        display_name=root["display_name"],
         sources=sources,
         limits=limits,
     )
