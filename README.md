@@ -104,7 +104,7 @@ nexusmind diagnose "密钥轮换" --knowledge-base ./security-kb --limit 5
 | `source add` | 注册 `./security-notes` 来源。程序会根据路径自动判断它是文件还是目录，并生成内部来源 ID。注册只保存配置，不会读取或索引文件。 | 是，仅注册来源 |
 | `source list` | 列出已经注册的来源类型和路径。它适合确认 `source add` 是否成功，但不能说明内容是否已经同步。 | 否 |
 | `sync` | 读取所有已注册来源，把当前文件内容提交为 canonical documents，并重建用于检索的分块和索引。以后新增、修改或删除来源文件后，需要再次运行此命令。使用 `--source ./security-notes` 可以只同步一个来源。 | 是 |
-| `search` | 在已同步内容中搜索“密钥轮换”，返回相关度最高的最多 5 个分块，显示文档路径、分数和原文。它只做检索，不调用回答模型。 | 否 |
+| `search` | 在已同步内容中搜索“密钥轮换”，从 backend 的有界候选中执行 document-aware 最终选择，返回最多 5 个分块并显示文档路径、原始 backend 分数和原文。它只做检索，不调用回答模型。 | 否 |
 | `inspect` | 查看 KnowledgeBase 的整体状态，包括来源数和 canonical document 数。使用 `--document <document-id>` 可进一步查看某篇文档的分块、字符范围和预览。 | 否 |
 | `diagnose` | 对同一个搜索词输出检索管线的候选项，包含阶段、排名、分数和文档路径，用来分析为什么某篇文档命中、排序不理想或没有进入最终结果。根据所配置的后端，阶段可能包括 `lexical`、`semantic`、`fusion` 和 `reranker`。 | 否 |
 
@@ -112,7 +112,7 @@ nexusmind diagnose "密钥轮换" --knowledge-base ./security-kb --limit 5
 
 - **注册不等于同步**：`source add` 只告诉 KnowledgeBase“去哪里找资料”；`sync` 才真正读取文件。首次注册后不执行 `sync`，`search` 不会搜到这些文件。
 - **来源不等于文档**：一个 directory 来源可以产生多篇 canonical documents；`source list` 看注册配置，`inspect` 看同步后的知识状态。
-- **搜索不等于诊断**：`search` 给日常使用的最终结果；`diagnose` 暴露检索各阶段的候选项，更适合调试相关度和后端配置。
+- **搜索不等于诊断**：`search` 在 lexical、semantic、Hybrid-RRF 或 reranking 完成后，对有界候选执行 document-aware 最终选择；`--limit` 仍是最终结果数上限，选中项的 backend score 不会被改写。`diagnose` 则保留 raw backend ranking、阶段、排名和分数，更适合调试相关度和后端配置。
 
 本地来源当前只读取严格 UTF-8 编码的 `.txt`、`.md` 和 `.markdown` 文件。上述相对路径均以运行命令时的当前目录为基准。来源的内部 ID 由来源类型和规范化路径稳定派生，用户始终通过路径注册和删除来源。同一类型和路径在删除后重新注册会得到同一个 ID，因此可以继续已有文档版本链。除 `create` 外，如果省略 `--knowledge-base`，CLI 会把当前目录当作 KnowledgeBase；读取类命令可添加 `--json` 以便脚本处理。
 
