@@ -1,0 +1,78 @@
+from dataclasses import dataclass
+from math import isfinite
+
+
+SEARCH_CANDIDATE_MULTIPLIER = 4
+MAX_SEARCH_CANDIDATES = 100
+PREFERRED_RESULTS_PER_DOCUMENT = 2
+RELEVANCE_WINDOW_FACTOR = 0.25
+
+
+@dataclass(frozen=True, slots=True)
+class RankedDocumentCandidate:
+    document_id: str
+    score: float
+
+    def __post_init__(self) -> None:
+        if type(self.document_id) is not str or not self.document_id:
+            raise ValueError("document_id must be a non-empty string")
+        if type(self.score) is not float or not isfinite(self.score):
+            raise ValueError("score must be a finite float")
+
+
+def search_candidate_depth(limit: int) -> int:
+    _validate_limit(limit)
+    return min(limit * SEARCH_CANDIDATE_MULTIPLIER, MAX_SEARCH_CANDIDATES)
+
+
+def select_document_aware_indices(
+    candidates: tuple[RankedDocumentCandidate, ...], *, limit: int
+) -> tuple[int, ...]:
+    _validate_limit(limit)
+    if type(candidates) is not tuple:
+        raise TypeError("candidates must be a tuple")
+    if any(type(item) is not RankedDocumentCandidate for item in candidates):
+        raise TypeError("candidates must contain RankedDocumentCandidate values")
+    if not candidates:
+        return ()
+
+    raw_top_k = candidates[:limit]
+    scores = tuple(item.score for item in raw_top_k)
+    worst = min(scores)
+    relevance_floor = worst - RELEVANCE_WINDOW_FACTOR * (max(scores) - worst)
+
+    selected: list[int] = []
+    document_counts: dict[str, int] = {}
+    for index, candidate in enumerate(candidates):
+        if len(selected) == limit:
+            break
+        if (
+            document_counts.get(candidate.document_id, 0)
+            >= PREFERRED_RESULTS_PER_DOCUMENT
+        ):
+            continue
+        if index >= limit and candidate.score < relevance_floor:
+            continue
+        selected.append(index)
+        document_counts[candidate.document_id] = (
+            document_counts.get(candidate.document_id, 0) + 1
+        )
+
+    selected_set = set(selected)
+    for index in range(len(candidates)):
+        if len(selected) == limit:
+            break
+        if index not in selected_set:
+            selected.append(index)
+            selected_set.add(index)
+
+    return tuple(sorted(selected))
+
+
+def _validate_limit(limit: int) -> None:
+    if type(limit) is not int:
+        raise TypeError("limit must be an integer")
+    if limit <= 0:
+        raise ValueError("limit must be positive")
+    if limit > MAX_SEARCH_CANDIDATES:
+        raise ValueError(f"limit must be at most {MAX_SEARCH_CANDIDATES}")
