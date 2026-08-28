@@ -1,0 +1,48 @@
+{
+  "cases": [
+    {
+      "case_id": "broad-crypto",
+      "category": "multi_document",
+      "query": "Crypto",
+      "relevant_documents": [
+        {"source_id": "diversification-docs", "logical_path": "crypto-overview.md"},
+        {"source_id": "diversification-docs", "logical_path": "crypto-permissions.md"}
+      ]
+    },
+    {
+      "case_id": "broad-binder",
+      "category": "multi_document",
+      "query": "Binder",
+      "relevant_documents": [
+        {"source_id": "diversification-docs", "logical_path": "binder.md"},
+        {"source_id": "diversification-docs", "logical_path": "crypto-permissions.md"}
+      ]
+    },
+    {
+      "case_id": "broad-qnx",
+      "category": "multi_document",
+      "query": "QNX",
+      "relevant_documents": [
+        {"source_id": "diversification-docs", "logical_path": "qnx.md"},
+        {"source_id": "diversification-docs", "logical_path": "binder.md"}
+      ]
+    },
+    {
+      "case_id": "broad-permission",
+      "category": "multi_document",
+      "query": "权限校验",
+      "relevant_documents": [
+        {"source_id": "diversification-docs", "logical_path": "crypto-permissions.md"},
+        {"source_id": "diversification-docs", "logical_path": "precise-import.md"}
+      ]
+    },
+    {
+      "case_id": "precise-import",
+      "category": "exact_term",
+      "query": "lpRpcCrypto ImportFile exact permission flow",
+      "relevant_documents": [
+        {"source_id": "diversification-docs", "logical_path": "precise-import.md"}
+      ]
+    }
+  ]
+}
