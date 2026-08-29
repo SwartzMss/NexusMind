@@ -3,12 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def test_readme_top_covers_first_release_download_and_cli_path() -> None:
+def test_readme_top_covers_source_install_and_cli_path() -> None:
     top = Path("README.md").read_text(encoding="utf-8")[:5000]
 
     for marker in (
-        "nexusmind-windows-portable.zip",
-        "nexusmind-0.1.0-py3-none-any.whl",
+        "没有公开的 GitHub Release",
+        "从源码安装",
+        'python -m pip install -e ".[dev]"',
         "nexusmind create",
         "nexusmind source add",
         "nexusmind sync",
@@ -19,6 +20,8 @@ def test_readme_top_covers_first_release_download_and_cli_path() -> None:
         ".markdown",
     ):
         assert marker in top
+
+    assert "nexusmind-0.1.0-py3-none-any.whl" not in top
 
 
 def test_release_notes_cover_capabilities_and_constraints() -> None:

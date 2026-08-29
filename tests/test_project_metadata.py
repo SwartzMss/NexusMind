@@ -28,12 +28,12 @@ def test_readme_documents_windows_portable_runtime() -> None:
 
     for required in (
         "NEXUSMIND_RUNTIME_DIR",
-        ".nexusmind\\",
-        "nexusmind.log",
+        "独立的 `.nexusmind`",
+        "logs\\nexusmind.log",
         "build-portable.ps1",
         "nexusmind-windows-portable.zip",
-        "不会自动迁移",
-        "删除整个解压目录",
+        "不执行自动迁移或修复",
+        "没有公开 GitHub Release",
     ):
         assert required in readme
     assert "%USERPROFILE%\\.nexusmind\\" not in readme
