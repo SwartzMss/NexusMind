@@ -19,6 +19,7 @@ _TECHNICAL_IDENTIFIER_PATTERN = re.compile(
     r"|[0-9][0-9A-Fa-f]{3,}(?=[^A-Za-z0-9]|$)"
     r"|[0-9]{3,}"
     r"|[A-Za-z][A-Za-z0-9]*(?:[_./:-][A-Za-z0-9_.:/-]+)+"
+    r"|[A-Za-z0-9]*[a-z][A-Z][A-Za-z0-9]*"
     r"|[A-Z][A-Z0-9]{1,}"
     r")(?![A-Za-z0-9])"
 )

@@ -227,6 +227,33 @@ def test_query_expansion_requires_numeric_and_hex_error_codes(error_code: str) -
     )
 
 
+@pytest.mark.parametrize(
+    "identifier", ["MsgReply", "TrustZone", "KnowledgeBase", "OpenSSL"]
+)
+def test_query_expansion_requires_camel_case_identifiers(identifier: str) -> None:
+    question = f"{identifier} 返回错误怎么办"
+
+    with pytest.raises(ValueError, match="preserve exact technical identifiers"):
+        QueryExpansion(
+            question,
+            (
+                f"{identifier} error return troubleshooting",
+                "QNX message reply error handling",
+            ),
+        )
+
+    assert QueryExpansion(
+        question,
+        (
+            f"{identifier} error return troubleshooting",
+            f"{identifier} failure handling",
+        ),
+    ).expanded_queries == (
+        f"{identifier} error return troubleshooting",
+        f"{identifier} failure handling",
+    )
+
+
 def test_checked_in_query_expansion_evaluation_improves_recall_without_exact_regression(
     tmp_path: Path,
 ) -> None:
