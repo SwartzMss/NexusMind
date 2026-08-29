@@ -49,8 +49,10 @@ function Test-PortableArchive {
         $knowledgeBasePath = Join-Path $releaseSmokeRoot "knowledge-base"
         $releaseWorkingDirectory = Join-Path $releaseSmokeRoot "cwd"
         New-Item -ItemType Directory -Path $extractionRoot, $fixtureRoot, $releaseWorkingDirectory | Out-Null
-        $fixturePath = Join-Path $fixtureRoot "smoke-fixture.rtf"
-        Set-Content -LiteralPath $fixturePath -Value '{\rtf1\ansi NexusMind release-smoke-token portable validation.}' -Encoding ascii
+        $sourceFixtureRoot = Join-Path $repositoryPath "tests\fixtures\structured"
+        Copy-Item -LiteralPath (Join-Path $sourceFixtureRoot "marker.docx") -Destination (Join-Path $fixtureRoot "b.docx")
+        Copy-Item -LiteralPath (Join-Path $sourceFixtureRoot "marker.pdf") -Destination (Join-Path $fixtureRoot "c.pdf")
+        Set-Content -LiteralPath (Join-Path $fixtureRoot "a.md") -Value "NEXUSMIND_TEXT_MARKER portable plain text." -Encoding utf8
 
         Expand-Archive -LiteralPath $ArchivePath -DestinationPath $extractionRoot
         $smokeExecutable = Join-Path $extractionRoot "nexusmind\nexusmind.exe"
@@ -62,18 +64,29 @@ function Test-PortableArchive {
         try {
             Write-Host "Portable archive E2E working directory: $releaseWorkingDirectory"
             Invoke-PortableCommand -Executable $smokeExecutable -Arguments @("create", $knowledgeBasePath) | Out-Null
-            Invoke-PortableCommand -Executable $smokeExecutable -Arguments @("source", "add", $fixturePath, "--knowledge-base", $knowledgeBasePath) | Out-Null
+            Invoke-PortableCommand -Executable $smokeExecutable -Arguments @("source", "add", $fixtureRoot, "--knowledge-base", $knowledgeBasePath) | Out-Null
             Invoke-PortableCommand -Executable $smokeExecutable -Arguments @("sync", "--knowledge-base", $knowledgeBasePath, "--json") | Out-Null
-            $searchJson = Invoke-PortableCommand -Executable $smokeExecutable -Arguments @("search", "release-smoke-token", "--knowledge-base", $knowledgeBasePath, "--json")
-            $search = $searchJson | ConvertFrom-Json
+            $expectations = @(
+                @{ Query = "NEXUSMIND_TEXT_MARKER"; Marker = "NEXUSMIND_TEXT_MARKER"; Path = "a.md" },
+                @{ Query = "NEXUSMIND_DOCX_MARKER"; Marker = "NEXUSMIND_DOCX_MARKER"; Path = "b.docx" },
+                @{ Query = "NEXUSMIND_PDF_MARKER"; Marker = "NEXUSMIND_PDF_MARKER"; Path = "c.pdf" }
+            )
+            foreach ($expected in $expectations) {
+                $searchJson = Invoke-PortableCommand -Executable $smokeExecutable -Arguments @("search", $expected.Query, "--knowledge-base", $knowledgeBasePath, "--json")
+                $search = @($searchJson | ConvertFrom-Json)
+                $matchingHits = @($search | Where-Object {
+                    $_.document.logical_path -eq $expected.Path -and
+                    $_.hit.chunk.content -match [regex]::Escape($expected.Marker)
+                })
+                if ($matchingHits.Count -lt 1) {
+                    throw "Portable search did not return $($expected.Marker) from $($expected.Path)"
+                }
+            }
             $inspectionJson = Invoke-PortableCommand -Executable $smokeExecutable -Arguments @("inspect", "--knowledge-base", $knowledgeBasePath, "--json")
             $inspection = $inspectionJson | ConvertFrom-Json
-            if (@($search).Count -lt 1 -or $searchJson -notmatch "release-smoke-token") {
-                throw "Portable search did not return the synchronized fixture"
-            }
             if ($inspection.status.registered_source_count -ne 1 -or
                 $inspection.status.canonical_source_count -ne 1 -or
-                $inspection.status.document_count -ne 1) {
+                $inspection.status.document_count -ne 3) {
                 throw "Portable inspect did not reopen canonical state"
             }
         }
