@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import httpx
+import pytest
 
 from nexusmind import (
     Chunk,
@@ -14,12 +15,18 @@ from nexusmind import (
     KnowledgeSearchResult,
     KnowledgeSource,
     KnowledgeQueryOptions,
+    LocalDirectorySourceConfig,
     LocalFileSourceConfig,
     QueryExpansion,
     SearchHit,
 )
 from nexusmind.config import ModelConfig
 from nexusmind.query_expansion import OpenAICompatibleQueryExpander
+
+
+QUERY_EXPANSION_EVAL_ROOT = (
+    Path(__file__).resolve().parents[1] / "evals" / "knowledge" / "query_expansion"
+)
 
 
 @dataclass
@@ -203,4 +210,63 @@ def test_openai_expander_requires_strict_bounded_json() -> None:
     )
     assert expander.expand("IAM_Master 挂了").expanded_queries == (
         "IAM_Master crash restart",
+    )
+
+
+@pytest.mark.parametrize("error_code", ["06000080", "0900000c", "0x80070005"])
+def test_query_expansion_requires_numeric_and_hex_error_codes(error_code: str) -> None:
+    question = f"OpenSSL {error_code} 怎么处理"
+
+    with pytest.raises(ValueError, match="preserve exact technical identifiers"):
+        QueryExpansion(question, ("OpenSSL unsupported algorithm troubleshooting",))
+
+    assert QueryExpansion(
+        question, (f"OpenSSL {error_code} unsupported algorithm troubleshooting",)
+    ).expanded_queries == (
+        f"OpenSSL {error_code} unsupported algorithm troubleshooting",
+    )
+
+
+def test_checked_in_query_expansion_evaluation_improves_recall_without_exact_regression(
+    tmp_path: Path,
+) -> None:
+    cases = json.loads((QUERY_EXPANSION_EVAL_ROOT / "cases.json").read_text("utf-8"))
+    assert [case["case_id"] for case in cases] == [
+        "informal-iam-recovery",
+        "precise-crypto-import-api",
+    ]
+    kb = KnowledgeBase.create(
+        str(tmp_path / "evaluation-kb"), answer_generator=Generator()
+    )
+    kb.add_source(
+        LocalDirectorySourceConfig(path=str(QUERY_EXPANSION_EVAL_ROOT / "corpus"))
+    )
+    kb.sync()
+
+    outcomes: dict[str, tuple[str, str]] = {}
+    for case in cases:
+        baseline = kb.query(
+            case["question"], options=KnowledgeQueryOptions(retrieval_limit=1)
+        )
+        candidate = kb.query(
+            case["question"],
+            options=KnowledgeQueryOptions(
+                retrieval_limit=1,
+                query_expander=Expander(tuple(case["expanded_queries"])),
+            ),
+        )
+        baseline_path = baseline.trace.passages[0].logical_path
+        candidate_path = candidate.trace.passages[0].logical_path
+        assert baseline_path == case["baseline_top1"]
+        assert candidate_path == case["candidate_top1"]
+        assert candidate_path == case["expected_path"]
+        outcomes[case["case_id"]] = (baseline_path, candidate_path)
+
+    assert outcomes["informal-iam-recovery"] == (
+        "iam_chat.md",
+        "iam_recovery.md",
+    )
+    assert outcomes["precise-crypto-import-api"] == (
+        "crypto_import.md",
+        "crypto_import.md",
     )

@@ -13,6 +13,16 @@ from .config import ModelConfig
 
 MAX_EXPANDED_QUERIES = 3
 
+_TECHNICAL_IDENTIFIER_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?:"
+    r"0[xX][0-9A-Fa-f]+"
+    r"|[0-9][0-9A-Fa-f]{3,}(?=[^A-Za-z0-9]|$)"
+    r"|[0-9]{3,}"
+    r"|[A-Za-z][A-Za-z0-9]*(?:[_./:-][A-Za-z0-9_.:/-]+)+"
+    r"|[A-Z][A-Z0-9]{1,}"
+    r")(?![A-Za-z0-9])"
+)
+
 
 class QueryExpansionError(Exception):
     """A query expansion request failed or returned an invalid plan."""
@@ -35,12 +45,7 @@ class QueryExpansion:
         normalized = [query.strip() for query in self.expanded_queries]
         if len(set(normalized)) != len(normalized) or self.original_query.strip() in normalized:
             raise ValueError("expanded_queries must be unique and exclude the original query")
-        identifiers = set(
-            re.findall(
-                r"(?<![A-Za-z0-9])(?:[A-Za-z][A-Za-z0-9]*(?:[_./:-][A-Za-z0-9_.:/-]+)+|[A-Z][A-Z0-9]{1,})(?![A-Za-z0-9])",
-                self.original_query,
-            )
-        )
+        identifiers = set(_TECHNICAL_IDENTIFIER_PATTERN.findall(self.original_query))
         if any(any(identifier not in query for identifier in identifiers) for query in normalized):
             raise ValueError("expanded_queries must preserve exact technical identifiers")
         object.__setattr__(self, "expanded_queries", tuple(normalized))
