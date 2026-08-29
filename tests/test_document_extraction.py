@@ -5,14 +5,19 @@ import shutil
 
 import pytest
 
+import nexusmind.knowledge_ingestion as knowledge_ingestion
 from nexusmind import (
     ANYDOC_CONTENT_TYPES,
     DEFAULT_SUPPORTED_EXTENSIONS,
     AnyDocExtractor,
     DocumentExtractionError,
+    FileTooLargeError,
     KnowledgeCollection,
     LocalDirectoryAdapter,
+    LocalFileAdapter,
+    LocalIngestionLimits,
     PlainTextDocumentExtractor,
+    TotalBytesLimitError,
     UnsupportedDocumentFormatError,
     select_document_extractor,
 )
@@ -102,3 +107,32 @@ def test_mixed_directory_structured_markers_are_searchable_after_sync(tmp_path: 
     assert collection.search("architecture boundary")
     assert collection.search("verified text layer")
     assert collection.search("plain text")
+
+
+@pytest.mark.parametrize(
+    ("limits", "expected_error"),
+    [
+        (LocalIngestionLimits(max_file_bytes=8), FileTooLargeError),
+        (LocalIngestionLimits(max_file_bytes=100, max_total_bytes=8), TotalBytesLimitError),
+    ],
+)
+def test_structured_resource_limits_are_enforced_before_extraction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    limits: LocalIngestionLimits,
+    expected_error: type[Exception],
+) -> None:
+    path = tmp_path / "oversized.pdf"
+    path.write_bytes(b"%PDF-" + b"x" * 20)
+
+    def forbidden_selection(*args, **kwargs):
+        pytest.fail("extractor selection must happen after bounded verified reads")
+
+    monkeypatch.setattr(knowledge_ingestion, "select_document_extractor", forbidden_selection)
+
+    with pytest.raises(expected_error):
+        LocalFileAdapter(
+            path,
+            source_id="structured-limit",
+            limits=limits,
+        ).load_documents()

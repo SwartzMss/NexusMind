@@ -408,7 +408,7 @@ python -m pip install -e ".[dev,packaging]"
 dist\nexusmind-windows-portable.zip
 ```
 
-CI 也会在 `windows-latest` 上执行真实 portable 构建和 smoke test。
+CI 也会在 `windows-latest` 上执行真实 portable 构建，并把归档重新解压到仓库外；其中的 `nexusmind.exe` 会同步一个包含 Markdown、DOCX 和 text-layer PDF 的混合目录，验证 marker 检索与原始文件 provenance，无需另装 Python 或 AnyDoc runtime。
 
 Portable runtime 使用独立的 `.nexusmind` 可写运行目录，用于保存配置、数据、日志和模型缓存。可以通过 `NEXUSMIND_RUNTIME_DIR` 指定其他绝对路径。
 
