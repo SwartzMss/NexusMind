@@ -12,6 +12,7 @@ import sys
 from typing import Any
 
 from nexusmind.answer_provider import OpenAICompatibleAnswerProvider
+from nexusmind.query_expansion import OpenAICompatibleQueryExpander
 from nexusmind.config import ConfigError, load_model_config_from_env
 from nexusmind.knowledge_answer import KnowledgeAnswerError
 from nexusmind.knowledge_base import KnowledgeBase
@@ -139,7 +140,10 @@ def _search(args: argparse.Namespace) -> int:
 def _query(args: argparse.Namespace) -> int:
     with runtime_operation(RUNTIME_LOGGER, "query") as operation:
         config = load_model_config_from_env(); provider = OpenAICompatibleAnswerProvider(config)
-        kb = KnowledgeBase.open(args.knowledge_base, answer_generator=provider)
+        expander = OpenAICompatibleQueryExpander(config)
+        kb = KnowledgeBase.open(
+            args.knowledge_base, answer_generator=provider, query_expander=expander
+        )
         try: result = kb.query(args.question)
         finally: kb.close()
         operation["citation_count"] = len(result.citations)
@@ -149,6 +153,11 @@ def _query(args: argparse.Namespace) -> int:
         for citation in result.citations: print(f"[{citation.citation_id}] {citation.logical_path}")
         if args.debug:
             print(f"\nRetrieval backend: {result.trace.retrieval_backend}"); print(f"Context: {result.trace.context_character_count} chars"); print(f"Trace: {result.trace_id}")
+            retrieval_queries = getattr(result.trace, "retrieval_queries", (args.question,))
+            print(f"Retrieval queries: {list(retrieval_queries)}")
+            expansion_error = getattr(result.trace, "query_expansion_error", None)
+            if expansion_error:
+                print(f"Query expansion fallback: {expansion_error}")
     return 0
 
 

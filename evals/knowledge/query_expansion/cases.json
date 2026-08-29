@@ -1,0 +1,24 @@
+[
+  {
+    "case_id": "informal-iam-recovery",
+    "question": "IAM_Master 挂了怎么办",
+    "expanded_queries": [
+      "IAM_Master abnormal exit crash recovery",
+      "IAM_Master process death watchdog restart"
+    ],
+    "expected_path": "iam_recovery.md",
+    "baseline_top1": "iam_chat.md",
+    "candidate_top1": "iam_recovery.md"
+  },
+  {
+    "case_id": "precise-crypto-import-api",
+    "question": "lpRpcCrypto_ImportFile",
+    "expanded_queries": [
+      "lpRpcCrypto_ImportFile API key file import",
+      "lpRpcCrypto_ImportFile failure status code"
+    ],
+    "expected_path": "crypto_import.md",
+    "baseline_top1": "crypto_import.md",
+    "candidate_top1": "crypto_import.md"
+  }
+]

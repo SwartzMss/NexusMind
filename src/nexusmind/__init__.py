@@ -1,6 +1,13 @@
 """NexusMind public package exports."""
 
 from .answer_provider import OpenAICompatibleAnswerProvider
+from .query_expansion import (
+    MAX_EXPANDED_QUERIES,
+    OpenAICompatibleQueryExpander,
+    QueryExpander,
+    QueryExpansion,
+    QueryExpansionError,
+)
 
 from .embeddings import (
     EmbeddingError,
@@ -185,6 +192,11 @@ from .knowledge_ingestion import (
 
 __all__ = [
     "OpenAICompatibleAnswerProvider",
+    "OpenAICompatibleQueryExpander",
+    "QueryExpander",
+    "QueryExpansion",
+    "QueryExpansionError",
+    "MAX_EXPANDED_QUERIES",
     "AnswerGenerationLimitError",
     "AnswerGenerationLimits",
     "AnswerGenerator",

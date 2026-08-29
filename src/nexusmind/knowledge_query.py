@@ -10,6 +10,7 @@ from .knowledge_answer import (
     KnowledgeCitation,
     ModelContextPassage,
 )
+from .query_expansion import QueryExpander
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class KnowledgeQueryOptions:
@@ -18,6 +19,7 @@ class KnowledgeQueryOptions:
     retrieval_limit: int = 8
     limits: AnswerGenerationLimits = AnswerGenerationLimits()
     generator: AnswerGenerator | None = None
+    query_expander: QueryExpander | None = None
 
     def __post_init__(self) -> None:
         if type(self.retrieval_limit) is not int:
@@ -28,6 +30,8 @@ class KnowledgeQueryOptions:
             raise TypeError("limits must be AnswerGenerationLimits")
         if self.generator is not None and not isinstance(self.generator, AnswerGenerator):
             raise TypeError("generator must implement AnswerGenerator")
+        if self.query_expander is not None and not isinstance(self.query_expander, QueryExpander):
+            raise TypeError("query_expander must implement QueryExpander")
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +43,9 @@ class KnowledgeQueryTrace:
     candidate_count: int
     context_character_count: int
     context_estimated_token_count: int
+    retrieval_queries: tuple[str, ...] = ()
+    query_expansion_error: str | None = None
+    fused_result_provenance: tuple[tuple[str, tuple[tuple[int, int], ...]], ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.retrieval_backend) is not str or not self.retrieval_backend.strip():
@@ -57,6 +64,36 @@ class KnowledgeQueryTrace:
                 raise TypeError(f"{name} must be an integer")
             if value < 0:
                 raise ValueError(f"{name} must be non-negative")
+        if type(self.retrieval_queries) is not tuple or any(
+            type(query) is not str or not query.strip() for query in self.retrieval_queries
+        ):
+            raise TypeError("retrieval_queries must be a tuple of non-empty strings")
+        if self.query_expansion_error is not None and (
+            type(self.query_expansion_error) is not str or not self.query_expansion_error.strip()
+        ):
+            raise ValueError("query_expansion_error must be a non-empty string or None")
+        if type(self.fused_result_provenance) is not tuple:
+            raise TypeError("fused_result_provenance must be a tuple")
+        chunk_ids: set[str] = set()
+        for item in self.fused_result_provenance:
+            if type(item) is not tuple or len(item) != 2:
+                raise TypeError("fused result provenance entries must be pairs")
+            chunk_id, ranks = item
+            if type(chunk_id) is not str or not chunk_id.strip() or chunk_id in chunk_ids:
+                raise ValueError("fused result chunk ids must be non-empty and unique")
+            chunk_ids.add(chunk_id)
+            if type(ranks) is not tuple or not ranks:
+                raise ValueError("fused result ranks must be a non-empty tuple")
+            for rank in ranks:
+                if (
+                    type(rank) is not tuple
+                    or len(rank) != 2
+                    or type(rank[0]) is not int
+                    or rank[0] < 0
+                    or type(rank[1]) is not int
+                    or rank[1] <= 0
+                ):
+                    raise ValueError("fused result ranks must contain query-index/rank pairs")
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +152,12 @@ def knowledge_query_result_dict(
             "passage_count": len(result.trace.passages),
             "context_character_count": result.trace.context_character_count,
             "context_estimated_token_count": result.trace.context_estimated_token_count,
+            "retrieval_queries": list(result.trace.retrieval_queries),
+            "query_expansion_error": result.trace.query_expansion_error,
+            "fused_results": [
+                {"chunk_id": chunk_id, "ranks": [[query_index, rank] for query_index, rank in ranks]}
+                for chunk_id, ranks in result.trace.fused_result_provenance
+            ],
             "passages": [
                 {
                     "citation_id": item.citation_id,

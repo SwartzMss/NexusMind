@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import closing, contextmanager
 from copy import deepcopy
+from dataclasses import dataclass
 import errno
 import os
 from pathlib import Path
@@ -20,6 +21,7 @@ from .knowledge_answer import (
     AnswerGeneratorError,
     generate_knowledge_answer,
 )
+from .context_assembly import assemble_context
 from .knowledge_base_manifest import (
     KnowledgeBaseClosedError,
     KnowledgeBaseConfigError,
@@ -60,6 +62,8 @@ from .knowledge_query import (
     KnowledgeQueryResult,
     KnowledgeQueryTrace,
 )
+from .query_expansion import QueryExpander
+from .search_diversification import RankedDocumentCandidate, select_document_aware_indices
 from .knowledge_ingestion import LocalDirectoryAdapter, LocalFileAdapter
 from .knowledge_store import KnowledgeSnapshotStoreError, SQLiteKnowledgeSnapshotStore
 from .lexical_analysis import UnicodeCJKLexicalAnalyzer
@@ -85,6 +89,15 @@ _UNSUPPORTED_LINK_ERRNOS = frozenset(
     if value is not None
 )
 _WINDOWS_ERROR_NOT_SUPPORTED = 50
+
+
+@dataclass(frozen=True, slots=True)
+class _FusedCandidate:
+    """A backend result plus its separate query-level fusion metadata."""
+
+    result: KnowledgeSearchResult
+    fusion_score: float
+    ranks: tuple[tuple[int, int], ...]
 
 
 def _limits(value: KnowledgeBaseLimits | None) -> KnowledgeBaseLimits:
@@ -186,6 +199,7 @@ class KnowledgeBase:
         index_factory: Callable[[], CloneableChunkIndex],
         limits: KnowledgeBaseLimits,
         answer_generator: AnswerGenerator | None = None,
+        query_expander: QueryExpander | None = None,
     ) -> None:
         self._root = root
         self._manifest = manifest
@@ -193,6 +207,7 @@ class KnowledgeBase:
         self._index_factory = index_factory
         self._limits = limits
         self._answer_generator = answer_generator
+        self._query_expander = query_expander
         self._closed = False
         self._mutation_mutex = RLock()
 
@@ -205,6 +220,7 @@ class KnowledgeBase:
         index_factory: Callable[[], CloneableChunkIndex] | None = None,
         limits: KnowledgeBaseLimits | None = None,
         answer_generator: AnswerGenerator | None = None,
+        query_expander: QueryExpander | None = None,
     ) -> "KnowledgeBase":
         active_limits = _limits(limits)
         root = _root(path)
@@ -269,6 +285,7 @@ class KnowledgeBase:
             index_factory=factory,
             limits=active_limits,
             answer_generator=answer_generator,
+            query_expander=query_expander,
         )
 
     @classmethod
@@ -279,6 +296,7 @@ class KnowledgeBase:
         index_factory: Callable[[], CloneableChunkIndex] | None = None,
         limits: KnowledgeBaseLimits | None = None,
         answer_generator: AnswerGenerator | None = None,
+        query_expander: QueryExpander | None = None,
     ) -> "KnowledgeBase":
         active_limits = _limits(limits)
         root = _root(path)
@@ -337,6 +355,7 @@ class KnowledgeBase:
             index_factory=factory,
             limits=active_limits,
             answer_generator=answer_generator,
+            query_expander=query_expander,
         )
 
     @staticmethod
@@ -767,11 +786,47 @@ class KnowledgeBase:
         )
         if active_generator is None:
             raise AnswerGeneratorError("no answer generator is configured")
+        active_expander = (
+            self._query_expander
+            if active_options.query_expander is None
+            else active_options.query_expander
+        )
+        retrieval_queries = (question,)
+        expansion_error: str | None = None
+        if active_expander is not None:
+            try:
+                expansion = active_expander.expand(question)
+                if expansion.original_query != question:
+                    raise ValueError("query expander changed the original question")
+                retrieval_queries += expansion.expanded_queries
+            except Exception as exc:
+                expansion_error = type(exc).__name__
         try:
-            context = self._collection.build_context(
+            if len(retrieval_queries) == 1:
+                # Preserve the pre-expansion path and #110's relevance safeguard,
+                # both of which operate on the backend's original scores.
+                fused = self._collection.search(
+                    question, limit=active_options.retrieval_limit
+                )
+                fused_provenance = tuple(
+                    (item.hit.chunk.chunk_id, ((0, rank),))
+                    for rank, item in enumerate(fused, start=1)
+                )
+            else:
+                ranked_lists = tuple(
+                    self._collection.search_backend(
+                        retrieval_query, limit=active_options.retrieval_limit
+                    )
+                    for retrieval_query in retrieval_queries
+                )
+                fused, fused_provenance = self._fuse_query_results(
+                    ranked_lists, limit=active_options.retrieval_limit
+                )
+            context = assemble_context(
                 question,
-                retrieval_limit=active_options.retrieval_limit,
+                fused,
                 max_passages=active_limits.max_passages,
+                max_candidates=active_options.retrieval_limit,
                 max_chars=active_limits.max_context_chars,
                 max_tokens=active_limits.max_context_tokens,
             )
@@ -794,6 +849,9 @@ class KnowledgeBase:
             candidate_count=config.candidate_count,
             context_character_count=config.character_count,
             context_estimated_token_count=config.estimated_token_count,
+            retrieval_queries=retrieval_queries,
+            query_expansion_error=expansion_error,
+            fused_result_provenance=fused_provenance,
         )
         return KnowledgeQueryResult(
             answer=answer,
@@ -801,6 +859,62 @@ class KnowledgeBase:
             trace_id=str(uuid4()),
             trace=trace,
         )
+
+    @staticmethod
+    def _fuse_query_results(
+        ranked_lists: tuple[tuple[KnowledgeSearchResult, ...], ...], *, limit: int
+    ) -> tuple[
+        tuple[KnowledgeSearchResult, ...],
+        tuple[tuple[str, tuple[tuple[int, int], ...]], ...],
+    ]:
+        """Fuse backend-final rankings with deterministic query-level RRF."""
+
+        rrf_k = 60
+        scores: dict[str, float] = {}
+        first_seen: dict[str, tuple[int, int]] = {}
+        results: dict[str, KnowledgeSearchResult] = {}
+        ranks: dict[str, list[tuple[int, int]]] = {}
+        for query_index, ranked in enumerate(ranked_lists):
+            seen: set[str] = set()
+            for rank, result in enumerate(ranked, start=1):
+                chunk_id = result.hit.chunk.chunk_id
+                if chunk_id in seen:
+                    continue
+                seen.add(chunk_id)
+                scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (rrf_k + rank)
+                first_seen.setdefault(chunk_id, (query_index, rank))
+                results.setdefault(chunk_id, result)
+                ranks.setdefault(chunk_id, []).append((query_index, rank))
+        ordered_ids = sorted(
+            scores, key=lambda chunk_id: (-scores[chunk_id], first_seen[chunk_id], chunk_id)
+        )
+        fused = tuple(
+            _FusedCandidate(
+                result=results[chunk_id],
+                fusion_score=float(scores[chunk_id]),
+                ranks=tuple(ranks[chunk_id]),
+            )
+            for chunk_id in ordered_ids
+        )
+        # Raw backend scores are not comparable across generated queries. RRF is
+        # therefore the multi-query selector's ranking signal, but it never
+        # replaces the score carried by the canonical backend result.
+        diversified = select_document_aware_indices(
+            tuple(
+                RankedDocumentCandidate(
+                    item.result.document.document_id, item.fusion_score
+                )
+                for item in fused
+            ),
+            limit=limit,
+        )
+        selected_candidates = tuple(fused[index] for index in diversified)
+        selected = tuple(item.result for item in selected_candidates)
+        provenance = tuple(
+            (item.result.hit.chunk.chunk_id, item.ranks)
+            for item in selected_candidates
+        )
+        return selected, provenance
 
     def diagnose_search(
         self, query: str, *, limit: int = 10

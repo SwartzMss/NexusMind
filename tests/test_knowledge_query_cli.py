@@ -26,7 +26,12 @@ def _patch(monkeypatch):
     knowledge = FakeKnowledgeBase()
     monkeypatch.setattr(cli, "load_model_config_from_env", lambda: object())
     monkeypatch.setattr(cli, "OpenAICompatibleAnswerProvider", lambda config: object())
-    monkeypatch.setattr(cli.KnowledgeBase, "open", lambda path, answer_generator: knowledge)
+    monkeypatch.setattr(cli, "OpenAICompatibleQueryExpander", lambda config: object())
+    monkeypatch.setattr(
+        cli.KnowledgeBase,
+        "open",
+        lambda path, answer_generator, query_expander: knowledge,
+    )
     return knowledge
 
 
