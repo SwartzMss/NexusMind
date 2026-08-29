@@ -8,22 +8,111 @@ import pytest
 
 import nexusmind.knowledge_ingestion as knowledge_ingestion
 from nexusmind import (
+    DEFAULT_DOCUMENT_EXTRACTORS,
     DirectoryDepthLimitError,
+    DocumentExtractionError,
     DocumentCountLimitError,
+    DocumentExtractor,
+    DocumentExtractorNotFoundError,
     EntryScanLimitError,
     FileIdentityChangedError,
     FileTooLargeError,
+    ExtractedDocument,
     InvalidTextEncodingError,
     KnowledgeIngestionError,
     KnowledgeSourceAdapter,
     LocalDirectoryAdapter,
     LocalFileAdapter,
     LocalIngestionLimits,
+    PlainTextDocumentExtractor,
     SourceNotFoundError,
     SymlinkSourceError,
     TotalBytesLimitError,
     UnsupportedFileTypeError,
+    select_document_extractor,
 )
+
+
+def test_plain_text_extractor_selection_is_case_insensitive() -> None:
+    markdown = select_document_extractor("guides/README.MD")
+    text = select_document_extractor("notes.txt")
+
+    assert isinstance(markdown, DocumentExtractor)
+    assert markdown is DEFAULT_DOCUMENT_EXTRACTORS[".md"]
+    assert text is DEFAULT_DOCUMENT_EXTRACTORS[".txt"]
+    with pytest.raises(DocumentExtractorNotFoundError):
+        select_document_extractor("data.json")
+
+
+@pytest.mark.parametrize(
+    ("logical_path", "content_type"),
+    [
+        ("notes.txt", "text/plain"),
+        ("README.md", "text/markdown"),
+        ("guide.markdown", "text/markdown"),
+    ],
+)
+def test_plain_text_extractor_returns_canonical_text_and_content_type(
+    logical_path: str,
+    content_type: str,
+) -> None:
+    extracted = PlainTextDocumentExtractor().extract(
+        "NexusMind 文档".encode(),
+        logical_path=logical_path,
+    )
+
+    assert extracted == ExtractedDocument(
+        content="NexusMind 文档",
+        content_type=content_type,
+        metadata={},
+    )
+
+
+def test_plain_text_extractor_normalizes_strict_utf8_failures() -> None:
+    with pytest.raises(InvalidTextEncodingError) as error:
+        PlainTextDocumentExtractor().extract(b"\xff", logical_path="broken.txt")
+
+    assert "broken.txt" in str(error.value)
+
+
+def test_extraction_errors_are_a_distinct_ingestion_error_branch() -> None:
+    filesystem_error = SourceNotFoundError("missing")
+    extraction_error = InvalidTextEncodingError("invalid UTF-8")
+
+    assert isinstance(filesystem_error, KnowledgeIngestionError)
+    assert not isinstance(filesystem_error, DocumentExtractionError)
+    assert isinstance(extraction_error, DocumentExtractionError)
+    assert isinstance(extraction_error, KnowledgeIngestionError)
+
+
+def test_adapter_propagates_extracted_content_type_and_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "notes.txt"
+    path.write_bytes(b"verified bytes")
+
+    class RecordingExtractor:
+        def extract(self, content: bytes, *, logical_path: str) -> ExtractedDocument:
+            assert content == b"verified bytes"
+            assert logical_path == "notes.txt"
+            return ExtractedDocument(
+                content="canonical text",
+                content_type="text/x-test",
+                metadata={"extractor": "recording"},
+            )
+
+    monkeypatch.setattr(
+        knowledge_ingestion,
+        "select_document_extractor",
+        lambda logical_path, **kwargs: RecordingExtractor(),
+    )
+
+    document = LocalFileAdapter(path, source_id="docs").load_documents()[0]
+
+    assert document.content == "canonical text"
+    assert document.content_type == "text/x-test"
+    assert document.metadata == {"extractor": "recording"}
 
 
 def test_local_file_adapter_maps_one_text_file_without_absolute_identity(tmp_path: Path) -> None:
@@ -80,6 +169,20 @@ def test_local_file_rejects_unsupported_extension(tmp_path: Path) -> None:
 
     with pytest.raises(UnsupportedFileTypeError):
         LocalFileAdapter(path, source_id="json").load_documents()
+
+
+def test_custom_supported_text_extension_preserves_plain_text_behavior(tmp_path: Path) -> None:
+    path = tmp_path / "notes.text"
+    path.write_text("custom extension", encoding="utf-8")
+
+    document = LocalFileAdapter(
+        path,
+        source_id="custom",
+        supported_extensions={".text"},
+    ).load_documents()[0]
+
+    assert document.content == "custom extension"
+    assert document.content_type == "text/plain"
 
 
 def test_local_file_rejects_invalid_utf8(tmp_path: Path) -> None:
