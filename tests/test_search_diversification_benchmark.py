@@ -28,6 +28,7 @@ def test_authored_dataset_covers_broad_and_precise_queries() -> None:
 
 def test_broad_coverage_improves_without_precise_relevance_regression() -> None:
     report = run_search_diversification_benchmark()
+    crypto = next(item for item in report.cases if item.case_id == "broad-crypto")
 
     assert (
         report.diversified_broad_unique_relevant_documents
@@ -35,6 +36,13 @@ def test_broad_coverage_improves_without_precise_relevance_regression() -> None:
     )
     assert report.diversified_precise_mrr >= report.raw_precise_mrr
     assert report.diversified_precise_recall >= report.raw_precise_recall
+    assert set(crypto.raw_documents) == {"crypto-overview.md"}
+    assert set(crypto.diversified_documents) >= {
+        "crypto-overview.md",
+        "crypto-permissions.md",
+    }
+    assert crypto.raw_relevant_document_count == 1
+    assert crypto.diversified_relevant_document_count == 2
 
 
 def test_each_case_exposes_raw_and_diversified_metrics_and_rankings() -> None:

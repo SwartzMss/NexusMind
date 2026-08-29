@@ -5,7 +5,6 @@ from math import isfinite
 SEARCH_CANDIDATE_MULTIPLIER = 4
 MAX_SEARCH_CANDIDATES = 100
 PREFERRED_RESULTS_PER_DOCUMENT = 2
-RELEVANCE_WINDOW_FACTOR = 0.25
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,8 +47,10 @@ def select_document_aware_indices(
 
     raw_top_k = candidates[:limit]
     scores = tuple(item.score for item in raw_top_k)
+    center = _lower_median(scores)
+    robust_span = _lower_median(tuple(abs(score - center) for score in scores))
     worst = min(scores)
-    relevance_floor = worst - RELEVANCE_WINDOW_FACTOR * (max(scores) - worst)
+    relevance_floor = worst - robust_span
 
     selected: list[int] = []
     document_counts: dict[str, int] = {}
@@ -77,6 +78,11 @@ def select_document_aware_indices(
             selected_set.add(index)
 
     return tuple(sorted(selected))
+
+
+def _lower_median(values: tuple[float, ...]) -> float:
+    ordered = sorted(values)
+    return ordered[(len(ordered) - 1) // 2]
 
 
 def _validate_limit(limit: int) -> None:

@@ -42,6 +42,21 @@ def test_weak_cross_document_candidate_does_not_displace_strong_chunk() -> None:
     assert select_document_aware_indices(ranked, limit=5) == (0, 1, 2, 3, 4)
 
 
+def test_high_score_outlier_does_not_admit_near_zero_cross_document_candidates() -> None:
+    ranked = candidates(
+        ("a", 1000.0),
+        ("a", 1.0),
+        ("a", 1.0),
+        ("a", 1.0),
+        ("a", 1.0),
+        ("b", 0.001),
+        ("c", 0.0005),
+        ("d", 0.0001),
+    )
+
+    assert select_document_aware_indices(ranked, limit=5) == (0, 1, 2, 3, 4)
+
+
 def test_same_document_backfills_all_slots() -> None:
     ranked = candidates(("a", 4.0), ("a", 3.0), ("a", 2.0), ("a", 1.0))
 
