@@ -204,3 +204,25 @@ def test_structure_chunker_does_not_emit_tiny_parent_heading_chunk() -> None:
 
     assert len(chunks) == 1
     assert chunks[0].content == document.content
+
+
+def test_structure_chunker_shrinks_first_body_span_to_keep_heading_context() -> None:
+    document = _document("# Heading\n\n" + "body words " * 20)
+
+    chunks = StructureAwareChunker(chunk_size=60, overlap=5).chunk(document)
+
+    assert chunks[0].content.startswith("# Heading\n\nbody")
+    assert chunks[0].content != "# Heading\n\n"
+    assert all(len(chunk.content) <= 60 for chunk in chunks)
+    assert all(chunk.content == document.content[chunk.start_offset:chunk.end_offset] for chunk in chunks)
+
+
+def test_structure_chunker_fails_during_pathological_overlap_expansion() -> None:
+    document = _document("x" * (1024 * 1024 - 1))
+
+    with pytest.raises(ChunkLimitError, match="during fallback"):
+        StructureAwareChunker(
+            chunk_size=1000,
+            overlap=999,
+            max_chunks=10,
+        ).chunk(document)
