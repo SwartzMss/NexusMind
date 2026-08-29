@@ -7,15 +7,15 @@ from pathlib import PurePath
 from typing import Mapping, Protocol, runtime_checkable
 
 
-class DocumentExtractionError(Exception):
+class KnowledgeIngestionError(Exception):
+    """Base class for normalized ingestion failures."""
+
+
+class DocumentExtractionError(KnowledgeIngestionError):
     """Base class for normalized document extraction failures."""
 
 
-class KnowledgeIngestionError(DocumentExtractionError):
-    """Base class for normalized ingestion failures, including extraction."""
-
-
-class InvalidTextEncodingError(KnowledgeIngestionError):
+class InvalidTextEncodingError(DocumentExtractionError):
     """A plain-text document is not valid strict UTF-8 text."""
 
 

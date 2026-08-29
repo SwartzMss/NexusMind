@@ -10,6 +10,7 @@ import nexusmind.knowledge_ingestion as knowledge_ingestion
 from nexusmind import (
     DEFAULT_DOCUMENT_EXTRACTORS,
     DirectoryDepthLimitError,
+    DocumentExtractionError,
     DocumentCountLimitError,
     DocumentExtractor,
     DocumentExtractorNotFoundError,
@@ -72,6 +73,16 @@ def test_plain_text_extractor_normalizes_strict_utf8_failures() -> None:
         PlainTextDocumentExtractor().extract(b"\xff", logical_path="broken.txt")
 
     assert "broken.txt" in str(error.value)
+
+
+def test_extraction_errors_are_a_distinct_ingestion_error_branch() -> None:
+    filesystem_error = SourceNotFoundError("missing")
+    extraction_error = InvalidTextEncodingError("invalid UTF-8")
+
+    assert isinstance(filesystem_error, KnowledgeIngestionError)
+    assert not isinstance(filesystem_error, DocumentExtractionError)
+    assert isinstance(extraction_error, DocumentExtractionError)
+    assert isinstance(extraction_error, KnowledgeIngestionError)
 
 
 def test_adapter_propagates_extracted_content_type_and_metadata(
