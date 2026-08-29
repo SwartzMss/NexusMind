@@ -57,3 +57,12 @@ def test_search_and_diagnostics_ranking_contract_is_documented() -> None:
     assert "document-aware" in architecture
     assert "diagnose" in architecture
     assert "raw backend ranking" in architecture
+
+
+def test_diversification_benchmark_uses_lf_on_every_platform() -> None:
+    attributes = (Path(__file__).parents[1] / ".gitattributes").read_text(
+        encoding="utf-8"
+    ).splitlines()
+
+    assert "evals/knowledge/diversification/corpus/*.md text eol=lf" in attributes
+    assert "evals/knowledge/diversification.md text eol=lf" in attributes
