@@ -19,7 +19,7 @@ from .knowledge import (
     compute_content_hash,
     stable_document_id,
 )
-from .knowledge_chunking import Chunk, TextChunker
+from .knowledge_chunking import Chunk, StructureAwareChunker
 from .knowledge_inspection import KnowledgeChunkInspection, KnowledgeDocumentInspection
 from .knowledge_ingestion import KnowledgeSourceAdapter
 from .knowledge_retrieval import (
@@ -205,7 +205,7 @@ class KnowledgeCollection:
         limits: KnowledgeCollectionLimits | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        self._chunker = TextChunker() if chunker is None else chunker
+        self._chunker = StructureAwareChunker() if chunker is None else chunker
         self._limits = KnowledgeCollectionLimits() if limits is None else limits
         if not callable(getattr(self._chunker, "chunk", None)):
             raise TypeError("chunker must implement chunk(document)")

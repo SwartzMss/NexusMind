@@ -1,0 +1,28 @@
+{
+  "cases": [
+    {
+      "case_id": "fixed-window-boundary",
+      "category": "identifier",
+      "query": "IAM_Master IAM_server validate token expiration",
+      "relevant_documents": [{"source_id": "chunking-docs", "logical_path": "boundary.md"}]
+    },
+    {
+      "case_id": "fenced-code",
+      "category": "identifier",
+      "query": "rotate_checkpoint vault-81726 resume_replica",
+      "relevant_documents": [{"source_id": "chunking-docs", "logical_path": "code.md"}]
+    },
+    {
+      "case_id": "markdown-table",
+      "category": "exact_term",
+      "query": "QNX_BOUNDARY_42 verified",
+      "relevant_documents": [{"source_id": "chunking-docs", "logical_path": "table.md"}]
+    },
+    {
+      "case_id": "markdown-list",
+      "category": "exact_term",
+      "query": "lease alpha-991 generation counter canonical snapshot",
+      "relevant_documents": [{"source_id": "chunking-docs", "logical_path": "list.md"}]
+    }
+  ]
+}

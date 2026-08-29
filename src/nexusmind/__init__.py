@@ -74,7 +74,7 @@ from .hybrid_retrieval import (
     HybridChunkIndexLimitError,
     HybridChunkIndexLimits,
 )
-from .knowledge_chunking import Chunk, ChunkLimitError, TextChunker
+from .knowledge_chunking import Chunk, ChunkLimitError, StructureAwareChunker, TextChunker
 from .knowledge_inspection import (
     KnowledgeBaseInspection,
     KnowledgeChunkInspection,
@@ -358,6 +358,7 @@ __all__ = [
     "SymlinkSourceError",
     "TotalBytesLimitError",
     "TextChunker",
+    "StructureAwareChunker",
     "UnicodeCJKLexicalAnalyzer",
     "UnsupportedFileTypeError",
     "WhitespaceLexicalAnalyzer",

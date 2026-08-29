@@ -1,10 +1,11 @@
-"""Provider-neutral contracts and bounded character-based document chunking."""
+"""Provider-neutral deterministic document chunking."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
 import json
+import re
 
 from .knowledge import Document
 
@@ -20,6 +21,7 @@ def _stable_chunk_id(
     end_offset: int,
     chunk_size: int,
     overlap: int,
+    algorithm: str | None = None,
 ) -> str:
     parts = (
         document.document_id,
@@ -29,6 +31,8 @@ def _stable_chunk_id(
         chunk_size,
         overlap,
     )
+    if algorithm is not None:
+        parts += (algorithm,)
     canonical = json.dumps(parts, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return f"chunk-{hashlib.sha256(canonical).hexdigest()}"
 
@@ -107,4 +111,181 @@ class TextChunker:
         return tuple(chunks)
 
 
-__all__ = ["Chunk", "ChunkLimitError", "TextChunker"]
+_HEADING = re.compile(r"^[ \t]{0,3}#{1,6}(?:[ \t]+|$)")
+_FENCE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
+_LIST = re.compile(r"^[ \t]{0,3}(?:[-+*]|\d+[.)])[ \t]+")
+_TABLE_RULE = re.compile(
+    r"^[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(?:\|[ \t]*:?-{3,}:?[ \t]*)+\|?[ \t]*$"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _Block:
+    start: int
+    end: int
+    heading: bool = False
+
+
+def _lines(content: str) -> list[tuple[int, int, str]]:
+    result: list[tuple[int, int, str]] = []
+    offset = 0
+    for line in content.splitlines(keepends=True):
+        result.append((offset, offset + len(line), line.rstrip("\r\n")))
+        offset += len(line)
+    if offset < len(content):
+        result.append((offset, len(content), content[offset:]))
+    return result
+
+
+def _markdown_blocks(content: str) -> list[_Block]:
+    lines = _lines(content)
+    blocks: list[_Block] = []
+    index = 0
+    while index < len(lines):
+        start, end, text = lines[index]
+        if not text.strip():
+            if blocks:
+                previous = blocks[-1]
+                blocks[-1] = _Block(previous.start, end, previous.heading)
+            else:
+                blocks.append(_Block(start, end))
+            index += 1
+            continue
+        fence = _FENCE.match(text)
+        if fence:
+            marker = fence.group(1)[0]
+            length = len(fence.group(1))
+            index += 1
+            while index < len(lines):
+                end = lines[index][1]
+                closing_fence = rf"^[ \t]{{0,3}}{re.escape(marker)}{{{length},}}[ \t]*$"
+                if re.match(closing_fence, lines[index][2]):
+                    index += 1
+                    break
+                index += 1
+            blocks.append(_Block(start, end))
+            continue
+        if _HEADING.match(text):
+            blocks.append(_Block(start, end, True))
+            index += 1
+            continue
+        if index + 1 < len(lines) and "|" in text and _TABLE_RULE.match(lines[index + 1][2]):
+            index += 2
+            end = lines[index - 1][1]
+            while index < len(lines) and "|" in lines[index][2] and lines[index][2].strip():
+                end = lines[index][1]
+                index += 1
+            blocks.append(_Block(start, end))
+            continue
+        if _LIST.match(text):
+            index += 1
+            while index < len(lines):
+                candidate = lines[index][2]
+                if not candidate.strip() or _LIST.match(candidate) or candidate.startswith(("  ", "\t")):
+                    end = lines[index][1]
+                    index += 1
+                    continue
+                break
+            blocks.append(_Block(start, end))
+            continue
+        index += 1
+        while index < len(lines):
+            candidate = lines[index][2]
+            if (
+                not candidate.strip()
+                or _HEADING.match(candidate)
+                or _FENCE.match(candidate)
+                or _LIST.match(candidate)
+            ):
+                break
+            end = lines[index][1]
+            index += 1
+        blocks.append(_Block(start, end))
+    return blocks
+
+
+def _bounded_spans(content: str, block: _Block, chunk_size: int, overlap: int) -> list[_Block]:
+    if block.end - block.start <= chunk_size:
+        return [block]
+    spans: list[_Block] = []
+    start = block.start
+    while start < block.end:
+        limit = min(start + chunk_size, block.end)
+        end = limit
+        if limit < block.end:
+            window = content[start:limit]
+            candidates = [window.rfind("\n\n"), window.rfind("\n")]
+            whitespace = max(window.rfind(" "), window.rfind("\t"))
+            candidates.append(whitespace)
+            boundary = max((value for value in candidates if value > 0), default=-1)
+            if boundary > 0:
+                end = start + boundary + (2 if window[boundary:boundary + 2] == "\n\n" else 1)
+        spans.append(_Block(start, end, block.heading and start == block.start))
+        if end == block.end:
+            break
+        start = max(start + 1, end - overlap)
+    return spans
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StructureAwareChunker:
+    """Pack Markdown structural blocks before bounded recursive fallback."""
+
+    chunk_size: int = 1000
+    overlap: int = 100
+    max_chunks: int = 10000
+
+    def __post_init__(self) -> None:
+        TextChunker(
+            chunk_size=self.chunk_size,
+            overlap=self.overlap,
+            max_chunks=self.max_chunks,
+        )
+
+    def chunk(self, document: Document) -> tuple[Chunk, ...]:
+        if not isinstance(document, Document):
+            raise TypeError("document must be a Document")
+        if not document.content:
+            return ()
+        blocks = [
+            span
+            for block in _markdown_blocks(document.content)
+            for span in _bounded_spans(document.content, block, self.chunk_size, self.overlap)
+        ]
+        packed: list[tuple[int, int]] = []
+        start = blocks[0].start
+        end = blocks[0].end
+        headings_only = blocks[0].heading
+        for block in blocks[1:]:
+            if (block.heading and not headings_only) or block.end - start > self.chunk_size:
+                packed.append((start, end))
+                start, end = block.start, block.end
+                headings_only = block.heading
+            else:
+                end = block.end
+                headings_only = headings_only and block.heading
+        packed.append((start, end))
+        if len(packed) > self.max_chunks:
+            raise ChunkLimitError(
+                f"document requires {len(packed)} chunks; limit is {self.max_chunks}"
+            )
+        return tuple(
+            Chunk(
+                document_id=document.document_id,
+                chunk_id=_stable_chunk_id(
+                    document,
+                    start_offset=start,
+                    end_offset=end,
+                    chunk_size=self.chunk_size,
+                    overlap=self.overlap,
+                    algorithm="structure-v1",
+                ),
+                content=document.content[start:end],
+                start_offset=start,
+                end_offset=end,
+            )
+            for start, end in packed
+        )
+
+
+__all__ = ["Chunk", "ChunkLimitError", "StructureAwareChunker", "TextChunker"]

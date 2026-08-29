@@ -44,7 +44,7 @@ flowchart TD
     Files[Local File / Directory] --> Adapter[Verified bounded byte read]
     Adapter --> Extractor[Plain Text / AnyDoc Extractor]
     Extractor --> Canonical[KnowledgeSource + Document]
-    Canonical --> Chunker[TextChunker]
+    Canonical --> Chunker[StructureAwareChunker]
     Chunker --> Index[Lexical / Semantic / Hybrid Index]
     Index --> Results[SearchHit + Provenance]
     Canonical --> SQLite[(knowledge.db)]
@@ -67,7 +67,7 @@ flowchart TD
 
 ## 分块与检索
 
-`TextChunker` 使用确定性字符分块，默认 `chunk_size=1000`、`overlap=100`、`max_chunks=10000`。Chunk ID 由 Document ID、content hash、字符区间和影响边界的配置派生。
+默认 `StructureAwareChunker` 先保护 Markdown heading、段落、fenced code、列表和表格边界，再把相邻小 block 打包到 `chunk_size=1000`；超长 block 按空行、行、空白、字符顺序确定性回退。`TextChunker` 仍作为固定窗口 baseline。所有 Chunk 保持 canonical source offsets，ID 由 Document ID、content hash、字符区间、配置和显式算法版本派生。
 
 ### Lexical
 

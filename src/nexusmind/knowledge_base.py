@@ -37,7 +37,7 @@ from .knowledge_base_manifest import (
     read_manifest,
     write_manifest,
 )
-from .knowledge_chunking import TextChunker
+from .knowledge_chunking import StructureAwareChunker
 from .knowledge_inspection import (
     KnowledgeBaseInspection,
     KnowledgeBaseStatus,
@@ -375,7 +375,7 @@ class KnowledgeBase:
     ) -> KnowledgeCollection:
         try:
             return KnowledgeCollection(
-                chunker=TextChunker(),
+                chunker=StructureAwareChunker(),
                 index_factory=factory,
                 limits=KnowledgeCollectionLimits(max_sources=limits.max_sources),
             )
