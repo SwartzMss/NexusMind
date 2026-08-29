@@ -112,10 +112,21 @@ class HybridChunkIndex:
             self._limits.max_results,
             self._limits.max_candidates_per_backend,
             self._limits.max_fusion_entries // 2,
+            self._child_oversampling_capacity(self._lexical),
+            self._child_oversampling_capacity(self._semantic),
         )
         if safe_capacity < self._candidate_depth:
             return None
         return safe_capacity
+
+    def _child_oversampling_capacity(self, child: object) -> int:
+        try:
+            capacity = getattr(child, "max_search_results", None)
+        except Exception:
+            capacity = None
+        if type(capacity) is not int or capacity <= 0:
+            return self._candidate_depth
+        return capacity
 
     def add(self, chunks: tuple[Chunk, ...]) -> None:
         self._mutate("add", chunks)

@@ -30,12 +30,16 @@ oversampling:
 For lexical, semantic, and reranked indexes this is their configured public
 result or candidate capacity. Hybrid uses the minimum of `max_results`,
 `max_candidates_per_backend`, and half of `max_fusion_entries`, accounting for
-disjoint candidates from both children. If Hybrid's fixed `candidate_depth`
-already exceeds that safe value, it advertises no capacity and opts out of
-collection-level oversampling. Clones preserve the same property value because
-they preserve the immutable limits and candidate depth. The base `ChunkIndex`
-protocol does not require this property; existing third-party implementations
-remain valid.
+disjoint candidates from both children. It also intersects valid capacities
+advertised by both child backends. A child with missing, raising, or malformed
+capacity is conservatively capped at Hybrid's existing `candidate_depth`, so
+collection-level diversification never increases that child's request above
+the depth Hybrid already used. If Hybrid's fixed `candidate_depth` exceeds a
+known safe bound, it advertises no capacity and opts out of collection-level
+oversampling. Clones preserve the same property value because they preserve the
+immutable limits, candidate depth, and child configuration. The base
+`ChunkIndex` protocol does not require this property; existing third-party
+implementations remain valid.
 
 For user limit `K`, `KnowledgeCollection.search()` determines backend depth as
 follows:
@@ -112,6 +116,8 @@ Tests must demonstrate:
 - all four built-in backends expose a safe capacity and clones retain it;
 - Hybrid custom limits bound oversampling by per-backend and worst-case fusion
   capacity at the collection boundary;
+- Hybrid intersects child capacities, and an unknown child capacity prevents
+  requests above the existing fixed candidate depth;
 - the high-score outlier example rejects weak cross-document candidates;
 - equal scores, negative scores, deterministic ordering, and positive affine
   invariance remain intact;
