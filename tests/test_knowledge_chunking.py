@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from nexusmind import Chunk, ChunkLimitError, Document, TextChunker
+from nexusmind import Chunk, ChunkLimitError, Document, StructureAwareChunker, TextChunker
 
 
 def _document(content: str) -> Document:
@@ -145,3 +145,121 @@ def test_chunk_count_limit_fails_without_returning_partial_output() -> None:
 def test_chunker_rejects_non_document_input() -> None:
     with pytest.raises(TypeError, match="document must be a Document"):
         TextChunker().chunk("not a document")  # type: ignore[arg-type]
+
+
+def test_structure_chunker_keeps_heading_with_following_content() -> None:
+    content = (
+        "## IAM Token Validation\n\nIAM_Master validates the token.\n\n"
+        "### Expiration\n\nExpired tokens are renewed."
+    )
+    chunks = StructureAwareChunker(chunk_size=70, overlap=10).chunk(_document(content))
+
+    assert chunks[0].content.startswith("## IAM Token Validation")
+    assert "IAM_Master validates the token." in chunks[0].content
+    assert chunks[1].content.startswith("### Expiration")
+    assert "Expired tokens are renewed." in chunks[1].content
+
+
+def test_structure_chunker_protects_code_table_and_list_blocks() -> None:
+    content = (
+        "# Guide\n\nIntro.\n\n"
+        "```python\nprint('marker')\nprint('done')\n```\n\n"
+        "| Key | Value |\n| --- | --- |\n| token | active |\n\n"
+        "- first item\n- second item\n- third item\n"
+    )
+    chunks = StructureAwareChunker(chunk_size=75, overlap=10).chunk(_document(content))
+
+    assert any("```python\nprint('marker')\nprint('done')\n```" in chunk.content for chunk in chunks)
+    assert any("| Key | Value |\n| --- | --- |\n| token | active |" in chunk.content for chunk in chunks)
+    assert any("- first item\n- second item\n- third item" in chunk.content for chunk in chunks)
+
+
+def test_structure_chunker_oversized_block_is_bounded_exact_and_deterministic() -> None:
+    document = _document("# Large\n\n```text\n" + "abcdefghij " * 20 + "\n```")
+    chunker = StructureAwareChunker(chunk_size=50, overlap=5, max_chunks=20)
+
+    first = chunker.chunk(document)
+    second = chunker.chunk(document)
+
+    assert first == second
+    assert all(len(chunk.content) <= 50 for chunk in first)
+    assert all(chunk.content == document.content[chunk.start_offset:chunk.end_offset] for chunk in first)
+    assert [chunk.chunk_id for chunk in first] != [
+        chunk.chunk_id for chunk in TextChunker(chunk_size=50, overlap=5).chunk(document)
+    ]
+
+
+def test_structure_chunker_packs_small_paragraphs_and_enforces_limit() -> None:
+    document = _document("one\n\ntwo\n\nthree\n\nfour")
+    assert len(StructureAwareChunker(chunk_size=30, overlap=5).chunk(document)) == 1
+
+    with pytest.raises(ChunkLimitError):
+        StructureAwareChunker(chunk_size=8, overlap=1, max_chunks=1).chunk(document)
+
+
+def test_structure_chunker_does_not_emit_tiny_parent_heading_chunk() -> None:
+    document = _document("# Parent\n\n## Child\n\nChild details.")
+
+    chunks = StructureAwareChunker(chunk_size=50, overlap=5).chunk(document)
+
+    assert len(chunks) == 1
+    assert chunks[0].content == document.content
+
+
+def test_structure_chunker_shrinks_first_body_span_to_keep_heading_context() -> None:
+    document = _document("# Heading\n\n" + "body words " * 20)
+
+    chunks = StructureAwareChunker(chunk_size=60, overlap=5).chunk(document)
+
+    assert chunks[0].content.startswith("# Heading\n\nbody")
+    assert chunks[0].content != "# Heading\n\n"
+    assert min(len(chunk.content) for chunk in chunks) >= 30
+    assert all(len(chunk.content) <= 60 for chunk in chunks)
+    assert all(chunk.content == document.content[chunk.start_offset:chunk.end_offset] for chunk in chunks)
+
+
+def test_structure_chunker_fails_during_pathological_overlap_expansion() -> None:
+    document = _document("x" * (1024 * 1024 - 1))
+
+    with pytest.raises(ChunkLimitError, match="during fallback"):
+        StructureAwareChunker(
+            chunk_size=1000,
+            overlap=999,
+            max_chunks=10,
+        ).chunk(document)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "```text\nalpha beta gamma\ndelta epsilon zeta\neta theta iota\n```",
+        "- alpha beta gamma\n- delta epsilon zeta\n- eta theta iota\n",
+        "| Key | Value |\n| --- | --- |\n| alpha | beta gamma |\n| delta | epsilon zeta |\n",
+    ],
+)
+def test_oversized_structures_prefer_line_boundaries_over_later_spaces(content: str) -> None:
+    chunks = StructureAwareChunker(chunk_size=32, overlap=0).chunk(_document(content))
+
+    assert len(chunks) > 1
+    assert all(chunk.content.endswith("\n") for chunk in chunks[:-1])
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "# " + "single-heading-token " * 8,
+        "# " + "parent-heading-token " * 4 + "\n\n## " + "child-heading-token " * 5,
+    ],
+)
+def test_oversized_headings_are_bounded_exact_and_deterministic(content: str) -> None:
+    document = _document(content)
+    chunker = StructureAwareChunker(chunk_size=50, overlap=5)
+
+    first = chunker.chunk(document)
+    second = chunker.chunk(document)
+
+    assert first == second
+    assert len(first) > 1
+    assert all(len(chunk.content) <= 50 for chunk in first)
+    assert all(chunk.content == content[chunk.start_offset:chunk.end_offset] for chunk in first)
+    assert [chunk.chunk_id for chunk in first] == [chunk.chunk_id for chunk in second]
