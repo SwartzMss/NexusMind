@@ -74,7 +74,7 @@ def test_portable_script_runs_extracted_archive_knowledge_base_e2e() -> None:
 
     required = (
         "Expand-Archive",
-        "smoke-fixture.md",
+        "smoke-fixture.rtf",
         '"create"',
         '"source", "add"',
         '"sync"',

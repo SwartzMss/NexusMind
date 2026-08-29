@@ -21,6 +21,7 @@ def test_project_exposes_desktop_entry_and_packaging_extra() -> None:
 
     assert project["scripts"]["nexusmind"] == "nexusmind.desktop:main"
     assert any(requirement.startswith("pyinstaller") for requirement in project["optional-dependencies"]["packaging"])
+    assert "firecrawl-anydoc==0.2.4" in project["dependencies"]
 
 
 def test_readme_documents_windows_portable_runtime() -> None:

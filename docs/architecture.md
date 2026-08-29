@@ -41,8 +41,9 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    Files[UTF-8 File / Directory] --> Adapter[Source Adapter]
-    Adapter --> Canonical[KnowledgeSource + Document]
+    Files[Local File / Directory] --> Adapter[Verified bounded byte read]
+    Adapter --> Extractor[Plain Text / AnyDoc Extractor]
+    Extractor --> Canonical[KnowledgeSource + Document]
     Canonical --> Chunker[TextChunker]
     Chunker --> Index[Lexical / Semantic / Hybrid Index]
     Index --> Results[SearchHit + Provenance]
@@ -60,7 +61,7 @@ flowchart TD
 
 ## Ingestion
 
-本地 adapter 当前支持严格 UTF-8 的 `.txt`、`.md` 和 `.markdown`，并限制单文件大小、文档数量、总读取字节、扫描条目数和目录深度。
+本地 adapter 支持严格 UTF-8 的 `.txt`、`.md`、`.markdown`，以及由 AnyDoc 转换为 Markdown 的 `.doc`、`.docx`、`.pdf`、`.ppt`、`.pptx`、`.rtf`、`.epub`、`.odt`。Adapter 仍拥有全部 filesystem access，并在把 verified bytes 交给 extractor 前执行单文件大小、文档数量、总读取字节、扫描条目数和目录深度限制。Extractor 不重新打开来源路径。
 
 目录扫描跳过符号链接、junction 和 Windows reparse point。Discovery 记录文件 identity；读取时复核 discovered、opened 和当前路径 identity 及 containment，降低扫描后路径替换导致越界读取的风险。
 
@@ -194,6 +195,7 @@ python -m nexusmind.retrieval_benchmark --write evals/knowledge/benchmark.md
 | `knowledge_base_manifest.py` | 注册配置与 manifest contract |
 | `knowledge_store.py` | canonical SQLite snapshot store |
 | `knowledge_ingestion.py` | 本地来源 discovery 与读取 |
+| `document_extraction.py` | verified bytes 到 canonical text 的提取边界 |
 | `knowledge_chunking.py` | 确定性分块 |
 | `knowledge_retrieval.py` | lexical contract 与 BM25 |
 | `semantic_retrieval.py` | semantic index |

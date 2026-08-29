@@ -165,12 +165,15 @@ from .semantic_retrieval import (
     SemanticEmbeddingError,
 )
 from .document_extraction import (
+    ANYDOC_CONTENT_TYPES,
     DEFAULT_DOCUMENT_EXTRACTORS,
+    AnyDocExtractor,
     DocumentExtractionError,
     DocumentExtractor,
     DocumentExtractorNotFoundError,
     ExtractedDocument,
     PlainTextDocumentExtractor,
+    UnsupportedDocumentFormatError,
     select_document_extractor,
 )
 from .knowledge_ingestion import (
@@ -291,12 +294,15 @@ __all__ = [
     "DEFAULT_MAX_FILE_BYTES",
     "DEFAULT_MAX_TOTAL_BYTES",
     "DEFAULT_SUPPORTED_EXTENSIONS",
+    "ANYDOC_CONTENT_TYPES",
+    "AnyDocExtractor",
     "DEFAULT_DOCUMENT_EXTRACTORS",
     "DocumentExtractionError",
     "DocumentExtractor",
     "DocumentExtractorNotFoundError",
     "ExtractedDocument",
     "PlainTextDocumentExtractor",
+    "UnsupportedDocumentFormatError",
     "select_document_extractor",
     "DirectoryDepthLimitError",
     "DocumentCountLimitError",

@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import PurePath
 from typing import Mapping, Protocol, runtime_checkable
 
+import anydoc
+
 
 class KnowledgeIngestionError(Exception):
     """Base class for normalized ingestion failures."""
@@ -21,6 +23,10 @@ class InvalidTextEncodingError(DocumentExtractionError):
 
 class DocumentExtractorNotFoundError(DocumentExtractionError):
     """No configured extractor accepts a document's logical path."""
+
+
+class UnsupportedDocumentFormatError(DocumentExtractionError):
+    """A structured document or its required conversion mode is unsupported."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,11 +62,62 @@ class PlainTextDocumentExtractor:
         return ExtractedDocument(content=text, content_type=content_type)
 
 
+ANYDOC_CONTENT_TYPES: Mapping[str, str] = {
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pdf": "application/pdf",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".rtf": "application/rtf",
+    ".epub": "application/epub+zip",
+    ".odt": "application/vnd.oasis.opendocument.text",
+}
+
+
+class _AnyDocBackend(Protocol):
+    def to_markdown_bytes(self, data: bytes) -> str: ...
+
+
+class AnyDocExtractor:
+    """Convert enabled structured formats from verified bytes to Markdown."""
+
+    def __init__(self, backend: _AnyDocBackend = anydoc) -> None:
+        self._backend = backend
+
+    def extract(self, content: bytes, *, logical_path: str) -> ExtractedDocument:
+        extension = PurePath(logical_path).suffix.lower()
+        try:
+            content_type = ANYDOC_CONTENT_TYPES[extension]
+        except KeyError as exc:
+            raise UnsupportedDocumentFormatError(
+                f"unsupported structured document extension: {extension or '<none>'}"
+            ) from exc
+
+        try:
+            markdown = self._backend.to_markdown_bytes(content)
+        except (anydoc.UnsupportedError, anydoc.NeedsOcrError) as exc:
+            raise UnsupportedDocumentFormatError(
+                f"structured document format is unsupported: {logical_path}"
+            ) from exc
+        except Exception as exc:
+            raise DocumentExtractionError(
+                f"structured document extraction failed: {logical_path}"
+            ) from exc
+
+        return ExtractedDocument(
+            content=markdown,
+            content_type=content_type,
+            metadata={"extractor": "anydoc", "source_format": extension.removeprefix(".")},
+        )
+
+
 _PLAIN_TEXT_EXTRACTOR = PlainTextDocumentExtractor()
+_ANYDOC_EXTRACTOR = AnyDocExtractor()
 DEFAULT_DOCUMENT_EXTRACTORS: Mapping[str, DocumentExtractor] = {
     ".md": _PLAIN_TEXT_EXTRACTOR,
     ".markdown": _PLAIN_TEXT_EXTRACTOR,
     ".txt": _PLAIN_TEXT_EXTRACTOR,
+    **{extension: _ANYDOC_EXTRACTOR for extension in ANYDOC_CONTENT_TYPES},
 }
 
 
@@ -84,6 +141,8 @@ def select_document_extractor(
 
 
 __all__ = [
+    "ANYDOC_CONTENT_TYPES",
+    "AnyDocExtractor",
     "DEFAULT_DOCUMENT_EXTRACTORS",
     "DocumentExtractionError",
     "DocumentExtractor",
@@ -92,5 +151,6 @@ __all__ = [
     "InvalidTextEncodingError",
     "KnowledgeIngestionError",
     "PlainTextDocumentExtractor",
+    "UnsupportedDocumentFormatError",
     "select_document_extractor",
 ]
