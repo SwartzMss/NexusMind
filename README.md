@@ -1,18 +1,16 @@
 # NexusMind
 
-NexusMind 是一个面向本地知识的 KnowledgeBase 工具。它可以注册本地文本来源、显式同步内容、执行离线检索，并通过模型生成带可验证引用的回答。
+NexusMind 是一个面向本地知识的 Knowledge Runtime / KnowledgeBase 工具。它可以注册本地文本来源、显式同步内容、执行本地检索，并通过模型生成带可验证引用的回答。
 
-你可以通过本地桌面界面管理知识库，通过 CLI 发起知识问答，也可以将 KnowledgeBase 作为 Python 库集成到自己的应用中。
+你可以通过本地桌面界面管理知识库，通过 CLI 搜索和提问，也可以将 `KnowledgeBase` 作为 Python 库集成到自己的应用中。
 
-> 当前支持 Windows 与 Python 3.11、3.12、3.13。Linux 和 macOS 暂不属于支持平台。
+> 当前支持 Windows 与 Python 3.11、3.12、3.13。Linux 和 macOS 暂不属于正式支持平台。
 
-## 选择发布产物
+## 当前状态
 
-- Windows 用户希望直接运行时，下载 `nexusmind-windows-portable.zip`，解压后运行 `nexusmind\nexusmind.exe`。它自带 Python 运行时，不需要安装 Python。
-- 已安装 Python 3.11、3.12 或 3.13 时，下载 `nexusmind-0.1.0-py3-none-any.whl`，然后运行 `python -m pip install .\nexusmind-0.1.0-py3-none-any.whl`。
-- `nexusmind-0.1.0.tar.gz` 是供需要从源码发行包安装或重新打包的用户使用的 sdist。
+当前 `main` 已经具备完整的第一版 KnowledgeBase 工作流，但仓库目前**没有公开的 GitHub Release**。如需开发使用，可以直接从源码安装；Windows portable 产物可以通过仓库构建脚本或 CI 构建。
 
-所有产物都附在 [GitHub Releases](https://github.com/SwartzMss/NexusMind/releases) 的 `v0.1.0` 发布页中。以下示例中的 `nexusmind`，在 portable 版本中应替换为 `nexusmind\nexusmind.exe`。
+NexusMind 当前重点是验证真实知识库使用体验和检索质量，而不是继续扩展更多数据源或 Agent 能力。
 
 ## 五步快速开始
 
@@ -33,21 +31,28 @@ nexusmind search "密钥轮换" --knowledge-base .\security-kb --limit 5
 nexusmind inspect --knowledge-base .\security-kb
 ```
 
-当前版本支持本地文件和目录中的严格 UTF-8 `.txt`、`.md`、`.markdown` 文件；注册来源后必须运行 `sync`，内容才会进入 KnowledgeBase。默认 BM25 检索完全离线，Semantic、Hybrid-RRF、reranking 和模型问答属于可选能力。
+当前版本支持本地文件和目录中的严格 UTF-8 `.txt`、`.md`、`.markdown` 文件。注册来源后必须运行 `sync`，内容才会进入 KnowledgeBase。
 
-首个版本不支持 Git/GitHub 来源、PDF/Office 解析、后台同步或文件监控、云端 KnowledgeBase，也不会持久化派生的 Chunk、embedding 或检索索引；重新打开时会从 canonical documents 重建它们。
+默认 `search` 使用完全离线、支持 Unicode/CJK 的 BM25。Semantic、Hybrid-RRF、reranking 和模型问答属于可选能力。
+
+首个版本不支持 Git/GitHub 来源、PDF/Office 解析、后台同步或文件监控、云端 KnowledgeBase，也不会持久化派生的 Chunk、embedding 或检索索引；重新打开时会从 canonical documents 重建这些派生状态。
 
 ## 核心能力
 
 - 创建和重新打开本地持久化 KnowledgeBase
 - 注册本地文件或目录，并显式控制同步时机
+- 保存 canonical document 和不可变的内部文档版本历史
 - 默认使用完全离线、支持 Unicode/CJK 的 BM25 检索
-- 可选使用 semantic、Hybrid-RRF 和 reranker 检索后端
+- 可选使用 Semantic、Hybrid-RRF 和 reranker 检索后端
+- 对用户可见搜索结果执行 document-aware diversification，同时保留 backend 原始分数
+- 为模型问答执行有界的 LLM query expansion 和 query-level RRF
+- Query Expansion 失败时自动回退到原始问题检索
 - 根据检索内容生成回答，并验证回答中的引用
 - 检查来源、文档、分块和各检索阶段的诊断信息
-- 提供本地桌面界面、查询 CLI 和 Python API
+- 提供本地桌面界面、CLI 和 Python API
+- 提供 Windows portable 构建和真实 smoke test
 
-底层数据流、存储格式、检索实现和安全边界请参阅[技术架构](docs/architecture.md)。
+底层数据流、存储格式、检索实现和安全边界请参阅 [技术架构](docs/architecture.md)。
 
 ## 开发环境安装与桌面界面
 
@@ -100,33 +105,54 @@ nexusmind diagnose "密钥轮换" --knowledge-base ./security-kb --limit 5
 
 | 命令 | 用途 | 是否修改 KnowledgeBase |
 | --- | --- | --- |
-| `create` | 在 `./security-kb` 创建一个 KnowledgeBase，内部 ID 由程序自动生成。目标目录必须不存在或为空。 | 是 |
-| `source add` | 注册 `./security-notes` 来源。程序会根据路径自动判断它是文件还是目录，并生成内部来源 ID。注册只保存配置，不会读取或索引文件。 | 是，仅注册来源 |
-| `source list` | 列出已经注册的来源类型和路径。它适合确认 `source add` 是否成功，但不能说明内容是否已经同步。 | 否 |
-| `sync` | 读取所有已注册来源，把当前文件内容提交为 canonical documents，并重建用于检索的分块和索引。以后新增、修改或删除来源文件后，需要再次运行此命令。使用 `--source ./security-notes` 可以只同步一个来源。 | 是 |
-| `search` | 在已同步内容中搜索“密钥轮换”，从 backend 的有界候选中执行 document-aware 最终选择，返回最多 5 个分块并显示文档路径、原始 backend 分数和原文。它只做检索，不调用回答模型。 | 否 |
-| `inspect` | 查看 KnowledgeBase 的整体状态，包括来源数和 canonical document 数。使用 `--document <document-id>` 可进一步查看某篇文档的分块、字符范围和预览。 | 否 |
-| `diagnose` | 对同一个搜索词输出检索管线的候选项，包含阶段、排名、分数和文档路径，用来分析为什么某篇文档命中、排序不理想或没有进入最终结果。根据所配置的后端，阶段可能包括 `lexical`、`semantic`、`fusion` 和 `reranker`。 | 否 |
+| `create` | 创建 KnowledgeBase。内部 ID 由程序自动生成，目标目录必须不存在或为空。 | 是 |
+| `source add` | 注册文件或目录来源。注册只保存配置，不读取或索引内容。 | 是，仅注册来源 |
+| `source list` | 列出已注册来源类型和路径。 | 否 |
+| `sync` | 读取来源，把当前文件内容提交为 canonical documents，并重建派生检索状态。 | 是 |
+| `search` | 调用配置的 retrieval backend，并在有界候选上执行 document-aware 最终选择。 | 否 |
+| `inspect` | 查看 KnowledgeBase、来源、canonical documents 和文档 Chunk。 | 否 |
+| `diagnose` | 输出 raw retrieval diagnostics，用于分析各阶段排名、分数和命中情况。 | 否 |
+| `query` | 进行 query expansion、多查询融合、上下文组装和带引用回答。 | 否 |
 
-需要特别区分以下三组概念：
+需要特别区分以下概念：
 
-- **注册不等于同步**：`source add` 只告诉 KnowledgeBase“去哪里找资料”；`sync` 才真正读取文件。首次注册后不执行 `sync`，`search` 不会搜到这些文件。
+- **注册不等于同步**：`source add` 只告诉 KnowledgeBase“去哪里找资料”；`sync` 才真正读取文件。
 - **来源不等于文档**：一个 directory 来源可以产生多篇 canonical documents；`source list` 看注册配置，`inspect` 看同步后的知识状态。
-- **搜索不等于诊断**：`search` 在 lexical、semantic、Hybrid-RRF 或 reranking 完成后，对有界候选执行 document-aware 最终选择；`--limit` 仍是最终结果数上限，选中项的 backend score 不会被改写。`diagnose` 则保留 raw backend ranking、阶段、排名和分数，更适合调试相关度和后端配置。
+- **搜索不等于诊断**：`search` 返回经过最终 document-aware 选择的用户结果；`diagnose` 保留 raw backend ranking，更适合调试相关度。
+- **搜索不等于问答**：`search` 不调用 LLM Query Expander 或 Answer Generator；`query` 才会进入模型问答链路。
 
-本地来源当前只读取严格 UTF-8 编码的 `.txt`、`.md` 和 `.markdown` 文件。上述相对路径均以运行命令时的当前目录为基准。来源的内部 ID 由来源类型和规范化路径稳定派生，用户始终通过路径注册和删除来源。同一类型和路径在删除后重新注册会得到同一个 ID，因此可以继续已有文档版本链。除 `create` 外，如果省略 `--knowledge-base`，CLI 会把当前目录当作 KnowledgeBase；读取类命令可添加 `--json` 以便脚本处理。
+### Search 的检索语义
 
-同一个规范化来源路径在一个 KnowledgeBase 中只能注册一次。CLI、桌面界面和 Python API 都会执行这项检查，避免同一份内容以不同内部 ID 被重复同步。
+`search` 的核心链路是：
 
-删除来源及其 canonical documents：
+```text
+configured retrieval backend
+(BM25 / Semantic / Hybrid / reranker)
+        ↓
+bounded candidate retrieval
+        ↓
+document-aware diversification
+        ↓
+final Top-K
+```
+
+`--limit` 始终表示最终结果数上限。Document-aware selection 不会改写 backend 原始 `score`。`diagnose` 不执行这一最终选择，保持 raw backend ranking。
+
+本地来源当前只读取严格 UTF-8 编码的 `.txt`、`.md` 和 `.markdown` 文件。相对路径均以运行命令时的当前目录为基准。
+
+来源内部 ID 由来源类型和规范化路径稳定派生，用户通过路径注册和删除来源。同一类型和路径在删除后重新注册会得到同一个内部 ID，因此可以继续已有文档版本链。
+
+同一个规范化来源路径在一个 KnowledgeBase 中只能注册一次。CLI、桌面界面和 Python API 都会执行这项检查。
+
+删除来源及其当前 canonical documents：
 
 ```powershell
 nexusmind source remove ./security-notes --knowledge-base ./security-kb
 ```
 
-所有读取类命令均支持适合脚本处理的 `--json` 输出。
+除 `create` 外，如果省略 `--knowledge-base`，CLI 会把当前目录当作 KnowledgeBase。读取类命令支持 `--json` 输出以便脚本处理。
 
-### 生成带引用的回答
+## 生成带引用的回答
 
 `nexusmind query` 用于向已有 KnowledgeBase 提问。模型配置可以写入 `.env`，也可以在 PowerShell 中设置：
 
@@ -143,6 +169,36 @@ $env:NEXUSMIND_MODEL_TIMEOUT = "60"
 nexusmind query "Binder caller UID 是如何获取的？" --knowledge-base ./security-kb
 ```
 
+CLI `query` 当前执行以下链路：
+
+```text
+Original Question
+        ↓
+LLM Query Expansion
+        ↓
+Q0 original + 最多 3 条 expanded queries
+        ↓
+每条 query 独立走 configured retrieval backend
+        ↓
+query-level RRF
+        ↓
+document-aware diversification
+        ↓
+context assembly
+        ↓
+Answer LLM
+        ↓
+validated citations
+```
+
+Query Expansion 有以下约束：
+
+- 原始问题始终作为 `Q0` 保留，不会被 rewritten query 替换；
+- 最多生成 3 条 expanded queries；
+- API、函数名、进程名、文件名、缩写、数字/十六进制错误码以及常见 CamelCase/PascalCase 技术标识符必须原样保留；
+- expansion 超时、网络错误、无效 JSON、标识符校验失败等情况会 fail open，自动退回原始问题检索；
+- query-level RRF 只用于多查询融合，不改写 retrieval backend 自己的 `SearchHit.score`。
+
 查看检索和上下文调试信息：
 
 ```powershell
@@ -150,6 +206,8 @@ nexusmind query "Binder caller UID 是如何获取的？" `
   --knowledge-base ./security-kb `
   --debug
 ```
+
+`--debug` 会额外显示 retrieval backend、实际 retrieval queries、Query Expansion fallback 状态、context 大小和 trace ID。JSON debug 输出还包含 fused result 的 query-index/rank provenance。
 
 获取适合程序处理的 JSON：
 
@@ -159,11 +217,9 @@ nexusmind query "Binder caller UID 是如何获取的？" `
   --json
 ```
 
-如果省略 `--knowledge-base`，CLI 默认将当前目录作为 KnowledgeBase。
-
 ## Python 接入
 
-NexusMind 提供公开的 KnowledgeBase Python API。它适合将本地知识检索嵌入其他服务、脚本或桌面应用。
+NexusMind 提供公开的 `KnowledgeBase` Python API。它适合将本地知识检索嵌入其他服务、脚本或桌面应用。
 
 ### 创建与同步
 
@@ -175,9 +231,7 @@ from nexusmind import KnowledgeBase, LocalDirectorySourceConfig
 kb = KnowledgeBase.create("./security-kb")
 
 registered = kb.add_source(
-    LocalDirectorySourceConfig(
-        path="./security-notes",
-    )
+    LocalDirectorySourceConfig(path="./security-notes")
 )
 kb.sync_source(registered.source_id)
 kb.close()
@@ -205,14 +259,24 @@ kb.close()
 
 ### 生成带引用的回答
 
-创建或打开 KnowledgeBase 时注入 `answer_generator`：
+Python API 中，`answer_generator` 和 `query_expander` 是两个独立的可选依赖。CLI `query` 默认会同时创建 OpenAI-compatible Answer Provider 和 Query Expander；Python API 如果希望获得相同的 query-expansion 行为，需要显式注入两者：
 
 ```python
-from nexusmind import KnowledgeBase
+from nexusmind import (
+    KnowledgeBase,
+    OpenAICompatibleAnswerProvider,
+    OpenAICompatibleQueryExpander,
+)
+from nexusmind.config import load_model_config_from_env
+
+config = load_model_config_from_env()
+answer_provider = OpenAICompatibleAnswerProvider(config)
+query_expander = OpenAICompatibleQueryExpander(config)
 
 kb = KnowledgeBase.open(
     "./security-kb",
-    answer_generator=generator,
+    answer_generator=answer_provider,
+    query_expander=query_expander,
 )
 
 result = kb.query("Binder caller UID 是如何获取的？")
@@ -224,9 +288,11 @@ for citation in result.citations:
 kb.close()
 ```
 
+如果只注入 `answer_generator` 而不注入 `query_expander`，`query()` 会直接使用原始问题完成一次检索，然后进入现有 context / answer / citation 流程。
+
 生成器返回的 citation handle 不会被直接信任。NexusMind 只允许引用本次实际提供给模型的 passages；未知、重复、格式错误或未提供给模型的 handle 会被拒绝。
 
-完整流程见[技术架构：Knowledge 查询流程](docs/architecture.md#knowledge-查询流程)。
+完整流程见 [技术架构：Knowledge 查询流程](docs/architecture.md#knowledge-查询流程)。
 
 ### 检查知识库
 
@@ -247,9 +313,9 @@ print(document.chunks)
 kb.close()
 ```
 
-- `status()`：查看知识库 ID、名称和数量统计
+- `status()`：查看知识库 ID 和数量统计
 - `list_sources()`：列出已注册来源
-- `list_documents()`：列出 canonical documents
+- `list_documents()`：列出当前 canonical documents
 - `inspect()`：获取来源和文档的 coherent 只读视图
 - `inspect_document()`：检查文档及其派生 Chunk
 
@@ -268,7 +334,9 @@ for candidate in diagnostics.candidates:
 kb.close()
 ```
 
-诊断结果可以包含 lexical、semantic、fusion 和 reranker 阶段的排名、分数、命中词与 RRF contribution。该能力要求当前检索 backend 实现 `DiagnosticChunkIndex`。
+诊断结果可以包含 lexical、semantic、fusion 和 reranker 阶段的排名、分数、命中词与 RRF contribution。该能力要求当前 retrieval backend 实现 `DiagnosticChunkIndex`。
+
+Query Expansion 不会改变 `search()` 和 `diagnose_search()` 的语义；它只属于 `KnowledgeBase.query()` 的可选 query-time pipeline。
 
 ## KnowledgeBase 如何保存数据
 
@@ -281,33 +349,37 @@ security-kb/
 └── .knowledge-base.lock   # 跨 handle/process 协调
 ```
 
-同步会比较文档内容哈希：首次出现、内容变化，或删除后重新出现时，
-KnowledgeBase 会追加一条不可变的内部版本记录；内容未变化时不会创建新版本。
+同步会比较文档内容哈希：首次出现、内容变化，或删除后重新出现时，KnowledgeBase 会追加一条不可变的内部版本记录；内容未变化时不会创建新版本。
+
 文档或来源从当前快照移除后，已有版本仍保留在 SQLite 中，用于后续维护和审计基础。
 
-搜索、问答、检查和索引始终只使用当前有效文档。历史版本不会被分块或进入检索结果，
-本版本也不提供列出或读取历史的公开 API。Git 历史分析、后台自动同步和 UI 时间线不在此功能范围内。
+搜索、问答、检查和索引始终只使用当前有效文档。历史版本不会被分块或进入检索结果，本版本也不提供列出或读取历史的公开 API。
 
 Chunk、embedding 和检索索引不会持久化，重新打开时会根据当前 canonical documents 重建。不要手动删除、替换或链接 `.knowledge-base.lock`。
 
-首个公开版本使用单一、严格的存储契约：`manifest.json` 与完整 SQLite schema 均为 version 1。非空 snapshot 必须携带与当前文档一致的版本历史；未知版本、不完整 schema 或不一致历史都会 fail closed，不执行迁移或自动补全。
+当前使用单一、严格的持久化契约：`manifest.json` 与完整 SQLite schema 均为 version 1。未知版本、不完整 schema 或不一致历史都会 fail closed，不执行自动迁移或修复。
 
-更完整的同步原子性、并发协调与恢复策略见[技术架构：KnowledgeBase 存储](docs/architecture.md#knowledgebase-存储)。
+更完整的同步原子性、并发协调与恢复策略见 [技术架构：KnowledgeBase 存储](docs/architecture.md#knowledgebase-存储)。
 
 ## 当前限制
 
 - 本地来源仅支持严格 UTF-8 的 `.txt`、`.md` 和 `.markdown`
 - 来源不会被后台监控或自动同步
-- 默认检索是词法 BM25，不包含同义词、自动改写或语义理解
-- semantic embedding 和模型问答可能产生网络延迟与服务费用
-- KnowledgeBase 当前没有持久化 embedding 或索引
+- 默认 `search` 是词法 BM25，不自动改写查询
+- CLI `query` 在配置模型后会执行有界的 LLM Query Expansion，再进行多查询检索与 RRF 融合
+- Semantic embedding、Query Expansion 和模型回答可能产生网络延迟与服务费用
+- KnowledgeBase 当前没有持久化 embedding、Chunk 或检索索引
 - PDF、Office、网页和 GitHub ingestion 暂未提供
+- Linux 和 macOS 当前没有纳入正式支持矩阵
 
-## 安全与隐私
+## 安全、隐私与模型调用
 
-- 默认 BM25 搜索完全在本地执行
-- 使用 semantic provider 时，文档或查询可能发送给 embedding 服务
-- 使用 `query()` 或 CLI 问答时，问题和选中的知识片段会发送给模型服务商
+- 默认 BM25 `search` 完全在本地执行
+- 使用 Semantic provider 时，文档内容或查询可能发送给 embedding 服务
+- CLI `query` 默认会先把**原始问题**发送给 Query Expansion 模型；Query Expansion 阶段不会发送知识库文档内容
+- Answer 阶段会把原始问题和本次选中的 evidence passages 发送给模型服务商
+- 因此一次 CLI `query` 通常至少包含一次 Query Expansion 请求和一次 Answer 请求，可能产生额外网络延迟和模型费用
+- Query Expansion 失败会回退到原始问题检索，不会阻止后续问答
 - 来源读取有文件大小、数量、总字节和目录深度限制
 - 本地 adapter 拒绝或跳过符号链接、junction 和 Windows reparse point
 - 引用只能由本次模型上下文中的 provenance allowlist 构造
@@ -315,59 +387,34 @@ Chunk、embedding 和检索索引不会持久化，重新打开时会根据当�
 
 ## Windows 可移植 CLI
 
-Windows portable artifact 使用 PyInstaller `onedir` 模式，将 `nexusmind.exe`、
-Python runtime 和运行依赖放在同一个应用目录中。解压
-`nexusmind-windows-portable.zip` 后可直接运行：
+Windows portable 使用 PyInstaller `onedir` 模式，将 `nexusmind.exe`、Python runtime 和运行依赖放在同一个应用目录中。
 
-```powershell
-.\nexusmind\nexusmind.exe --help
-```
-
-无需另行安装 Python。ZIP 只包含程序文件，不预置用户数据、配置、日志或模型；
-GUI、安装器、自动更新和模型分发不属于该 artifact。
-
-首次启动会在 `nexusmind.exe` 同级创建 `.nexusmind` 可写运行目录：
-
-```text
-nexusmind\
-├── nexusmind.exe
-├── _internal\
-└── .nexusmind\
-    ├── config\
-    ├── data\
-    ├── logs\
-    │   └── nexusmind.log
-    └── models\
-```
-
-该位置由 exe 的绝对路径确定，不受启动时的当前工作目录影响。exe 所在目录必须可写；
-如果目录只读，可将整个 portable 目录移动到可写位置，或通过
-`NEXUSMIND_RUNTIME_DIR` 指定其他绝对路径。相对覆盖路径仍会被拒绝。现有
-KnowledgeBase 路径参数由用户显式指定；建议将需要与 portable runtime 一起管理的
-本地数据库放在 `.nexusmind\data\` 下。
-
-旧版本默认使用的用户目录数据不会自动迁移到 exe 同级。需要保留旧数据时，请手动
-复制原 `.nexusmind` 内容，或将 `NEXUSMIND_RUNTIME_DIR` 暂时指向旧目录。升级时应
-保留或备份 exe 同级的 `.nexusmind`；删除整个解压目录也会删除其中的日志、配置、
-模型及其他本地数据。
-
-`logs\nexusmind.log` 使用有界轮转的单行 JSON 日志，记录启动、退出、同步、搜索、
-问答和失败诊断。日志只保留操作名、计数、耗时、错误类型等诊断字段，不写入 API
-Key、完整问题、文档内容、回答或工具输出。未预期异常会在终端显示简短提示和日志
-位置，并以非零状态退出。
-
-维护者可在 Windows PowerShell 中构建同一 portable ZIP：
+维护者可以在 Windows PowerShell 中构建 portable ZIP：
 
 ```powershell
 python -m pip install -e ".[dev,packaging]"
 .\scripts\build-portable.ps1
 ```
 
-脚本会构建 `dist\nexusmind\nexusmind.exe`、从应用目录外执行 `--help` smoke test，
-确认 exe 同级的 `.nexusmind\logs\nexusmind.log` 已生成，然后创建
-`dist\nexusmind-windows-portable.zip`。CI 也会在 `windows-latest` 上执行该真实
-打包和 smoke test；Actions Artifact 直接包含 portable 目录内容，下载后只需解压
-一次。
+构建后可以运行：
+
+```powershell
+.\dist\nexusmind\nexusmind.exe --help
+```
+
+构建脚本会从应用目录外执行 smoke test，并创建：
+
+```text
+dist\nexusmind-windows-portable.zip
+```
+
+CI 也会在 `windows-latest` 上执行真实 portable 构建和 smoke test。
+
+Portable runtime 使用独立的 `.nexusmind` 可写运行目录，用于保存配置、数据、日志和模型缓存。可以通过 `NEXUSMIND_RUNTIME_DIR` 指定其他绝对路径。
+
+`logs\nexusmind.log` 使用有界轮转的单行 JSON 日志，记录启动、退出、同步、搜索、问答和失败诊断。日志不会记录 API Key、完整问题、文档正文或完整回答。
+
+当前仓库没有公开 GitHub Release，因此 README 不提供不存在的版本化 wheel / sdist / portable 下载地址。正式重新发布时，再由 Release workflow 生成并附加对应产物。
 
 ## 开发验证
 
@@ -380,12 +427,14 @@ python -m pytest -q
 
 CI 在 `windows-latest` 上运行离线测试，不依赖真实 API Key、模型服务或开发者本机目录。
 
-## 项目文档
+## 项目文档与评测
 
 - [KnowledgeBase 技术架构](docs/architecture.md#knowledge-runtime)
 - [检索 Benchmark 说明与结果](evals/knowledge/benchmark.md)
+- [Document-aware diversification 评测](evals/knowledge/diversification.md)
+- [Query Expansion deterministic evaluation](evals/knowledge/query_expansion/)
 
-当前版本已移除早期 Agent Runtime、Tool、Workspace、MCP 和 Agent Skill 实现。未来可以在不引入 Agent Tool Loop 的前提下增加 Knowledge-native Skill 和 Knowledge persistence。
+NexusMind 当前定位是本地 Knowledge Runtime。早期 Agent Runtime、Tool、Workspace、MCP 和 Agent Skill 实现已移除；当前阶段优先通过真实知识库 dogfooding 发现检索、问答、诊断和可用性问题。
 
 ## License
 
