@@ -104,6 +104,37 @@ def test_hybrid_index_exposes_configured_search_capacity_across_clone() -> None:
     assert index.clone().max_search_results == 10
 
 
+def test_hybrid_index_exposes_capacity_safe_for_two_backend_fusion() -> None:
+    index = _hybrid(
+        _ScriptedIndex(),
+        _ScriptedIndex(),
+        limits=HybridChunkIndexLimits(
+            max_results=20,
+            max_candidates_per_backend=10,
+            max_fusion_entries=20,
+        ),
+        candidate_depth=10,
+    )
+
+    assert index.max_search_results == 10
+    assert index.clone().max_search_results == 10
+
+
+def test_hybrid_index_does_not_advertise_unsafe_fixed_candidate_depth() -> None:
+    index = _hybrid(
+        _ScriptedIndex(),
+        _ScriptedIndex(),
+        limits=HybridChunkIndexLimits(
+            max_results=20,
+            max_candidates_per_backend=10,
+            max_fusion_entries=10,
+        ),
+        candidate_depth=10,
+    )
+
+    assert index.max_search_results is None
+
+
 @pytest.mark.parametrize("value", [True, 0, -1])
 def test_hybrid_rrf_k_and_candidate_depth_require_positive_integers(
     value: object,

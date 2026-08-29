@@ -123,6 +123,8 @@ def test_selection_is_deterministic_and_bounded_by_limit() -> None:
         (10, 100, 40),
         (25, 100, 100),
         (100, 100, 100),
+        (101, None, 101),
+        (150, 200, 150),
         (5, None, 5),
         (5, True, 5),
         (5, 5.0, 5),
@@ -148,13 +150,13 @@ def test_candidate_rejects_invalid_score(score: object) -> None:
         RankedDocumentCandidate("document", score)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("limit", [0, -1, 101, True, 1.0, "1", None])
+@pytest.mark.parametrize("limit", [0, -1, True, 1.0, "1", None])
 def test_depth_rejects_invalid_limit(limit: object) -> None:
     with pytest.raises((TypeError, ValueError), match="limit"):
         search_candidate_depth(limit)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("limit", [0, -1, 101, True, 1.0, "1", None])
+@pytest.mark.parametrize("limit", [0, -1, True, 1.0, "1", None])
 def test_selection_rejects_invalid_limit(limit: object) -> None:
     with pytest.raises((TypeError, ValueError), match="limit"):
         select_document_aware_indices((), limit=limit)  # type: ignore[arg-type]

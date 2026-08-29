@@ -390,16 +390,13 @@ def test_search_validates_every_oversampled_candidate_before_selection() -> None
     assert state.search_calls == [("a", 4)]
 
 
-def test_search_rejects_limit_above_candidate_bound_before_backend_call() -> None:
-    state = _ScriptedSearchState((), [])
-    collection = KnowledgeCollection(
-        index_factory=lambda: _ScriptedSearchIndex(state)  # type: ignore[arg-type]
-    )
+def test_search_passes_limit_above_candidate_ceiling_to_unknown_backend() -> None:
+    state, collection = _scripted_collection(capacity=None, hit_count=150)
 
-    with pytest.raises(ValueError, match="at most 100"):
-        collection.search("query", limit=101)
+    results = collection.search("query", limit=150)
 
-    assert state.search_calls == []
+    assert len(results) == 150
+    assert state.search_calls == [("query", 150)]
 
 
 def test_search_bounds_oversampling_by_advertised_backend_capacity() -> None:

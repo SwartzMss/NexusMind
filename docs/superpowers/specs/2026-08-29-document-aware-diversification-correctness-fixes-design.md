@@ -19,29 +19,39 @@ never applied to `diagnose_search()`.
 ## Backend result capacity
 
 The four built-in final retrieval backends expose a read-only
-`max_search_results` property whose value is their configured public
-`max_results`:
+`max_search_results` property whose value is safe for collection-level
+oversampling:
 
 - `InMemoryChunkIndex`;
 - `InMemorySemanticChunkIndex`;
 - `HybridChunkIndex`;
 - `RerankedChunkIndex`.
 
-Clones preserve the same property value because they preserve the immutable
-limits object. The base `ChunkIndex` protocol does not require this property;
-existing third-party implementations remain valid.
+For lexical, semantic, and reranked indexes this is their configured public
+result or candidate capacity. Hybrid uses the minimum of `max_results`,
+`max_candidates_per_backend`, and half of `max_fusion_entries`, accounting for
+disjoint candidates from both children. If Hybrid's fixed `candidate_depth`
+already exceeds that safe value, it advertises no capacity and opts out of
+collection-level oversampling. Clones preserve the same property value because
+they preserve the immutable limits and candidate depth. The base `ChunkIndex`
+protocol does not require this property; existing third-party implementations
+remain valid.
 
 For user limit `K`, `KnowledgeCollection.search()` determines backend depth as
 follows:
 
 ```text
-desired = min(4K, 100)
+desired = max(K, min(4K, 100))
 
 if max_search_results is a positive plain integer and K <= max_search_results:
     backend_depth = min(desired, max_search_results)
 else:
     backend_depth = K
 ```
+
+Here, `100` is the maximum oversampling candidate depth, not a public search
+result limit. Consequently, `K > 100` remains valid and `desired` never becomes
+smaller than `K`.
 
 The fallback is deliberately conservative. A third-party backend without the
 optional property receives exactly the same limit it received before
@@ -96,10 +106,12 @@ Tests must demonstrate:
 - a backend with `max_search_results=10` and user `limit=5` receives depth 10
   and succeeds;
 - a backend without the optional capacity receives exactly `limit`;
+- a third-party backend without capacity receives `K > 100` unchanged;
 - malformed or raising third-party capacity properties do not introduce a new
   failure;
-- all four built-in backends expose their configured capacity and clones retain
-  it;
+- all four built-in backends expose a safe capacity and clones retain it;
+- Hybrid custom limits bound oversampling by per-backend and worst-case fusion
+  capacity at the collection boundary;
 - the high-score outlier example rejects weak cross-document candidates;
 - equal scores, negative scores, deterministic ordering, and positive affine
   invariance remain intact;

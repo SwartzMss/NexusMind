@@ -99,10 +99,23 @@ class HybridChunkIndex:
         self._semantic = semantic
 
     @property
-    def max_search_results(self) -> int:
-        """Return the configured maximum accepted final search limit."""
+    def max_search_results(self) -> int | None:
+        """Return a capacity that is safe for collection-level oversampling.
 
-        return self._limits.max_results
+        Fusion may receive disjoint results from both child backends, so its
+        worst-case temporary size is twice the per-backend candidate limit.
+        When the fixed candidate depth alone cannot satisfy that bound, there
+        is no configuration-derived capacity safe to advertise.
+        """
+
+        safe_capacity = min(
+            self._limits.max_results,
+            self._limits.max_candidates_per_backend,
+            self._limits.max_fusion_entries // 2,
+        )
+        if safe_capacity < self._candidate_depth:
+            return None
+        return safe_capacity
 
     def add(self, chunks: tuple[Chunk, ...]) -> None:
         self._mutate("add", chunks)

@@ -10,6 +10,7 @@ from nexusmind import (
     Document,
     EmbeddingVector,
     HybridChunkIndex,
+    HybridChunkIndexLimits,
     InMemoryChunkIndex,
     InMemorySemanticChunkIndex,
     KnowledgeCollection,
@@ -98,6 +99,19 @@ def _hybrid_factory():
     )
 
 
+def _bounded_hybrid_factory():
+    return HybridChunkIndex(
+        lexical_index_factory=InMemoryChunkIndex,
+        semantic_index_factory=_semantic_index,
+        limits=HybridChunkIndexLimits(
+            max_results=20,
+            max_candidates_per_backend=10,
+            max_fusion_entries=20,
+        ),
+        candidate_depth=10,
+    )
+
+
 def _reranked_factory():
     return RerankedChunkIndex(
         base_index_factory=InMemoryChunkIndex,
@@ -163,3 +177,19 @@ def test_every_final_backend_applies_selector_and_preserves_its_own_raw_values(
         raw_hit = raw_by_chunk[result.hit.chunk.chunk_id]
         assert result.hit.score == raw_hit.score
         assert result.hit.matched_terms == raw_hit.matched_terms
+
+
+def test_collection_oversampling_respects_custom_hybrid_capacity() -> None:
+    documents = tuple(
+        Document("docs", f"{index}.md", f"broad result {index}")
+        for index in range(6)
+    )
+    collection = KnowledgeCollection(
+        chunker=_SegmentChunker(),
+        index_factory=_bounded_hybrid_factory,
+    )
+    collection.sync(_Adapter(documents))
+
+    results = collection.search("broad", limit=5)
+
+    assert len(results) == 5

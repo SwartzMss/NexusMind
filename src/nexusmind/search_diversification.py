@@ -28,8 +28,10 @@ def search_candidate_depth(limit: int, *, backend_capacity: object = None) -> in
     ):
         return limit
     return min(
-        limit * SEARCH_CANDIDATE_MULTIPLIER,
-        MAX_SEARCH_CANDIDATES,
+        max(
+            limit,
+            min(limit * SEARCH_CANDIDATE_MULTIPLIER, MAX_SEARCH_CANDIDATES),
+        ),
         backend_capacity,
     )
 
@@ -90,5 +92,3 @@ def _validate_limit(limit: int) -> None:
         raise TypeError("limit must be an integer")
     if limit <= 0:
         raise ValueError("limit must be positive")
-    if limit > MAX_SEARCH_CANDIDATES:
-        raise ValueError(f"limit must be at most {MAX_SEARCH_CANDIDATES}")
