@@ -128,6 +128,18 @@ def test_reranker_limits_require_positive_plain_integers(
         RerankerLimits(**{field: value})
 
 
+def test_reranked_index_exposes_configured_search_capacity_across_clone() -> None:
+    index = RerankedChunkIndex(
+        base_index_factory=_Index,
+        reranker=_Reranker(),
+        candidate_depth=10,
+        limits=RerankerLimits(max_candidates=10, max_results=10),
+    )
+
+    assert index.max_search_results == 10
+    assert index.clone().max_search_results == 10
+
+
 @pytest.mark.parametrize("value", [True, 0, -1, 1.0, "1"])
 def test_candidate_depth_requires_positive_plain_integer(value: object) -> None:
     with pytest.raises((TypeError, ValueError)):

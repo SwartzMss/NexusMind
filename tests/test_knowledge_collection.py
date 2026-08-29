@@ -144,6 +144,28 @@ class _ScriptedSearchIndex:
         return _ScriptedSearchIndex(self.state)
 
 
+class _CapacityScriptedSearchIndex(_ScriptedSearchIndex):
+    def __init__(self, state: _ScriptedSearchState, capacity: object) -> None:
+        super().__init__(state)
+        self._capacity = capacity
+
+    @property
+    def max_search_results(self) -> object:
+        return self._capacity
+
+    def clone(self) -> "_CapacityScriptedSearchIndex":
+        return _CapacityScriptedSearchIndex(self.state, self._capacity)
+
+
+class _RaisingCapacityScriptedSearchIndex(_ScriptedSearchIndex):
+    @property
+    def max_search_results(self) -> int:
+        raise RuntimeError("private capacity failure")
+
+    def clone(self) -> "_RaisingCapacityScriptedSearchIndex":
+        return _RaisingCapacityScriptedSearchIndex(self.state)
+
+
 def _scripted_hit(
     document: Document,
     token: str,
@@ -162,6 +184,28 @@ def _scripted_hit(
         score,
         matched_terms,
     )
+
+
+def _scripted_collection(
+    *, capacity: object | None, hit_count: int, raise_capacity: bool = False
+) -> tuple[_ScriptedSearchState, KnowledgeCollection]:
+    document = _document(
+        "docs", "capacity.txt", " ".join(f"a{index}" for index in range(hit_count))
+    )
+    hits = tuple(
+        _scripted_hit(document, f"a{index}", float(hit_count - index), ("broad",))
+        for index in range(hit_count)
+    )
+    state = _ScriptedSearchState(hits, [])
+    if raise_capacity:
+        factory = lambda: _RaisingCapacityScriptedSearchIndex(state)
+    elif capacity is None:
+        factory = lambda: _ScriptedSearchIndex(state)
+    else:
+        factory = lambda: _CapacityScriptedSearchIndex(state, capacity)
+    collection = KnowledgeCollection(index_factory=factory)  # type: ignore[arg-type]
+    collection.sync(FakeAdapter("docs", (document,)))
+    return state, collection
 
 
 def test_first_sync_indexes_one_document_and_returns_summary() -> None:
@@ -288,7 +332,7 @@ def test_search_diversifies_resolved_documents_without_rewriting_backend_values(
     )
     state = _ScriptedSearchState(raw_hits, [])
     collection = KnowledgeCollection(
-        index_factory=lambda: _ScriptedSearchIndex(state)  # type: ignore[arg-type]
+        index_factory=lambda: _CapacityScriptedSearchIndex(state, 100)  # type: ignore[arg-type]
     )
     collection.sync(FakeAdapter("docs", (one, two, three)))
 
@@ -316,7 +360,7 @@ def test_search_backfills_one_document_and_returns_fewer_than_limit() -> None:
     )
     state = _ScriptedSearchState(raw_hits, [])
     collection = KnowledgeCollection(
-        index_factory=lambda: _ScriptedSearchIndex(state)  # type: ignore[arg-type]
+        index_factory=lambda: _CapacityScriptedSearchIndex(state, 100)  # type: ignore[arg-type]
     )
     collection.sync(FakeAdapter("docs", (document,)))
 
@@ -336,7 +380,7 @@ def test_search_validates_every_oversampled_candidate_before_selection() -> None
     )
     state = _ScriptedSearchState(returned, [])
     collection = KnowledgeCollection(
-        index_factory=lambda: _ScriptedSearchIndex(state)  # type: ignore[arg-type]
+        index_factory=lambda: _CapacityScriptedSearchIndex(state, 100)  # type: ignore[arg-type]
     )
     collection.sync(FakeAdapter("docs", (document,)))
 
@@ -356,6 +400,42 @@ def test_search_rejects_limit_above_candidate_bound_before_backend_call() -> Non
         collection.search("query", limit=101)
 
     assert state.search_calls == []
+
+
+def test_search_bounds_oversampling_by_advertised_backend_capacity() -> None:
+    state, collection = _scripted_collection(capacity=10, hit_count=10)
+
+    results = collection.search("broad", limit=5)
+
+    assert len(results) == 5
+    assert state.search_calls == [("broad", 10)]
+
+
+def test_search_without_backend_capacity_preserves_requested_limit() -> None:
+    state, collection = _scripted_collection(capacity=None, hit_count=10)
+
+    collection.search("broad", limit=5)
+
+    assert state.search_calls == [("broad", 5)]
+
+
+@pytest.mark.parametrize("capacity", [True, 5.0, 0])
+def test_search_ignores_malformed_backend_capacity(capacity: object) -> None:
+    state, collection = _scripted_collection(capacity=capacity, hit_count=10)
+
+    collection.search("broad", limit=5)
+
+    assert state.search_calls == [("broad", 5)]
+
+
+def test_search_ignores_raising_backend_capacity() -> None:
+    state, collection = _scripted_collection(
+        capacity=None, hit_count=10, raise_capacity=True
+    )
+
+    collection.search("broad", limit=5)
+
+    assert state.search_calls == [("broad", 5)]
 
 
 @pytest.mark.parametrize(

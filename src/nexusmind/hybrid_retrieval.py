@@ -98,6 +98,12 @@ class HybridChunkIndex:
         self._lexical = lexical
         self._semantic = semantic
 
+    @property
+    def max_search_results(self) -> int:
+        """Return the configured maximum accepted final search limit."""
+
+        return self._limits.max_results
+
     def add(self, chunks: tuple[Chunk, ...]) -> None:
         self._mutate("add", chunks)
 

@@ -334,7 +334,14 @@ class KnowledgeCollection:
         del self._sources[source_id]
 
     def search(self, query: str, *, limit: int = 10) -> tuple[KnowledgeSearchResult, ...]:
-        candidate_depth = search_candidate_depth(limit)
+        try:
+            backend_capacity = getattr(self._index, "max_search_results", None)
+        except Exception:
+            backend_capacity = None
+        candidate_depth = search_candidate_depth(
+            limit,
+            backend_capacity=backend_capacity,
+        )
         hits = self._index.search(query, limit=candidate_depth)
         if type(hits) is not tuple:
             raise KnowledgeSearchResolutionError("index search result must be a tuple")

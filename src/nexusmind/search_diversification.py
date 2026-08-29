@@ -20,9 +20,19 @@ class RankedDocumentCandidate:
             raise ValueError("score must be a finite float")
 
 
-def search_candidate_depth(limit: int) -> int:
+def search_candidate_depth(limit: int, *, backend_capacity: object = None) -> int:
     _validate_limit(limit)
-    return min(limit * SEARCH_CANDIDATE_MULTIPLIER, MAX_SEARCH_CANDIDATES)
+    if (
+        type(backend_capacity) is not int
+        or backend_capacity <= 0
+        or limit > backend_capacity
+    ):
+        return limit
+    return min(
+        limit * SEARCH_CANDIDATE_MULTIPLIER,
+        MAX_SEARCH_CANDIDATES,
+        backend_capacity,
+    )
 
 
 def select_document_aware_indices(

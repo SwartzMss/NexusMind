@@ -125,6 +125,10 @@ class _SearchOnlyIndex(_DiagnosticIndex):
 
 
 class _RawIsolationIndex(_DiagnosticIndex):
+    @property
+    def max_search_results(self) -> int:
+        return 100
+
     def search(self, query: str, *, limit: int = 10) -> tuple[SearchHit, ...]:
         self.state.search_calls += 1
         self.state.search_limits.append(limit)

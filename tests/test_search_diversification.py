@@ -101,10 +101,24 @@ def test_selection_is_deterministic_and_bounded_by_limit() -> None:
 
 
 @pytest.mark.parametrize(
-    ("limit", "depth"), [(1, 4), (10, 40), (25, 100), (100, 100)]
+    ("limit", "capacity", "depth"),
+    [
+        (1, 100, 4),
+        (5, 10, 10),
+        (10, 100, 40),
+        (25, 100, 100),
+        (100, 100, 100),
+        (5, None, 5),
+        (5, True, 5),
+        (5, 5.0, 5),
+        (5, 0, 5),
+        (5, 4, 5),
+    ],
 )
-def test_candidate_depth_is_bounded(limit: int, depth: int) -> None:
-    assert search_candidate_depth(limit) == depth
+def test_candidate_depth_respects_optional_backend_capacity(
+    limit: int, capacity: object, depth: int
+) -> None:
+    assert search_candidate_depth(limit, backend_capacity=capacity) == depth
 
 
 @pytest.mark.parametrize("document_id", ["", None, 1, True])
