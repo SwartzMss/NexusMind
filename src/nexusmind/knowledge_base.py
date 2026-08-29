@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import closing, contextmanager
 from copy import deepcopy
+from dataclasses import dataclass
 import errno
 import os
 from pathlib import Path
@@ -55,7 +56,7 @@ from .knowledge_collection import (
     KnowledgeSnapshot,
     KnowledgeSyncResult,
 )
-from .knowledge_retrieval import InMemoryChunkIndex, SearchHit
+from .knowledge_retrieval import InMemoryChunkIndex
 from .knowledge_query import (
     KnowledgeQueryOptions,
     KnowledgeQueryResult,
@@ -88,6 +89,15 @@ _UNSUPPORTED_LINK_ERRNOS = frozenset(
     if value is not None
 )
 _WINDOWS_ERROR_NOT_SUPPORTED = 50
+
+
+@dataclass(frozen=True, slots=True)
+class _FusedCandidate:
+    """A backend result plus its separate query-level fusion metadata."""
+
+    result: KnowledgeSearchResult
+    fusion_score: float
+    ranks: tuple[tuple[int, int], ...]
 
 
 def _limits(value: KnowledgeBaseLimits | None) -> KnowledgeBaseLimits:
@@ -792,15 +802,26 @@ class KnowledgeBase:
             except Exception as exc:
                 expansion_error = type(exc).__name__
         try:
-            ranked_lists = tuple(
-                self._collection.search_backend(
-                    retrieval_query, limit=active_options.retrieval_limit
+            if len(retrieval_queries) == 1:
+                # Preserve the pre-expansion path and #110's relevance safeguard,
+                # both of which operate on the backend's original scores.
+                fused = self._collection.search(
+                    question, limit=active_options.retrieval_limit
                 )
-                for retrieval_query in retrieval_queries
-            )
-            fused, fused_provenance = self._fuse_query_results(
-                ranked_lists, limit=active_options.retrieval_limit
-            )
+                fused_provenance = tuple(
+                    (item.hit.chunk.chunk_id, ((0, rank),))
+                    for rank, item in enumerate(fused, start=1)
+                )
+            else:
+                ranked_lists = tuple(
+                    self._collection.search_backend(
+                        retrieval_query, limit=active_options.retrieval_limit
+                    )
+                    for retrieval_query in retrieval_queries
+                )
+                fused, fused_provenance = self._fuse_query_results(
+                    ranked_lists, limit=active_options.retrieval_limit
+                )
             context = assemble_context(
                 question,
                 fused,
@@ -868,28 +889,30 @@ class KnowledgeBase:
             scores, key=lambda chunk_id: (-scores[chunk_id], first_seen[chunk_id], chunk_id)
         )
         fused = tuple(
-            KnowledgeSearchResult(
-                results[chunk_id].source,
-                results[chunk_id].document,
-                SearchHit(
-                    results[chunk_id].hit.chunk,
-                    float(scores[chunk_id]),
-                    results[chunk_id].hit.matched_terms,
-                ),
+            _FusedCandidate(
+                result=results[chunk_id],
+                fusion_score=float(scores[chunk_id]),
+                ranks=tuple(ranks[chunk_id]),
             )
             for chunk_id in ordered_ids
         )
+        # Raw backend scores are not comparable across generated queries. RRF is
+        # therefore the multi-query selector's ranking signal, but it never
+        # replaces the score carried by the canonical backend result.
         diversified = select_document_aware_indices(
             tuple(
-                RankedDocumentCandidate(item.document.document_id, item.hit.score)
+                RankedDocumentCandidate(
+                    item.result.document.document_id, item.fusion_score
+                )
                 for item in fused
             ),
             limit=limit,
         )
-        selected = tuple(fused[index] for index in diversified)
+        selected_candidates = tuple(fused[index] for index in diversified)
+        selected = tuple(item.result for item in selected_candidates)
         provenance = tuple(
-            (item.hit.chunk.chunk_id, tuple(ranks[item.hit.chunk.chunk_id]))
-            for item in selected
+            (item.result.hit.chunk.chunk_id, item.ranks)
+            for item in selected_candidates
         )
         return selected, provenance
 
