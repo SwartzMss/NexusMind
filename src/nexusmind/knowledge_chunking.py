@@ -283,6 +283,23 @@ class StructureAwareChunker:
                 while index < len(raw_blocks) and raw_blocks[index].heading:
                     heading_end = raw_blocks[index].end
                     index += 1
+                heading_block = _Block(heading_start, heading_end, True)
+                if heading_end - heading_start > self.chunk_size:
+                    remaining_budget = self.max_chunks + 1 - oversized_span_count
+                    spans = _bounded_spans(
+                        document.content,
+                        heading_block,
+                        self.chunk_size,
+                        self.overlap,
+                        max_spans=max(1, remaining_budget),
+                    )
+                    oversized_span_count += len(spans)
+                    if oversized_span_count > self.max_chunks:
+                        raise ChunkLimitError(
+                            "document exceeds the chunk-count limit during fallback"
+                        )
+                    blocks.extend(spans)
+                    continue
                 if index < len(raw_blocks):
                     body = raw_blocks[index]
                     heading_length = heading_end - heading_start
@@ -319,7 +336,7 @@ class StructureAwareChunker:
                         blocks.extend(spans)
                         index += 1
                         continue
-                blocks.append(_Block(heading_start, heading_end, True))
+                blocks.append(heading_block)
                 continue
             is_oversized = block.end - block.start > self.chunk_size
             remaining_budget = self.max_chunks + 1 - oversized_span_count

@@ -242,3 +242,24 @@ def test_oversized_structures_prefer_line_boundaries_over_later_spaces(content: 
 
     assert len(chunks) > 1
     assert all(chunk.content.endswith("\n") for chunk in chunks[:-1])
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "# " + "single-heading-token " * 8,
+        "# " + "parent-heading-token " * 4 + "\n\n## " + "child-heading-token " * 5,
+    ],
+)
+def test_oversized_headings_are_bounded_exact_and_deterministic(content: str) -> None:
+    document = _document(content)
+    chunker = StructureAwareChunker(chunk_size=50, overlap=5)
+
+    first = chunker.chunk(document)
+    second = chunker.chunk(document)
+
+    assert first == second
+    assert len(first) > 1
+    assert all(len(chunk.content) <= 50 for chunk in first)
+    assert all(chunk.content == content[chunk.start_offset:chunk.end_offset] for chunk in first)
+    assert [chunk.chunk_id for chunk in first] == [chunk.chunk_id for chunk in second]
