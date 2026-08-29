@@ -82,6 +82,8 @@ Hybrid-RRF 分别获取 lexical 和 semantic 排名，再按 `1 / (rrf_k + rank)
 
 所有 backend 的用户搜索结果都经过同一条最终路径：backend 先完成 lexical、semantic、fusion 和可选 reranking，`KnowledgeCollection.search()` 再从有界候选集执行 document-aware final selection，最后截断到调用方的 `limit`。该选择只比较同一次查询、同一 backend 输出中的相对 score，并返回原始排名的子序列；不会重算或改写选中候选的 score、matched terms 或 chunk provenance。
 
+Search oversampling is bounded by optional backend capacity; a custom backend without valid capacity metadata receives the caller's original K. The selector's same-query relevance floor uses the lower median absolute deviation of only the raw Top-K backend scores, so isolated score outliers cannot widen the window. Diagnostics bypass both capacity-based oversampling and final selection.
+
 诊断路径与最终选择严格隔离。`diagnose_search()` 直接请求 backend 的原始限制并返回 raw backend ranking，包括未修改的 stage、rank、score、RRF contribution 和 selected 状态；它不执行 oversampling 或 document-aware 选择。
 
 Chunk、embedding、tokens、postings 和 index 都属于 derived runtime state，不写入产品存储；重新打开 KnowledgeBase 时从 canonical Documents 重建。

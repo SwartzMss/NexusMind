@@ -57,6 +57,8 @@ def test_search_and_diagnostics_ranking_contract_is_documented() -> None:
     assert "document-aware" in architecture
     assert "diagnose" in architecture
     assert "raw backend ranking" in architecture
+    assert "backend capacity" in architecture
+    assert "median absolute deviation" in architecture
 
 
 def test_diversification_benchmark_uses_lf_on_every_platform() -> None:
