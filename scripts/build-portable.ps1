@@ -74,8 +74,11 @@ function Test-PortableArchive {
             foreach ($expected in $expectations) {
                 $searchJson = Invoke-PortableCommand -Executable $smokeExecutable -Arguments @("search", $expected.Query, "--knowledge-base", $knowledgeBasePath, "--json")
                 $search = @($searchJson | ConvertFrom-Json)
-                $matchingPaths = @($search | Where-Object { $_.document.logical_path -eq $expected.Path })
-                if ($matchingPaths.Count -lt 1 -or $searchJson -notmatch $expected.Marker) {
+                $matchingHits = @($search | Where-Object {
+                    $_.document.logical_path -eq $expected.Path -and
+                    $_.hit.chunk.content -match [regex]::Escape($expected.Marker)
+                })
+                if ($matchingHits.Count -lt 1) {
                     throw "Portable search did not return $($expected.Marker) from $($expected.Path)"
                 }
             }

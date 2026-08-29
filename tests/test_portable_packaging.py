@@ -98,7 +98,10 @@ def test_portable_script_runs_extracted_archive_knowledge_base_e2e() -> None:
     assert text.index("Compress-Archive") < text.index("Test-PortableArchive -ArchivePath")
 
 
-@pytest.mark.parametrize("scenario", ["runner-temp", "system-temp", "command-failure", "inside-checkout"])
+@pytest.mark.parametrize(
+    "scenario",
+    ["runner-temp", "system-temp", "command-failure", "split-hit", "inside-checkout"],
+)
 def test_portable_archive_smoke_is_isolated_and_cleans_up(tmp_path, scenario) -> None:
     pwsh = shutil.which("pwsh")
     if pwsh is None:
@@ -140,7 +143,18 @@ function Invoke-PortableCommand {
             NEXUSMIND_DOCX_MARKER = "b.docx"
             NEXUSMIND_PDF_MARKER = "c.pdf"
         }
-        return (@(@{ text = $Arguments[1]; document = @{ logical_path = $paths[$Arguments[1]] } }) | ConvertTo-Json -Depth 4)
+        if ($Scenario -eq "split-hit" -and $Arguments[1] -eq "NEXUSMIND_DOCX_MARKER") {
+            return (@(
+                @{ document = @{ logical_path = "b.docx" }; hit = @{ chunk = @{ content = "other content" } } },
+                @{ document = @{ logical_path = "other.md" }; hit = @{ chunk = @{ content = $Arguments[1] } } }
+            ) | ConvertTo-Json -Depth 6)
+        }
+        return (@(
+            @{
+                document = @{ logical_path = $paths[$Arguments[1]] }
+                hit = @{ chunk = @{ content = $Arguments[1] } }
+            }
+        ) | ConvertTo-Json -Depth 6)
     }
     if ($Arguments[0] -eq "inspect") { return '{"status":{"registered_source_count":1,"canonical_source_count":1,"document_count":3}}' }
     return '{}'
@@ -167,9 +181,17 @@ catch { $failure = $_.Exception.Message }
         assert "outside" in result["failure"]
         assert result["calls"] == []
     else:
-        assert result["failure"] == ("Injected portable failure" if scenario == "command-failure" else None)
+        expected_failure = {
+            "command-failure": "Injected portable failure",
+            "split-hit": "Portable search did not return NEXUSMIND_DOCX_MARKER from b.docx",
+        }.get(scenario)
+        assert result["failure"] == expected_failure
         calls = result["calls"]
-        assert [call["arguments"][0] for call in calls] == (["create"] if scenario == "command-failure" else ["create", "source", "sync", "search", "search", "search", "inspect"])
+        expected_calls = {
+            "command-failure": ["create"],
+            "split-hit": ["create", "source", "sync", "search", "search"],
+        }.get(scenario, ["create", "source", "sync", "search", "search", "search", "inspect"])
+        assert [call["arguments"][0] for call in calls] == expected_calls
         smoke_root = Path(calls[0]["cwd"]).parent
         assert not smoke_root.is_relative_to(repository)
         assert smoke_root.name.startswith("nexusmind-release-smoke-")
