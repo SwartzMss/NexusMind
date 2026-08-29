@@ -20,6 +20,7 @@ from .knowledge_answer import (
     AnswerGeneratorError,
     generate_knowledge_answer,
 )
+from .context_assembly import assemble_context
 from .knowledge_base_manifest import (
     KnowledgeBaseClosedError,
     KnowledgeBaseConfigError,
@@ -54,12 +55,14 @@ from .knowledge_collection import (
     KnowledgeSnapshot,
     KnowledgeSyncResult,
 )
-from .knowledge_retrieval import InMemoryChunkIndex
+from .knowledge_retrieval import InMemoryChunkIndex, SearchHit
 from .knowledge_query import (
     KnowledgeQueryOptions,
     KnowledgeQueryResult,
     KnowledgeQueryTrace,
 )
+from .query_expansion import QueryExpander
+from .search_diversification import RankedDocumentCandidate, select_document_aware_indices
 from .knowledge_ingestion import LocalDirectoryAdapter, LocalFileAdapter
 from .knowledge_store import KnowledgeSnapshotStoreError, SQLiteKnowledgeSnapshotStore
 from .lexical_analysis import UnicodeCJKLexicalAnalyzer
@@ -186,6 +189,7 @@ class KnowledgeBase:
         index_factory: Callable[[], CloneableChunkIndex],
         limits: KnowledgeBaseLimits,
         answer_generator: AnswerGenerator | None = None,
+        query_expander: QueryExpander | None = None,
     ) -> None:
         self._root = root
         self._manifest = manifest
@@ -193,6 +197,7 @@ class KnowledgeBase:
         self._index_factory = index_factory
         self._limits = limits
         self._answer_generator = answer_generator
+        self._query_expander = query_expander
         self._closed = False
         self._mutation_mutex = RLock()
 
@@ -205,6 +210,7 @@ class KnowledgeBase:
         index_factory: Callable[[], CloneableChunkIndex] | None = None,
         limits: KnowledgeBaseLimits | None = None,
         answer_generator: AnswerGenerator | None = None,
+        query_expander: QueryExpander | None = None,
     ) -> "KnowledgeBase":
         active_limits = _limits(limits)
         root = _root(path)
@@ -269,6 +275,7 @@ class KnowledgeBase:
             index_factory=factory,
             limits=active_limits,
             answer_generator=answer_generator,
+            query_expander=query_expander,
         )
 
     @classmethod
@@ -279,6 +286,7 @@ class KnowledgeBase:
         index_factory: Callable[[], CloneableChunkIndex] | None = None,
         limits: KnowledgeBaseLimits | None = None,
         answer_generator: AnswerGenerator | None = None,
+        query_expander: QueryExpander | None = None,
     ) -> "KnowledgeBase":
         active_limits = _limits(limits)
         root = _root(path)
@@ -337,6 +345,7 @@ class KnowledgeBase:
             index_factory=factory,
             limits=active_limits,
             answer_generator=answer_generator,
+            query_expander=query_expander,
         )
 
     @staticmethod
@@ -767,11 +776,36 @@ class KnowledgeBase:
         )
         if active_generator is None:
             raise AnswerGeneratorError("no answer generator is configured")
+        active_expander = (
+            self._query_expander
+            if active_options.query_expander is None
+            else active_options.query_expander
+        )
+        retrieval_queries = (question,)
+        expansion_error: str | None = None
+        if active_expander is not None:
+            try:
+                expansion = active_expander.expand(question)
+                if expansion.original_query != question:
+                    raise ValueError("query expander changed the original question")
+                retrieval_queries += expansion.expanded_queries
+            except Exception as exc:
+                expansion_error = type(exc).__name__
         try:
-            context = self._collection.build_context(
+            ranked_lists = tuple(
+                self._collection.search_backend(
+                    retrieval_query, limit=active_options.retrieval_limit
+                )
+                for retrieval_query in retrieval_queries
+            )
+            fused, fused_provenance = self._fuse_query_results(
+                ranked_lists, limit=active_options.retrieval_limit
+            )
+            context = assemble_context(
                 question,
-                retrieval_limit=active_options.retrieval_limit,
+                fused,
                 max_passages=active_limits.max_passages,
+                max_candidates=active_options.retrieval_limit,
                 max_chars=active_limits.max_context_chars,
                 max_tokens=active_limits.max_context_tokens,
             )
@@ -794,6 +828,9 @@ class KnowledgeBase:
             candidate_count=config.candidate_count,
             context_character_count=config.character_count,
             context_estimated_token_count=config.estimated_token_count,
+            retrieval_queries=retrieval_queries,
+            query_expansion_error=expansion_error,
+            fused_result_provenance=fused_provenance,
         )
         return KnowledgeQueryResult(
             answer=answer,
@@ -801,6 +838,60 @@ class KnowledgeBase:
             trace_id=str(uuid4()),
             trace=trace,
         )
+
+    @staticmethod
+    def _fuse_query_results(
+        ranked_lists: tuple[tuple[KnowledgeSearchResult, ...], ...], *, limit: int
+    ) -> tuple[
+        tuple[KnowledgeSearchResult, ...],
+        tuple[tuple[str, tuple[tuple[int, int], ...]], ...],
+    ]:
+        """Fuse backend-final rankings with deterministic query-level RRF."""
+
+        rrf_k = 60
+        scores: dict[str, float] = {}
+        first_seen: dict[str, tuple[int, int]] = {}
+        results: dict[str, KnowledgeSearchResult] = {}
+        ranks: dict[str, list[tuple[int, int]]] = {}
+        for query_index, ranked in enumerate(ranked_lists):
+            seen: set[str] = set()
+            for rank, result in enumerate(ranked, start=1):
+                chunk_id = result.hit.chunk.chunk_id
+                if chunk_id in seen:
+                    continue
+                seen.add(chunk_id)
+                scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (rrf_k + rank)
+                first_seen.setdefault(chunk_id, (query_index, rank))
+                results.setdefault(chunk_id, result)
+                ranks.setdefault(chunk_id, []).append((query_index, rank))
+        ordered_ids = sorted(
+            scores, key=lambda chunk_id: (-scores[chunk_id], first_seen[chunk_id], chunk_id)
+        )
+        fused = tuple(
+            KnowledgeSearchResult(
+                results[chunk_id].source,
+                results[chunk_id].document,
+                SearchHit(
+                    results[chunk_id].hit.chunk,
+                    float(scores[chunk_id]),
+                    results[chunk_id].hit.matched_terms,
+                ),
+            )
+            for chunk_id in ordered_ids
+        )
+        diversified = select_document_aware_indices(
+            tuple(
+                RankedDocumentCandidate(item.document.document_id, item.hit.score)
+                for item in fused
+            ),
+            limit=limit,
+        )
+        selected = tuple(fused[index] for index in diversified)
+        provenance = tuple(
+            (item.hit.chunk.chunk_id, tuple(ranks[item.hit.chunk.chunk_id]))
+            for item in selected
+        )
+        return selected, provenance
 
     def diagnose_search(
         self, query: str, *, limit: int = 10

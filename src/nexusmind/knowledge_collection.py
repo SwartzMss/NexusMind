@@ -334,6 +334,16 @@ class KnowledgeCollection:
         del self._sources[source_id]
 
     def search(self, query: str, *, limit: int = 10) -> tuple[KnowledgeSearchResult, ...]:
+        resolved = self.search_backend(query, limit=limit)
+        ranked = tuple(
+            RankedDocumentCandidate(item.document.document_id, item.hit.score)
+            for item in resolved
+        )
+        selected = select_document_aware_indices(ranked, limit=limit)
+        return tuple(resolved[index] for index in selected)
+
+    def search_backend(self, query: str, *, limit: int = 10) -> tuple[KnowledgeSearchResult, ...]:
+        """Return the configured backend's final ranking before document selection."""
         try:
             backend_capacity = getattr(self._index, "max_search_results", None)
         except Exception:
@@ -346,12 +356,7 @@ class KnowledgeCollection:
         if type(hits) is not tuple:
             raise KnowledgeSearchResolutionError("index search result must be a tuple")
         resolved = tuple(self._resolve_hit(hit) for hit in hits)
-        ranked = tuple(
-            RankedDocumentCandidate(item.document.document_id, item.hit.score)
-            for item in resolved
-        )
-        selected = select_document_aware_indices(ranked, limit=limit)
-        return tuple(resolved[index] for index in selected)
+        return resolved
 
     def build_context(
         self,
