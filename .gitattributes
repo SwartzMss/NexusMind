@@ -2,3 +2,4 @@ evals/knowledge/benchmark/corpus/*.md text eol=lf
 evals/knowledge/benchmark.md text eol=lf
 evals/knowledge/diversification/corpus/*.md text eol=lf
 evals/knowledge/diversification.md text eol=lf
+tests/fixtures/structured/* binary

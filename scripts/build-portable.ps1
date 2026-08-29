@@ -49,8 +49,8 @@ function Test-PortableArchive {
         $knowledgeBasePath = Join-Path $releaseSmokeRoot "knowledge-base"
         $releaseWorkingDirectory = Join-Path $releaseSmokeRoot "cwd"
         New-Item -ItemType Directory -Path $extractionRoot, $fixtureRoot, $releaseWorkingDirectory | Out-Null
-        $fixturePath = Join-Path $fixtureRoot "smoke-fixture.md"
-        Set-Content -LiteralPath $fixturePath -Value "NexusMind release-smoke-token portable validation." -Encoding utf8
+        $fixturePath = Join-Path $fixtureRoot "smoke-fixture.rtf"
+        Set-Content -LiteralPath $fixturePath -Value '{\rtf1\ansi NexusMind release-smoke-token portable validation.}' -Encoding ascii
 
         Expand-Archive -LiteralPath $ArchivePath -DestinationPath $extractionRoot
         $smokeExecutable = Join-Path $extractionRoot "nexusmind\nexusmind.exe"

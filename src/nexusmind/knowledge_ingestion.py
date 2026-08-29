@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Iterable, Protocol, runtime_checkable
 
 from .document_extraction import (
+    DEFAULT_DOCUMENT_EXTRACTORS,
     InvalidTextEncodingError,
     KnowledgeIngestionError,
     PlainTextDocumentExtractor,
@@ -24,7 +25,7 @@ from .document_extraction import (
 from .knowledge import Document, KnowledgeSource, KnowledgeSourceType
 
 
-DEFAULT_SUPPORTED_EXTENSIONS = frozenset({".md", ".markdown", ".txt"})
+DEFAULT_SUPPORTED_EXTENSIONS = frozenset(DEFAULT_DOCUMENT_EXTRACTORS)
 DEFAULT_MAX_FILE_BYTES = 1 * 1024 * 1024
 DEFAULT_MAX_DOCUMENTS = 1_000
 DEFAULT_MAX_TOTAL_BYTES = 10 * 1024 * 1024

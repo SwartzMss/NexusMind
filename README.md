@@ -31,11 +31,11 @@ nexusmind search "密钥轮换" --knowledge-base .\security-kb --limit 5
 nexusmind inspect --knowledge-base .\security-kb
 ```
 
-当前版本支持本地文件和目录中的严格 UTF-8 `.txt`、`.md`、`.markdown` 文件。注册来源后必须运行 `sync`，内容才会进入 KnowledgeBase。
+当前版本支持本地文件和目录中的严格 UTF-8 `.txt`、`.md`、`.markdown`，以及 `.doc`、`.docx`、`.pdf`、`.ppt`、`.pptx`、`.rtf`、`.epub`、`.odt` 结构化文档。注册来源后必须运行 `sync`，内容才会进入 KnowledgeBase。
 
 默认 `search` 使用完全离线、支持 Unicode/CJK 的 BM25。Semantic、Hybrid-RRF、reranking 和模型问答属于可选能力。
 
-首个版本不支持 Git/GitHub 来源、PDF/Office 解析、后台同步或文件监控、云端 KnowledgeBase，也不会持久化派生的 Chunk、embedding 或检索索引；重新打开时会从 canonical documents 重建这些派生状态。
+当前不支持 Git/GitHub 来源、扫描版 PDF OCR、电子表格 ingestion、后台同步或文件监控、云端 KnowledgeBase，也不会持久化派生的 Chunk、embedding 或检索索引；重新打开时会从 canonical documents 重建这些派生状态。
 
 ## 核心能力
 
@@ -138,7 +138,7 @@ final Top-K
 
 `--limit` 始终表示最终结果数上限。Document-aware selection 不会改写 backend 原始 `score`。`diagnose` 不执行这一最终选择，保持 raw backend ranking。
 
-本地来源当前只读取严格 UTF-8 编码的 `.txt`、`.md` 和 `.markdown` 文件。相对路径均以运行命令时的当前目录为基准。
+本地来源直接读取严格 UTF-8 编码的 `.txt`、`.md`、`.markdown`；`.doc`、`.docx`、`.pdf`、`.ppt`、`.pptx`、`.rtf`、`.epub`、`.odt` 由 AnyDoc 在本地转换为 canonical Markdown。相对路径均以运行命令时的当前目录为基准。
 
 来源内部 ID 由来源类型和规范化路径稳定派生，用户通过路径注册和删除来源。同一类型和路径在删除后重新注册会得到同一个内部 ID，因此可以继续已有文档版本链。
 
@@ -363,13 +363,13 @@ Chunk、embedding 和检索索引不会持久化，重新打开时会根据当�
 
 ## 当前限制
 
-- 本地来源仅支持严格 UTF-8 的 `.txt`、`.md` 和 `.markdown`
+- 本地来源支持严格 UTF-8 文本，以及 `.doc`、`.docx`、text-layer `.pdf`、`.ppt`、`.pptx`、`.rtf`、`.epub`、`.odt`
 - 来源不会被后台监控或自动同步
 - 默认 `search` 是词法 BM25，不自动改写查询
 - CLI `query` 在配置模型后会执行有界的 LLM Query Expansion，再进行多查询检索与 RRF 融合
 - Semantic embedding、Query Expansion 和模型回答可能产生网络延迟与服务费用
 - KnowledgeBase 当前没有持久化 embedding、Chunk 或检索索引
-- PDF、Office、网页和 GitHub ingestion 暂未提供
+- 扫描版 PDF OCR、XLS/XLSX/CSV、网页和 GitHub ingestion 暂未提供
 - Linux 和 macOS 当前没有纳入正式支持矩阵
 
 ## 安全、隐私与模型调用
