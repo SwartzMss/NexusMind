@@ -83,6 +83,12 @@ class InMemorySemanticChunkIndex:
         self._dimension: int | None = None
         self._total_chars = 0
 
+    @property
+    def max_search_results(self) -> int:
+        """Return the configured maximum accepted final search limit."""
+
+        return self._limits.max_results
+
     def add(self, chunks: tuple[Chunk, ...]) -> None:
         self._require_chunk_tuple(chunks)
         additions: dict[str, Chunk] = {}

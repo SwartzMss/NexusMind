@@ -206,6 +206,12 @@ class InMemoryChunkIndex:
         self._document_frequencies: Counter[str] = Counter()
         self._total_tokens = 0
 
+    @property
+    def max_search_results(self) -> int:
+        """Return the configured maximum accepted final search limit."""
+
+        return self._limits.max_results
+
     def add(self, chunks: tuple[Chunk, ...]) -> None:
         additions = self._validated_additions(chunks)
         document_counts = {key: len(value) for key, value in self._document_chunks.items()}

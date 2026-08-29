@@ -67,6 +67,30 @@ class _ScriptedIndex:
             raise RuntimeError("private mutation failure")
 
 
+class _CapacityScriptedIndex(_ScriptedIndex):
+    def __init__(
+        self, capacity: object, hits: tuple[SearchHit, ...] = ()
+    ) -> None:
+        super().__init__(hits)
+        self._capacity = capacity
+
+    @property
+    def max_search_results(self) -> object:
+        return self._capacity
+
+    def clone(self) -> "_CapacityScriptedIndex":
+        return _CapacityScriptedIndex(self._capacity, self.hits)
+
+
+class _RaisingCapacityScriptedIndex(_ScriptedIndex):
+    @property
+    def max_search_results(self) -> int:
+        raise RuntimeError("private capacity failure")
+
+    def clone(self) -> "_RaisingCapacityScriptedIndex":
+        return _RaisingCapacityScriptedIndex(self.hits)
+
+
 def _hybrid(
     lexical: _ScriptedIndex,
     semantic: _ScriptedIndex,
@@ -86,6 +110,107 @@ def test_hybrid_limits_require_positive_plain_integers(
 ) -> None:
     with pytest.raises((TypeError, ValueError)):
         HybridChunkIndexLimits(**{field: value})
+
+
+def test_hybrid_index_exposes_configured_search_capacity_across_clone() -> None:
+    index = _hybrid(
+        _ScriptedIndex(),
+        _ScriptedIndex(),
+        limits=HybridChunkIndexLimits(
+            max_results=10,
+            max_candidates_per_backend=10,
+            max_fusion_entries=20,
+        ),
+        candidate_depth=10,
+    )
+
+    assert index.max_search_results == 10
+    assert index.clone().max_search_results == 10
+
+
+def test_hybrid_index_exposes_capacity_safe_for_two_backend_fusion() -> None:
+    index = _hybrid(
+        _ScriptedIndex(),
+        _ScriptedIndex(),
+        limits=HybridChunkIndexLimits(
+            max_results=20,
+            max_candidates_per_backend=10,
+            max_fusion_entries=20,
+        ),
+        candidate_depth=10,
+    )
+
+    assert index.max_search_results == 10
+    assert index.clone().max_search_results == 10
+
+
+def test_hybrid_index_does_not_advertise_unsafe_fixed_candidate_depth() -> None:
+    index = _hybrid(
+        _ScriptedIndex(),
+        _ScriptedIndex(),
+        limits=HybridChunkIndexLimits(
+            max_results=20,
+            max_candidates_per_backend=10,
+            max_fusion_entries=10,
+        ),
+        candidate_depth=10,
+    )
+
+    assert index.max_search_results is None
+
+
+def test_hybrid_index_intersects_child_search_capacities() -> None:
+    index = _hybrid(
+        _CapacityScriptedIndex(5),
+        _CapacityScriptedIndex(5),
+        limits=HybridChunkIndexLimits(
+            max_results=20,
+            max_candidates_per_backend=10,
+            max_fusion_entries=20,
+        ),
+        candidate_depth=5,
+    )
+
+    assert index.max_search_results == 5
+    assert index.clone().max_search_results == 5
+
+
+@pytest.mark.parametrize("capacity", [None, True, 5.0, 0])
+def test_hybrid_unknown_child_capacity_does_not_expand_candidate_depth(
+    capacity: object,
+) -> None:
+    index = _hybrid(
+        _CapacityScriptedIndex(capacity),
+        _CapacityScriptedIndex(10),
+        limits=HybridChunkIndexLimits(
+            max_results=20,
+            max_candidates_per_backend=10,
+            max_fusion_entries=20,
+        ),
+        candidate_depth=5,
+    )
+
+    assert index.max_search_results == 5
+
+
+@pytest.mark.parametrize(
+    "unknown_child", [_ScriptedIndex(), _RaisingCapacityScriptedIndex()]
+)
+def test_hybrid_missing_or_raising_child_capacity_uses_candidate_depth(
+    unknown_child: _ScriptedIndex,
+) -> None:
+    index = _hybrid(
+        unknown_child,
+        _CapacityScriptedIndex(10),
+        limits=HybridChunkIndexLimits(
+            max_results=20,
+            max_candidates_per_backend=10,
+            max_fusion_entries=20,
+        ),
+        candidate_depth=5,
+    )
+
+    assert index.max_search_results == 5
 
 
 @pytest.mark.parametrize("value", [True, 0, -1])

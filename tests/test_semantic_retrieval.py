@@ -51,6 +51,16 @@ def test_semantic_contracts_are_public_and_implement_chunk_index() -> None:
     assert provider.query_calls == []
 
 
+def test_semantic_index_exposes_configured_search_capacity_across_clone() -> None:
+    index = InMemorySemanticChunkIndex(
+        embedding_provider=_RecordingProvider({}),
+        limits=SemanticChunkIndexLimits(max_results=10),
+    )
+
+    assert index.max_search_results == 10
+    assert index.clone().max_search_results == 10
+
+
 @pytest.mark.parametrize(
     "field",
     [

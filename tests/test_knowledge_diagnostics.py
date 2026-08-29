@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 
 import pytest
@@ -54,6 +54,23 @@ class _OneChunker:
         )
 
 
+class _PipeChunker:
+    def chunk(self, document: Document) -> tuple[Chunk, ...]:
+        chunks: list[Chunk] = []
+        for ordinal, segment in enumerate(document.content.split("|")):
+            start = document.content.index(segment)
+            chunks.append(
+                Chunk(
+                    document.document_id,
+                    f"chunk:{document.document_id}:{ordinal}",
+                    segment,
+                    start,
+                    start + len(segment),
+                )
+            )
+        return tuple(chunks)
+
+
 @dataclass
 class _IndexState:
     chunks: dict[str, Chunk]
@@ -61,6 +78,8 @@ class _IndexState:
     diagnose_calls: int = 0
     search_calls: int = 0
     fail: bool = False
+    search_limits: list[int] = field(default_factory=list)
+    diagnose_limits: list[int] = field(default_factory=list)
 
 
 class _DiagnosticIndex:
@@ -103,6 +122,31 @@ class _SearchOnlyIndex(_DiagnosticIndex):
 
     def clone(self) -> _SearchOnlyIndex:
         return _SearchOnlyIndex(self.state)
+
+
+class _RawIsolationIndex(_DiagnosticIndex):
+    @property
+    def max_search_results(self) -> int:
+        return 100
+
+    def search(self, query: str, *, limit: int = 10) -> tuple[SearchHit, ...]:
+        self.state.search_calls += 1
+        self.state.search_limits.append(limit)
+        trace = self.state.trace
+        if type(trace) is not RetrievalDiagnostics:
+            return ()
+        return trace.hits[:limit]
+
+    def diagnose(self, query: str, *, limit: int = 10) -> RetrievalDiagnostics:
+        self.state.diagnose_calls += 1
+        self.state.diagnose_limits.append(limit)
+        trace = self.state.trace
+        if type(trace) is not RetrievalDiagnostics:
+            return RetrievalDiagnostics((), ())
+        return RetrievalDiagnostics(trace.hits[:limit], trace.candidates[:limit])
+
+    def clone(self) -> "_RawIsolationIndex":
+        return _RawIsolationIndex(self.state)
 
 
 def _document(source_id: str, path: str, content: str) -> Document:
@@ -248,6 +292,59 @@ def test_diagnose_search_calls_backend_once_and_resolves_all_provenance() -> Non
     again = collection.diagnose_search("alpha beta", limit=2)
     assert again.results[0].source.metadata == {"owner": "canonical"}
     assert again.candidates[0].document.metadata == {"tag": "canonical"}
+
+
+def test_search_diversification_does_not_change_raw_diagnostic_rank_or_score() -> None:
+    state = _IndexState({})
+    collection = KnowledgeCollection(
+        chunker=_PipeChunker(), index_factory=lambda: _RawIsolationIndex(state)
+    )
+    one = _document("docs", "one.txt", "a0|a1|a2")
+    two = _document("docs", "two.txt", "b0")
+    collection.sync(_Adapter("docs", (one, two)))
+    first, second, third = (
+        state.chunks[f"chunk:{one.document_id}:{ordinal}"] for ordinal in range(3)
+    )
+    fourth = state.chunks[f"chunk:{two.document_id}:0"]
+    raw_hits = (
+        SearchHit(first, 5.0, ("alpha",)),
+        SearchHit(second, 4.0, ("alpha",)),
+        SearchHit(third, 3.0, ("alpha",)),
+        SearchHit(fourth, 2.9, ("beta",)),
+    )
+    raw_rows = tuple(
+        _row(
+            hit.chunk,
+            rank=rank,
+            score=hit.score,
+            terms=hit.matched_terms,
+            selected=True,
+        )
+        for rank, hit in enumerate(raw_hits, start=1)
+    )
+    state.trace = RetrievalDiagnostics(raw_hits, raw_rows)
+
+    search_results = collection.search("broad", limit=3)
+    diagnostics = collection.diagnose_search("broad", limit=3)
+
+    assert state.search_limits == [12]
+    assert state.diagnose_limits == [3]
+    assert tuple(item.hit.chunk.chunk_id for item in search_results) == (
+        first.chunk_id,
+        second.chunk_id,
+        fourth.chunk_id,
+    )
+    assert tuple(item.hit.chunk.chunk_id for item in diagnostics.results) == (
+        first.chunk_id,
+        second.chunk_id,
+        third.chunk_id,
+    )
+    assert tuple(item.diagnostic.rank for item in diagnostics.candidates) == (1, 2, 3)
+    assert tuple(item.diagnostic.score for item in diagnostics.candidates) == (
+        5.0,
+        4.0,
+        3.0,
+    )
 
 
 def test_diagnose_search_normalizes_subclasses_without_changing_ordinary_search() -> None:

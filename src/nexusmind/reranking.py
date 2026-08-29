@@ -94,6 +94,12 @@ class RerankedChunkIndex:
         self._limits = configured_limits
         self._base = base
 
+    @property
+    def max_search_results(self) -> int:
+        """Return the configured maximum accepted final search limit."""
+
+        return self._limits.max_results
+
     def add(self, chunks: tuple[Chunk, ...]) -> None:
         self._mutate("add", chunks)
 

@@ -44,6 +44,13 @@ def test_retrieval_contracts_are_available_from_package_root() -> None:
     assert hit.matched_terms == ("checkpoint",)
 
 
+def test_lexical_index_exposes_configured_search_capacity_across_clone() -> None:
+    index = InMemoryChunkIndex(limits=ChunkIndexLimits(max_results=10))
+
+    assert index.max_search_results == 10
+    assert index.clone().max_search_results == 10
+
+
 def test_retrieval_diagnostic_contracts_are_frozen_and_slotted() -> None:
     chunk = _chunk("chunk-1", "checkpoint resume")
     candidate = RetrievalCandidateDiagnostic(
