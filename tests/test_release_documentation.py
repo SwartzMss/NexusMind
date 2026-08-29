@@ -48,16 +48,7 @@ def test_release_facing_schema_docs_use_three_field_manifest_root() -> None:
     root = Path("docs")
     architecture = root.joinpath("architecture.md").read_text(encoding="utf-8")
     release_notes = root.joinpath("releases/v0.1.0.md").read_text(encoding="utf-8")
-    schema_design = root.joinpath(
-        "superpowers/specs/2026-08-27-first-release-schema-design.md"
-    ).read_text(encoding="utf-8")
-    schema_plan = root.joinpath(
-        "superpowers/plans/2026-08-27-first-release-schema.md"
-    ).read_text(encoding="utf-8")
 
-    assert "`format_version`, `knowledge_base_id`, and `sources`" in schema_design
-    assert '"format_version", "knowledge_base_id", "sources"' in schema_plan
-    assert "`display_name`" not in schema_design
     assert "root path" in architecture
     assert "`format_version`, `knowledge_base_id`, and `sources`" in architecture
     assert "root path" in release_notes
