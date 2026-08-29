@@ -1,6 +1,7 @@
 """Bounded local adapters for the provider-neutral Knowledge contracts.
 
-This module owns filesystem discovery and text decoding.  The Knowledge Core
+This module owns filesystem discovery and verified byte reads.  Extractors
+turn those bytes into canonical text before the Knowledge Core
 only receives ``KnowledgeSource`` and ``Document`` objects, so future adapters
 can use the same boundary without adding source-specific fields to those
 contracts.
@@ -14,6 +15,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Protocol, runtime_checkable
 
+from .document_extraction import (
+    InvalidTextEncodingError,
+    KnowledgeIngestionError,
+    PlainTextDocumentExtractor,
+    select_document_extractor,
+)
 from .knowledge import Document, KnowledgeSource, KnowledgeSourceType
 
 
@@ -24,10 +31,7 @@ DEFAULT_MAX_TOTAL_BYTES = 10 * 1024 * 1024
 DEFAULT_MAX_ENTRIES_SCANNED = 10_000
 DEFAULT_MAX_DIRECTORY_DEPTH = 32
 _REPARSE_POINT_ATTRIBUTE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-
-
-class KnowledgeIngestionError(Exception):
-    """Base class for normalized local ingestion failures."""
+_PLAIN_TEXT_EXTRACTOR = PlainTextDocumentExtractor()
 
 
 class SourceNotFoundError(KnowledgeIngestionError):
@@ -48,10 +52,6 @@ class FileIdentityChangedError(KnowledgeIngestionError):
 
 class UnsupportedFileTypeError(KnowledgeIngestionError):
     """A local file does not use one of the adapter's supported extensions."""
-
-
-class InvalidTextEncodingError(KnowledgeIngestionError):
-    """A supported local file is not valid strict UTF-8 text."""
 
 
 class FileTooLargeError(KnowledgeIngestionError):
@@ -215,12 +215,6 @@ def _display_name(path: Path, fallback: str) -> str:
     return path.name or fallback
 
 
-def _content_type(path: Path) -> str:
-    if path.suffix.lower() in {".md", ".markdown"}:
-        return "text/markdown"
-    return "text/plain"
-
-
 def _file_identity(file_stat: os.stat_result) -> _FileIdentity:
     return _FileIdentity(device=file_stat.st_dev, inode=file_stat.st_ino)
 
@@ -341,17 +335,21 @@ def _read_document(
         limits=limits,
         total_bytes_before=total_bytes_before,
     )
-    try:
-        content = content_bytes.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise InvalidTextEncodingError(f"document is not valid UTF-8: {logical_path}") from exc
+    extracted = select_document_extractor(
+        logical_path,
+        fallback=_PLAIN_TEXT_EXTRACTOR,
+    ).extract(
+        content_bytes,
+        logical_path=logical_path,
+    )
 
     return (
         Document(
             source_id=source_id,
             logical_path=logical_path,
-            content=content,
-            content_type=_content_type(path),
+            content=extracted.content,
+            content_type=extracted.content_type,
+            metadata=extracted.metadata,
         ),
         len(content_bytes),
     )
