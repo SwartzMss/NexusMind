@@ -213,6 +213,7 @@ def test_structure_chunker_shrinks_first_body_span_to_keep_heading_context() -> 
 
     assert chunks[0].content.startswith("# Heading\n\nbody")
     assert chunks[0].content != "# Heading\n\n"
+    assert min(len(chunk.content) for chunk in chunks) >= 30
     assert all(len(chunk.content) <= 60 for chunk in chunks)
     assert all(chunk.content == document.content[chunk.start_offset:chunk.end_offset] for chunk in chunks)
 
@@ -226,3 +227,18 @@ def test_structure_chunker_fails_during_pathological_overlap_expansion() -> None
             overlap=999,
             max_chunks=10,
         ).chunk(document)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "```text\nalpha beta gamma\ndelta epsilon zeta\neta theta iota\n```",
+        "- alpha beta gamma\n- delta epsilon zeta\n- eta theta iota\n",
+        "| Key | Value |\n| --- | --- |\n| alpha | beta gamma |\n| delta | epsilon zeta |\n",
+    ],
+)
+def test_oversized_structures_prefer_line_boundaries_over_later_spaces(content: str) -> None:
+    chunks = StructureAwareChunker(chunk_size=32, overlap=0).chunk(_document(content))
+
+    assert len(chunks) > 1
+    assert all(chunk.content.endswith("\n") for chunk in chunks[:-1])

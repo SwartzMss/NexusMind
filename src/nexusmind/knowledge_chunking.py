@@ -206,15 +206,14 @@ def _markdown_blocks(content: str) -> list[_Block]:
 
 def _preferred_end(content: str, start: int, limit: int, *, minimum: int = 0) -> int:
     window = content[start:limit]
-    candidates = [window.rfind("\n\n"), window.rfind("\n")]
-    candidates.append(max(window.rfind(" "), window.rfind("\t")))
-    boundary = max(
-        (value for value in candidates if start + value + 1 > minimum),
-        default=-1,
-    )
-    if boundary < 0:
-        return limit
-    return start + boundary + (2 if window[boundary:boundary + 2] == "\n\n" else 1)
+    for separator in ("\n\n", "\n"):
+        boundary = window.rfind(separator)
+        if boundary >= 0 and start + boundary + len(separator) > minimum:
+            return start + boundary + len(separator)
+    boundary = max(window.rfind(" "), window.rfind("\t"))
+    if boundary >= 0 and start + boundary + 1 > minimum:
+        return start + boundary + 1
+    return limit
 
 
 def _bounded_spans(
@@ -234,6 +233,16 @@ def _bounded_spans(
             raise ChunkLimitError("document exceeds the chunk-count limit during fallback")
         limit = min(start + chunk_size, block.end)
         end = _preferred_end(content, start, limit, minimum=start) if limit < block.end else limit
+        minimum_remainder = min(chunk_size // 2, 100)
+        remaining_length = block.end - end + overlap
+        if end < block.end and remaining_length < minimum_remainder:
+            balanced_limit = block.end - minimum_remainder + overlap
+            end = _preferred_end(
+                content,
+                start,
+                balanced_limit,
+                minimum=start,
+            )
         spans.append(_Block(start, end, block.heading and start == block.start))
         if end == block.end:
             break
@@ -261,9 +270,57 @@ class StructureAwareChunker:
             raise TypeError("document must be a Document")
         if not document.content:
             return ()
+        raw_blocks = _markdown_blocks(document.content)
         blocks: list[_Block] = []
         oversized_span_count = 0
-        for block in _markdown_blocks(document.content):
+        index = 0
+        while index < len(raw_blocks):
+            block = raw_blocks[index]
+            if block.heading:
+                heading_start = block.start
+                heading_end = block.end
+                index += 1
+                while index < len(raw_blocks) and raw_blocks[index].heading:
+                    heading_end = raw_blocks[index].end
+                    index += 1
+                if index < len(raw_blocks):
+                    body = raw_blocks[index]
+                    heading_length = heading_end - heading_start
+                    available = self.chunk_size - heading_length
+                    if 0 < available < body.end - body.start:
+                        body_limit = body.start + available
+                        first_end = _preferred_end(
+                            document.content,
+                            body.start,
+                            body_limit,
+                            minimum=body.start,
+                        )
+                        remaining_length = body.end - first_end + self.overlap
+                        minimum_remainder = min(self.chunk_size // 2, 100)
+                        if remaining_length < minimum_remainder:
+                            balanced_take = max(1, (body.end - body.start + self.overlap) // 2)
+                            first_end = min(body.start + available, body.start + balanced_take)
+                        blocks.append(_Block(heading_start, first_end))
+                        oversized_span_count += 1
+                        remainder = _Block(max(body.start, first_end - self.overlap), body.end)
+                        remaining_budget = self.max_chunks + 1 - oversized_span_count
+                        spans = _bounded_spans(
+                            document.content,
+                            remainder,
+                            self.chunk_size,
+                            self.overlap,
+                            max_spans=max(1, remaining_budget),
+                        )
+                        oversized_span_count += len(spans)
+                        if oversized_span_count > self.max_chunks:
+                            raise ChunkLimitError(
+                                "document exceeds the chunk-count limit during fallback"
+                            )
+                        blocks.extend(spans)
+                        index += 1
+                        continue
+                blocks.append(_Block(heading_start, heading_end, True))
+                continue
             is_oversized = block.end - block.start > self.chunk_size
             remaining_budget = self.max_chunks + 1 - oversized_span_count
             spans = _bounded_spans(
@@ -280,24 +337,13 @@ class StructureAwareChunker:
                         "document exceeds the chunk-count limit during fallback"
                     )
             blocks.extend(spans)
+            index += 1
         packed: list[tuple[int, int]] = []
         start = blocks[0].start
         end = blocks[0].end
         headings_only = blocks[0].heading
         for block in blocks[1:]:
-            if headings_only and not block.heading and block.end - start > self.chunk_size:
-                limit = start + self.chunk_size
-                combined_end = _preferred_end(
-                    document.content,
-                    start,
-                    limit,
-                    minimum=block.start,
-                )
-                packed.append((start, combined_end))
-                start = max(block.start, combined_end - self.overlap)
-                end = block.end
-                headings_only = False
-            elif (block.heading and not headings_only) or block.end - start > self.chunk_size:
+            if (block.heading and not headings_only) or block.end - start > self.chunk_size:
                 packed.append((start, end))
                 start, end = block.start, block.end
                 headings_only = block.heading
