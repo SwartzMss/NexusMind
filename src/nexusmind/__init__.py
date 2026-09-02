@@ -176,6 +176,16 @@ from .document_extraction import (
     UnsupportedDocumentFormatError,
     select_document_extractor,
 )
+from .web_search import (
+    DEFAULT_NEXUSSEARCH_URL,
+    MAX_WEB_SEARCH_RESULTS,
+    NexusSearchProvider,
+    WebSearchError,
+    WebSearchProtocolError,
+    WebSearchProvider,
+    WebSearchResult,
+    WebSearchTransportError,
+)
 from .knowledge_ingestion import (
     DEFAULT_MAX_DIRECTORY_DEPTH,
     DEFAULT_MAX_DOCUMENTS,
@@ -362,6 +372,14 @@ __all__ = [
     "UnicodeCJKLexicalAnalyzer",
     "UnsupportedFileTypeError",
     "WhitespaceLexicalAnalyzer",
+    "DEFAULT_NEXUSSEARCH_URL",
+    "MAX_WEB_SEARCH_RESULTS",
+    "NexusSearchProvider",
+    "WebSearchError",
+    "WebSearchProtocolError",
+    "WebSearchProvider",
+    "WebSearchResult",
+    "WebSearchTransportError",
     "evaluate_retrieval",
     "generate_knowledge_answer",
     "evaluate_retrieval_multi_k",
