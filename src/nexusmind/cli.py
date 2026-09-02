@@ -19,6 +19,7 @@ from nexusmind.knowledge_base import KnowledgeBase
 from nexusmind.knowledge_base_manifest import KnowledgeBaseError, LocalDirectorySourceConfig, LocalFileSourceConfig, _path_identity
 from nexusmind.knowledge_query import knowledge_query_result_dict
 from nexusmind.runtime_support import runtime_operation
+from nexusmind.web_search import NexusSearchProvider, WebSearchError
 
 
 RUNTIME_LOGGER = logging.getLogger("nexusmind.runtime")
@@ -50,13 +51,17 @@ def _parser() -> argparse.ArgumentParser:
     inspect.add_argument("--knowledge-base", default="."); inspect.add_argument("--document"); inspect.add_argument("--preview-chars", type=int, default=160); inspect.add_argument("--json", action="store_true")
     diagnose = commands.add_parser("diagnose", help="diagnose retrieval stages")
     diagnose.add_argument("query"); diagnose.add_argument("--knowledge-base", default="."); diagnose.add_argument("--limit", type=int, default=10); diagnose.add_argument("--json", action="store_true")
+    web_search = commands.add_parser("web-search", help="search the web through NexusSearch")
+    web_search.add_argument("query"); web_search.add_argument("--limit", type=int, default=10); web_search.add_argument("--base-url", default="http://127.0.0.1:8788"); web_search.add_argument("--timeout", type=float, default=10.0); web_search.add_argument("--json", action="store_true")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        return {"create": _create, "source": _source, "sync": _sync, "search": _search, "query": _query, "inspect": _inspect, "diagnose": _diagnose}[args.command](args)
+        return {"create": _create, "source": _source, "sync": _sync, "search": _search, "query": _query, "inspect": _inspect, "diagnose": _diagnose, "web-search": _web_search}[args.command](args)
+    except WebSearchError as exc:
+        print(f"Web search failed: {exc}", file=sys.stderr); return 1
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr); return 2
     except (KnowledgeBaseError, KnowledgeAnswerError, TypeError, ValueError):
@@ -185,6 +190,22 @@ def _diagnose(args: argparse.Namespace) -> int:
             for item in result.candidates:
                 row = item.diagnostic; print(f"{row.stage.value}\t{row.rank}\t{row.score:.6f}\t{item.document.logical_path}")
     finally: kb.close()
+    return 0
+
+
+def _web_search(args: argparse.Namespace) -> int:
+    results = NexusSearchProvider(
+        args.base_url, timeout_seconds=args.timeout
+    ).search(args.query, limit=args.limit)
+    if args.json:
+        _print_json(results)
+    else:
+        for index, result in enumerate(results, start=1):
+            print(f"{index}. {result.title}")
+            print(f"   {result.url}")
+            print(f"   {result.snippet}")
+            if result.engine: print(f"   engine: {result.engine}")
+            if result.published_at: print(f"   published: {result.published_at}")
     return 0
 
 
