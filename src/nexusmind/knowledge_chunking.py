@@ -22,6 +22,7 @@ def _stable_chunk_id(
     chunk_size: int,
     overlap: int,
     algorithm: str | None = None,
+    metadata: tuple[str, ...] = (),
 ) -> str:
     parts = (
         document.document_id,
@@ -33,6 +34,8 @@ def _stable_chunk_id(
     )
     if algorithm is not None:
         parts += (algorithm,)
+    if metadata:
+        parts += metadata
     canonical = json.dumps(parts, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return f"chunk-{hashlib.sha256(canonical).hexdigest()}"
 
@@ -147,6 +150,14 @@ class _Block:
     heading: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class _Heading:
+    start: int
+    level: int
+    title: str
+    line_number: int
+
+
 def _lines(content: str) -> list[tuple[int, int, str]]:
     result: list[tuple[int, int, str]] = []
     offset = 0
@@ -223,6 +234,61 @@ def _markdown_blocks(content: str) -> list[_Block]:
             index += 1
         blocks.append(_Block(start, end))
     return blocks
+
+
+def _markdown_headings(content: str) -> tuple[_Heading, ...]:
+    headings: list[_Heading] = []
+    lines = _lines(content)
+    fence_marker: str | None = None
+    fence_length = 0
+    for line_number, (start, _end, text) in enumerate(lines, start=1):
+        fence = _FENCE.match(text)
+        if fence_marker is not None:
+            closing = rf"^[ \t]{{0,3}}{re.escape(fence_marker)}{{{fence_length},}}[ \t]*$"
+            if re.match(closing, text):
+                fence_marker = None
+                fence_length = 0
+            continue
+        if fence:
+            fence_marker = fence.group(1)[0]
+            fence_length = len(fence.group(1))
+            continue
+        match = _HEADING.match(text)
+        if match is None:
+            continue
+        marker = text.lstrip()[:6]
+        level = len(marker) - len(marker.lstrip("#"))
+        title = text[match.end() :].strip()
+        title = re.sub(r"[ \t]+#+[ \t]*$", "", title).strip()
+        if title:
+            headings.append(_Heading(start, level, title, line_number))
+    return tuple(headings)
+
+
+def _heading_metadata(
+    document: Document,
+    *,
+    start: int,
+    end: int,
+    headings: tuple[_Heading, ...],
+) -> tuple[tuple[str, ...], str, str]:
+    path: list[str] = []
+    location = ""
+    active = [heading for heading in headings if heading.start < end]
+    for heading in active:
+        path = path[: heading.level - 1]
+        path.append(heading.title)
+        location = f"{document.logical_path}:L{heading.line_number}"
+    if active and active[-1].start > start:
+        preceding = [heading for heading in headings if heading.start <= start]
+        path = []
+        location = ""
+        for heading in preceding:
+            path = path[: heading.level - 1]
+            path.append(heading.title)
+            location = f"{document.logical_path}:L{heading.line_number}"
+    heading_path = tuple(path)
+    return heading_path, heading_path[-1] if heading_path else "", location
 
 
 def _preferred_end(content: str, start: int, limit: int, *, minimum: int = 0) -> int:
@@ -393,23 +459,36 @@ class StructureAwareChunker:
             raise ChunkLimitError(
                 f"document requires {len(packed)} chunks; limit is {self.max_chunks}"
             )
-        return tuple(
-            Chunk(
-                document_id=document.document_id,
-                chunk_id=_stable_chunk_id(
-                    document,
+        headings = _markdown_headings(document.content)
+        structural_chunks: list[Chunk] = []
+        for start, end in packed:
+            heading_path, section_title, source_location = _heading_metadata(
+                document,
+                start=start,
+                end=end,
+                headings=headings,
+            )
+            structural_chunks.append(
+                Chunk(
+                    document_id=document.document_id,
+                    chunk_id=_stable_chunk_id(
+                        document,
+                        start_offset=start,
+                        end_offset=end,
+                        chunk_size=self.chunk_size,
+                        overlap=self.overlap,
+                        algorithm="structure-v2",
+                        metadata=heading_path + (source_location,),
+                    ),
+                    content=document.content[start:end],
                     start_offset=start,
                     end_offset=end,
-                    chunk_size=self.chunk_size,
-                    overlap=self.overlap,
-                    algorithm="structure-v1",
-                ),
-                content=document.content[start:end],
-                start_offset=start,
-                end_offset=end,
+                    heading_path=heading_path,
+                    section_title=section_title,
+                    source_location=source_location,
+                )
             )
-            for start, end in packed
-        )
+        return tuple(structural_chunks)
 
 
 __all__ = ["Chunk", "ChunkLimitError", "StructureAwareChunker", "TextChunker"]

@@ -202,10 +202,10 @@ def test_structure_chunker_preserves_nested_heading_metadata_and_locations() -> 
 
     assert binder.heading_path == ("Android Security", "Binder")
     assert binder.section_title == "Binder"
-    assert binder.source_location == "notes.txt:L5"
+    assert binder.source_location == "notes.txt:L7"
     assert oneway.heading_path == ("Android Security", "Binder", "oneway")
     assert oneway.section_title == "oneway"
-    assert oneway.source_location == "notes.txt:L9"
+    assert oneway.source_location == "notes.txt:L11"
     assert "not a heading" not in fenced.heading_path
     assert all(
         chunk.content == document.content[chunk.start_offset : chunk.end_offset]
