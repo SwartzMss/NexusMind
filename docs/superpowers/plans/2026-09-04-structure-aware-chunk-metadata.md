@@ -155,7 +155,7 @@ Expected: structure chunks have the current empty metadata, so the assertions fa
 
 - [ ] **Step 3: Implement metadata derivation over the existing structural spans.**
 
-Add a heading descriptor containing start offset, heading level, title, and line number. Parse the same ATX heading lines recognized by `_markdown_blocks`; strip the marker and optional closing sequence, trim whitespace, and never parse inside fenced blocks. Walk the already packed spans in source order with a six-entry heading stack. Before creating each output `Chunk`, update the stack for headings whose start is at or before the span start, then attach the active path, final title, and `f"{document.logical_path}:L{line_number}"` (or `""` before the first heading). Use `algorithm="structure-v2"` in the stable ID input so the metadata contract has a distinct deterministic identity.
+Add a heading descriptor containing start offset, heading level, title, and line number. Parse the same ATX heading lines recognized by `_markdown_blocks`; strip the marker and optional closing sequence, trim whitespace, and never parse inside fenced blocks. Walk the already packed spans in source order with a six-entry heading stack. Before creating each output `Chunk`, apply all headings before the span end, so a packed heading prelude carries the deepest heading it contains while later body spans inherit the preceding section; attach the active path, final title, and `f"{document.logical_path}:L{line_number}"` (or `""` before the first heading). Use `algorithm="structure-v2"` in the stable ID input so the metadata contract has a distinct deterministic identity.
 
 - [ ] **Step 4: Run all chunking and structure-boundary tests.**
 

@@ -278,7 +278,6 @@ def _markdown_headings(content: str) -> tuple[_Heading, ...]:
 def _heading_metadata(
     document: Document,
     *,
-    start: int,
     end: int,
     headings: tuple[_Heading, ...],
 ) -> tuple[tuple[str, ...], str, str]:
@@ -289,14 +288,6 @@ def _heading_metadata(
         path = path[: heading.level - 1]
         path.append(heading.title)
         location = f"{document.logical_path}:L{heading.line_number}"
-    if active and active[-1].start > start:
-        preceding = [heading for heading in headings if heading.start <= start]
-        path = []
-        location = ""
-        for heading in preceding:
-            path = path[: heading.level - 1]
-            path.append(heading.title)
-            location = f"{document.logical_path}:L{heading.line_number}"
     heading_path = tuple(path)
     return heading_path, heading_path[-1] if heading_path else "", location
 
@@ -474,7 +465,6 @@ class StructureAwareChunker:
         for start, end in packed:
             heading_path, section_title, source_location = _heading_metadata(
                 document,
-                start=start,
                 end=end,
                 headings=headings,
             )

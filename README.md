@@ -434,9 +434,9 @@ CI 在 `windows-latest` 上运行离线测试，不依赖真实 API Key、模型
 - [检索 Benchmark 说明与结果](evals/knowledge/benchmark.md)
 - [Document-aware diversification 评测](evals/knowledge/diversification.md)
 - [结构感知分块对照评测](evals/knowledge/chunking.md)
+- [Query Expansion deterministic evaluation](evals/knowledge/query_expansion/)
 
 结构感知 Chunk 的标题路径只作为检索上下文参与 BM25、semantic、Hybrid-RRF 和 reranking；用户看到的原文片段、字符偏移和引用仍来自 canonical content。离线对照评测同时报告 Hit@K、Precision@K、Recall@K 和 MRR。
-- [Query Expansion deterministic evaluation](evals/knowledge/query_expansion/)
 
 NexusMind 当前定位是本地 Knowledge Runtime。早期 Agent Runtime、Tool、Workspace、MCP 和 Agent Skill 实现已移除；当前阶段优先通过真实知识库 dogfooding 发现检索、问答、诊断和可用性问题。
 

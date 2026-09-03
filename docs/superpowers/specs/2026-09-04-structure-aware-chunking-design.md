@@ -52,9 +52,9 @@ heading-state pass over the resulting structural spans:
    headings inside fenced code remain ordinary content.
 2. Maintain a six-level stack. A heading at level `n` replaces the current
    level and discards deeper levels.
-3. Associate each emitted span with the active path at its start offset. A
-   heading-only span is associated with the heading it contains; content packed
-   after a heading inherits that section path.
+3. Associate each emitted span with the active path at its effective section
+   start. A heading-only or packed heading prelude uses the deepest heading it
+   contains before body content; later content inherits that section path.
 4. Preserve exact source offsets and the existing size, overlap, line-boundary,
    and `max_chunks` guarantees.
 
