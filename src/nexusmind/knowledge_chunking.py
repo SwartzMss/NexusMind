@@ -71,6 +71,16 @@ class Chunk:
         prefix = " > ".join(self.heading_path)
         return f"{prefix}\n{self.content}" if prefix else self.content
 
+    @property
+    def metadata(self) -> dict[str, object]:
+        """Return JSON-compatible structural metadata detached from the chunk."""
+
+        return {
+            "heading_path": list(self.heading_path),
+            "section_title": self.section_title,
+            "source_location": self.source_location,
+        }
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TextChunker:

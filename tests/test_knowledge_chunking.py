@@ -154,6 +154,11 @@ def test_chunk_defaults_keep_legacy_constructor_and_expose_empty_structure() -> 
     assert chunk.section_title == ""
     assert chunk.source_location == ""
     assert chunk.retrieval_text == "body"
+    assert chunk.metadata == {
+        "heading_path": [],
+        "section_title": "",
+        "source_location": "",
+    }
 
 
 def test_structural_chunk_retrieval_text_contains_heading_context() -> None:
@@ -169,6 +174,11 @@ def test_structural_chunk_retrieval_text_contains_heading_context() -> None:
     )
 
     assert chunk.retrieval_text == "Android Security > Binder\nbody"
+    assert chunk.metadata == {
+        "heading_path": ["Android Security", "Binder"],
+        "section_title": "Binder",
+        "source_location": "notes.md:L3",
+    }
 
 
 @pytest.mark.parametrize("heading_path", [("",), ["Binder"], (1,)])
