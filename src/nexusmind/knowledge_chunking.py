@@ -46,6 +46,27 @@ class Chunk:
     content: str
     start_offset: int
     end_offset: int
+    heading_path: tuple[str, ...] = ()
+    section_title: str = ""
+    source_location: str = ""
+
+    def __post_init__(self) -> None:
+        if type(self.heading_path) is not tuple:
+            raise TypeError("heading_path must be a tuple")
+        if any(type(title) is not str or not title.strip() for title in self.heading_path):
+            raise ValueError("heading_path must contain non-empty strings")
+        if type(self.section_title) is not str:
+            raise TypeError("section_title must be a string")
+        expected_title = self.heading_path[-1] if self.heading_path else ""
+        if self.section_title != expected_title:
+            raise ValueError("section_title must match the final heading_path item")
+        if type(self.source_location) is not str:
+            raise TypeError("source_location must be a string")
+
+    @property
+    def retrieval_text(self) -> str:
+        prefix = " > ".join(self.heading_path)
+        return f"{prefix}\n{self.content}" if prefix else self.content
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
