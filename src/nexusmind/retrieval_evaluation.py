@@ -89,6 +89,7 @@ class RetrievalEvaluationCaseResult:
     hit_at_k: float
     recall_at_k: float
     reciprocal_rank: float
+    precision_at_k: float = 0.0
 
 
 class RetrievalFailureKind(str, Enum):
@@ -104,6 +105,7 @@ class RetrievalCategoryReport:
     hit_at_k: float
     recall_at_k: float
     mrr: float
+    precision_at_k: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +116,7 @@ class RetrievalEvaluationReport:
     hit_at_k: float
     recall_at_k: float
     mrr: float
+    precision_at_k: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,6 +304,11 @@ def _report_from_rankings(
                 found.append(target)
                 seen.add(target)
         missed = tuple(target for target in case.relevant_documents if target not in seen)
+        precision_at_k = (
+            len(set(returned_targets) & relevant) / len(returned_targets)
+            if returned_targets
+            else 0.0
+        )
         case_results.append(
             RetrievalEvaluationCaseResult(
                 case_id=case.case_id,
@@ -315,6 +323,7 @@ def _report_from_rankings(
                 hit_at_k=1.0 if first_relevant_rank is not None else 0.0,
                 recall_at_k=len(found) / len(case.relevant_documents),
                 reciprocal_rank=1.0 / first_relevant_rank if first_relevant_rank else 0.0,
+                precision_at_k=precision_at_k,
             )
         )
     results = tuple(case_results)
@@ -332,6 +341,8 @@ def _report_from_rankings(
                 hit_at_k=sum(result.hit_at_k for result in members) / member_count,
                 recall_at_k=sum(result.recall_at_k for result in members) / member_count,
                 mrr=sum(result.reciprocal_rank for result in members) / member_count,
+                precision_at_k=sum(result.precision_at_k for result in members)
+                / member_count,
             )
         )
     return RetrievalEvaluationReport(
@@ -341,6 +352,7 @@ def _report_from_rankings(
         hit_at_k=sum(result.hit_at_k for result in results) / count,
         recall_at_k=sum(result.recall_at_k for result in results) / count,
         mrr=sum(result.reciprocal_rank for result in results) / count,
+        precision_at_k=sum(result.precision_at_k for result in results) / count,
     )
 
 
