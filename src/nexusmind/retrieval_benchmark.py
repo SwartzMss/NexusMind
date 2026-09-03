@@ -104,8 +104,9 @@ class BenchmarkReranker:
         query_terms = set(self._analyzer.analyze(query))
         scored: list[tuple[SearchHit, int]] = []
         for rank, hit in enumerate(candidates):
-            content_folded = hit.chunk.content.casefold()
-            content_terms = set(self._analyzer.analyze(hit.chunk.content))
+            retrieval_text = hit.chunk.retrieval_text
+            content_folded = retrieval_text.casefold()
+            content_terms = set(self._analyzer.analyze(retrieval_text))
             concept_matches = sum(
                 1
                 for terms in self._concepts
