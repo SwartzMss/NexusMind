@@ -200,14 +200,15 @@ def render_retrieval_comparison(
         "",
         "## Overall metrics",
         "",
-        "| Backend | K | Hit@K | Recall@K | MRR |",
-        "| --- | ---: | ---: | ---: | ---: |",
+        "| Backend | K | Hit@K | Precision@K | Recall@K | MRR |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for backend in report.backend_reports:
         for item in backend.reports_by_k:
             lines.append(
                 f"| {backend.backend_name} | {item.k} | {item.hit_at_k:.6f} | "
-                f"{item.recall_at_k:.6f} | {item.mrr:.6f} |"
+                f"{item.precision_at_k:.6f} | {item.recall_at_k:.6f} | "
+                f"{item.mrr:.6f} |"
             )
     lines.extend(["", "## Per-category metrics", ""])
     for category in RetrievalCategory:
@@ -224,15 +225,16 @@ def render_retrieval_comparison(
                 emitted = True
                 category_lines.append(
                     f"| {backend.backend_name} | {item.k} | {match.case_count} | "
-                    f"{match.hit_at_k:.6f} | {match.recall_at_k:.6f} | {match.mrr:.6f} |"
+                    f"{match.hit_at_k:.6f} | {match.precision_at_k:.6f} | "
+                    f"{match.recall_at_k:.6f} | {match.mrr:.6f} |"
                 )
         if emitted:
             lines.extend(
                 [
                     f"### {category.value}",
                     "",
-                    "| Backend | K | Cases | Hit@K | Recall@K | MRR |",
-                    "| --- | ---: | ---: | ---: | ---: | ---: |",
+                    "| Backend | K | Cases | Hit@K | Precision@K | Recall@K | MRR |",
+                    "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
                     *category_lines,
                     "",
                 ]

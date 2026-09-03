@@ -23,6 +23,12 @@
       "category": "exact_term",
       "query": "lease alpha-991 generation counter canonical snapshot",
       "relevant_documents": [{"source_id": "chunking-docs", "logical_path": "list.md"}]
+    },
+    {
+      "case_id": "nested-heading-context",
+      "category": "identifier",
+      "query": "Android Security Binder oneway transaction pid zero",
+      "relevant_documents": [{"source_id": "chunking-docs", "logical_path": "technical.md"}]
     }
   ]
 }
