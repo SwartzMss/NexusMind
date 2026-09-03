@@ -122,7 +122,7 @@ class InMemorySemanticChunkIndex:
         )
         self._preflight(candidate_chunks, candidate_documents, total_chars)
         vectors = self._embed_documents(
-            tuple(chunk.content for chunk in additions.values()),
+            tuple(chunk.retrieval_text for chunk in additions.values()),
             retained_vectors=self._vectors,
         )
         candidate_vectors = self._vectors.copy()
@@ -192,7 +192,7 @@ class InMemorySemanticChunkIndex:
         }
         if new_chunks:
             vectors = self._embed_documents(
-                tuple(chunk.content for chunk in new_chunks.values()),
+                tuple(chunk.retrieval_text for chunk in new_chunks.values()),
                 retained_vectors=candidate_vectors,
             )
             candidate_vectors.update(zip(new_chunks, vectors, strict=True))
