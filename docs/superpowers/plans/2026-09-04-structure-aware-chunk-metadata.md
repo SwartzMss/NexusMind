@@ -380,4 +380,3 @@ EOF
 ```
 
 Expected: GitHub returns a new PR URL targeting `main`, and the worktree is preserved for any review iteration.
-
