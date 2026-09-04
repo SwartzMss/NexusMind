@@ -50,6 +50,7 @@ def test_case_result_targets_are_canonical_and_fact_ids_unique(tmp_path: Path) -
                 "fact_id": "fact",
                 "answer": "answer",
                 "match_phrases": ["answer"],
+                "evidence_match_phrases": ["evidence marker"],
                 "required_evidence": [{"source_id": "docs", "logical_path": "doc.md"}],
             }],
             "forbidden_claims": [],
@@ -111,6 +112,7 @@ class RequiredAnswerFact:
     fact_id: str
     answer: str
     match_phrases: tuple[str, ...]
+    evidence_match_phrases: tuple[str, ...]
     required_evidence: tuple[AnswerQualityEvidenceTarget, ...]
 
 
@@ -291,9 +293,11 @@ Use Unicode casefold substring matching for authored phrases. Count fact
 coverage as satisfied facts divided by total facts. Citation validity is true
 only when every result citation exactly matches a model-context passage and
 belongs to the case's top-level `required_evidence`. Citation coverage is the
-fraction of satisfied facts with at least one citation matching that fact's
-required evidence; citation support precision is supported cited fact claims
-divided by cited fact claims, with zero-safe denominators. Detect forbidden
+fraction of satisfied facts with at least one citation whose target matches
+that fact's required evidence and whose cited passage content contains one of
+the fact's `evidence_match_phrases`; citation support precision is supported
+cited fact claims divided by cited fact claims, with zero-safe denominators.
+Detect forbidden
 claims by exact casefold phrase presence. For insufficient cases, success means
 the answer contains one of the deterministic uncertainty phrases and no
 forbidden claim; for normal cases, an uncertainty-only answer is incorrect.

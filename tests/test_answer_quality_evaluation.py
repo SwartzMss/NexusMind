@@ -48,6 +48,7 @@ def _case_payload(**overrides: object) -> dict[str, object]:
                 "fact_id": "pid-zero",
                 "answer": "A zero PID can represent an oneway Binder call.",
                 "match_phrases": ["zero PID", "oneway Binder call"],
+                "evidence_match_phrases": ["zero PID", "oneway Binder call"],
                 "required_evidence": [
                     {"source_id": "docs", "logical_path": "binder.md"}
                 ],
@@ -140,12 +141,14 @@ def test_load_cases_rejects_duplicate_fact_ids_and_invalid_evidence_fields(
                 "fact_id": "same",
                 "answer": "first",
                 "match_phrases": ["first"],
+                "evidence_match_phrases": ["first"],
                 "required_evidence": [{"source_id": "docs", "logical_path": "binder.md"}],
             },
             {
                 "fact_id": "same",
                 "answer": "second",
                 "match_phrases": ["second"],
+                "evidence_match_phrases": ["second"],
                 "required_evidence": [{"source_id": "docs", "logical_path": "binder.md"}],
             },
         ]
@@ -179,6 +182,7 @@ def test_fixture_runner_executes_both_context_configurations(tmp_path: Path) -> 
                     "fact_id": "pid-zero",
                     "answer": "A zero PID can represent an oneway Binder call.",
                     "match_phrases": ["zero PID", "oneway Binder call"],
+                    "evidence_match_phrases": ["zero PID", "oneway Binder call"],
                     "required_evidence": [
                         {"source_id": "binder", "logical_path": "binder.md"}
                     ],
@@ -228,8 +232,8 @@ def _two_fact_case() -> AnswerQualityCase:
         case_id="facts",
         question="facts",
         required_facts=(
-            RequiredAnswerFact("one", "fact one", ("fact one",), (evidence[0],)),
-            RequiredAnswerFact("two", "fact two", ("fact two",), (evidence[1],)),
+            RequiredAnswerFact("one", "fact one", ("fact one",), ("fact one",), (evidence[0],)),
+            RequiredAnswerFact("two", "fact two", ("fact two",), ("fact two",), (evidence[1],)),
         ),
         forbidden_claims=("forbidden claim",),
         required_evidence=evidence,
@@ -316,14 +320,43 @@ def test_evaluator_reports_citation_validity_coverage_and_support_precision() ->
     assert result.missed_fact_ids == ()
 
 
+def test_fact_support_requires_the_cited_passage_content() -> None:
+    evidence = AnswerQualityEvidenceTarget("docs", "doc.md")
+    case = AnswerQualityCase(
+        case_id="same-document-wrong-section",
+        question="facts",
+        required_facts=(
+            RequiredAnswerFact(
+                "one",
+                "fact one",
+                ("fact one",),
+                ("fact one",),
+                (evidence,),
+            ),
+        ),
+        forbidden_claims=(),
+        required_evidence=(evidence,),
+        allow_insufficient_evidence=False,
+    )
+
+    result = evaluate_answer_quality_case(
+        case, _query_result("fact one [K2]", ("K2",))
+    )
+
+    assert result.citation_validity is True
+    assert result.citation_coverage == 0.0
+    assert result.citation_support_precision == 0.0
+    assert result.status is AnswerQualityStatus.UNSUPPORTED
+
+
 def test_citation_support_precision_is_bounded_for_shared_evidence() -> None:
     evidence = AnswerQualityEvidenceTarget("docs", "doc.md", "one")
     case = AnswerQualityCase(
         case_id="shared",
         question="facts",
         required_facts=(
-            RequiredAnswerFact("one", "fact one", ("fact one",), (evidence,)),
-            RequiredAnswerFact("two", "fact two", ("fact two",), (evidence,)),
+            RequiredAnswerFact("one", "fact one", ("fact one",), ("fact one",), (evidence,)),
+            RequiredAnswerFact("two", "fact two", ("fact two",), ("fact two",), (evidence,)),
         ),
         forbidden_claims=(),
         required_evidence=(evidence,),
@@ -345,6 +378,7 @@ def test_evaluator_scores_expected_insufficient_evidence_behavior() -> None:
             RequiredAnswerFact(
                 "missing-fact",
                 "missing fact",
+                ("missing fact",),
                 ("missing fact",),
                 (AnswerQualityEvidenceTarget("docs", "doc.md"),),
             ),
@@ -379,6 +413,7 @@ def test_report_aggregates_metrics_and_renders_byte_stably(tmp_path: Path) -> No
                     "fact_id": "pid-zero",
                     "answer": "A zero PID can represent an oneway Binder call.",
                     "match_phrases": ["zero PID", "oneway Binder call"],
+                    "evidence_match_phrases": ["zero PID", "oneway Binder call"],
                     "required_evidence": [
                         {"source_id": "binder", "logical_path": "binder.md"}
                     ],

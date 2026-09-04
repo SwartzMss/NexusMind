@@ -59,6 +59,7 @@ class RequiredAnswerFact:
     fact_id: str
     answer: str
     match_phrases: tuple[str, ...]
+    evidence_match_phrases: tuple[str, ...]
     required_evidence: tuple[AnswerQualityEvidenceTarget, ...]
 
     def __post_init__(self) -> None:
@@ -70,6 +71,15 @@ class RequiredAnswerFact:
             raise ValueError("match_phrases must contain non-empty strings")
         if len(set(self.match_phrases)) != len(self.match_phrases):
             raise ValueError("match_phrases must not contain duplicates")
+        if type(self.evidence_match_phrases) is not tuple or not self.evidence_match_phrases:
+            raise ValueError("evidence_match_phrases must be a non-empty tuple")
+        if any(
+            type(item) is not str or not item.strip()
+            for item in self.evidence_match_phrases
+        ):
+            raise ValueError("evidence_match_phrases must contain non-empty strings")
+        if len(set(self.evidence_match_phrases)) != len(self.evidence_match_phrases):
+            raise ValueError("evidence_match_phrases must not contain duplicates")
         if type(self.required_evidence) is not tuple or not self.required_evidence:
             raise ValueError("required_evidence must be a non-empty tuple")
         if any(
@@ -187,15 +197,25 @@ def _parse_case(raw_case: Any) -> AnswerQualityCase:
 def _parse_fact(raw_fact: Any) -> RequiredAnswerFact:
     if type(raw_fact) is not dict:
         raise TypeError("each required fact must be an object")
-    if set(raw_fact) != {"fact_id", "answer", "match_phrases", "required_evidence"}:
+    if set(raw_fact) != {
+        "fact_id",
+        "answer",
+        "match_phrases",
+        "evidence_match_phrases",
+        "required_evidence",
+    }:
         raise ValueError("required fact fields are invalid")
     raw_phrases = raw_fact["match_phrases"]
     if type(raw_phrases) is not list:
         raise TypeError("match_phrases must be an array")
+    raw_evidence_phrases = raw_fact["evidence_match_phrases"]
+    if type(raw_evidence_phrases) is not list:
+        raise TypeError("evidence_match_phrases must be an array")
     return RequiredAnswerFact(
         fact_id=raw_fact["fact_id"],
         answer=raw_fact["answer"],
         match_phrases=tuple(raw_phrases),
+        evidence_match_phrases=tuple(raw_evidence_phrases),
         required_evidence=_parse_evidence_list(raw_fact["required_evidence"]),
     )
 
@@ -354,7 +374,8 @@ def evaluate_answer_quality_case(
             supported_ids = {
                 citation_id
                 for citation_id, citation in citation_by_id.items()
-                if any(
+                if context_by_id.get(citation_id) is not None
+                and any(
                     _target_matches(
                         target,
                         source_id=citation.source_id,
@@ -362,6 +383,10 @@ def evaluate_answer_quality_case(
                         chunk_id=citation.chunk_id,
                     )
                     for target in fact.required_evidence
+                )
+                and any(
+                    _contains(context_by_id[citation_id].content, phrase)
+                    for phrase in fact.evidence_match_phrases
                 )
             }
             fact_support[fact.fact_id] = supported_ids
@@ -683,7 +708,8 @@ class _FixtureAnswerGenerator:
         for fact in self._case.required_facts:
             for passage in model_context.passages:
                 if not _fact_evidence_matches(fact, passage) or not any(
-                    _contains(passage.content, phrase) for phrase in fact.match_phrases
+                    _contains(passage.content, phrase)
+                    for phrase in fact.evidence_match_phrases
                 ):
                     continue
                 available.append((fact, passage.citation_id))

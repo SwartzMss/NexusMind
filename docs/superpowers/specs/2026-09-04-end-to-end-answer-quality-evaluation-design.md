@@ -72,8 +72,9 @@ Files live under `evals/knowledge/answer_quality/`:
 The root contains a version and cases. Each case contains `case_id`, `question`,
 `required_facts`, `forbidden_claims`, `required_evidence`, and
 `allow_insufficient_evidence`. A required fact has a stable `fact_id`, one or
-more case-insensitive answer phrases, and one or more canonical evidence
-targets (`source_id`, `logical_path`, and optionally `chunk_id`). A case may
+more case-insensitive answer phrases, one or more case-insensitive evidence
+content markers, and one or more canonical evidence targets (`source_id`,
+`logical_path`, and optionally `chunk_id`). A case may
 also define a deterministic answer profile for exercising incomplete,
 unsupported, or refusal behavior. Unknown fields, duplicate IDs, empty phrases,
 and invalid evidence targets are rejected before any query runs.
