@@ -50,6 +50,9 @@ class _OneChunker:
                 document.content,
                 0,
                 len(document.content),
+                (),
+                "",
+                "",
             ),
         )
 
@@ -66,6 +69,9 @@ class _PipeChunker:
                     segment,
                     start,
                     start + len(segment),
+                    (),
+                    "",
+                    "",
                 )
             )
         return tuple(chunks)
@@ -457,6 +463,9 @@ def test_diagnose_search_rejects_valid_slice_with_ghost_chunk_id() -> None:
         canonical.content,
         canonical.start_offset,
         canonical.end_offset,
+        (),
+        "",
+        "",
     )
     state.trace = RetrievalDiagnostics(
         (SearchHit(ghost, 1.0),), (_row(ghost),)
@@ -492,6 +501,9 @@ def test_diagnose_search_rejects_nondeterministic_chunk_derivation() -> None:
                     document.content,
                     0,
                     len(document.content),
+                    (),
+                    "",
+                    "",
                 ),
             )
 
@@ -696,11 +708,20 @@ def test_diagnose_search_requires_exact_final_terms_and_nonempty_exact_chunks() 
     malformed_values = (
         SearchHit(canonical, 1.0, (_Text("alpha"),)),
         SearchHit(
-            Chunk(canonical.document_id, canonical.chunk_id, "", 0, 0),
+            Chunk(canonical.document_id, canonical.chunk_id, "", 0, 0, (), "", ""),
             1.0,
         ),
         SearchHit(
-            Chunk(canonical.document_id, canonical.chunk_id, _Text("alpha"), 0, 5),
+            Chunk(
+                canonical.document_id,
+                canonical.chunk_id,
+                _Text("alpha"),
+                0,
+                5,
+                (),
+                "",
+                "",
+            ),
             1.0,
         ),
     )
@@ -730,6 +751,9 @@ def test_diagnose_search_requires_exact_hit_chunk_and_row_shapes() -> None:
         canonical.content,
         canonical.start_offset,
         canonical.end_offset,
+        (),
+        "",
+        "",
     )
     hit_subclass_trace = RetrievalDiagnostics(
         (SearchHit(canonical, 1.0),), (_row(canonical),)
@@ -775,6 +799,9 @@ def test_ordinary_search_still_accepts_equal_string_subclass_chunk_content() -> 
         _Text(canonical.content),
         canonical.start_offset,
         canonical.end_offset,
+        (),
+        "",
+        "",
     )
     state.trace = RetrievalDiagnostics((SearchHit(compatible, 1.0),), ())
 
@@ -840,24 +867,24 @@ def test_diagnose_search_rejects_malformed_or_incoherent_complete_traces(case: s
     if case == "wrong_trace_type":
         trace = object()
     elif case == "ghost":
-        ghost = Chunk("missing", "ghost", "alpha", 0, 5)
+        ghost = Chunk("missing", "ghost", "alpha", 0, 5, (), "", "")
         trace = RetrievalDiagnostics((SearchHit(ghost, 1.0),), (_row(ghost),))
     elif case == "stale":
-        stale = Chunk(hit.chunk.document_id, hit.chunk.chunk_id, "old", 0, 3)
+        stale = Chunk(hit.chunk.document_id, hit.chunk.chunk_id, "old", 0, 3, (), "", "")
         trace = RetrievalDiagnostics((SearchHit(stale, 1.0),), (_row(stale),))
     elif case == "bad_offset":
-        bad = Chunk(hit.chunk.document_id, hit.chunk.chunk_id, "alpha", -1, 5)
+        bad = Chunk(hit.chunk.document_id, hit.chunk.chunk_id, "alpha", -1, 5, (), "", "")
         trace = RetrievalDiagnostics((SearchHit(bad, 1.0),), (_row(bad),))
     elif case == "bad_document_id":
-        bad = Chunk(hit.chunk.document_id, hit.chunk.chunk_id, "alpha", 0, 5)
+        bad = Chunk(hit.chunk.document_id, hit.chunk.chunk_id, "alpha", 0, 5, (), "", "")
         object.__setattr__(bad, "document_id", [])
         trace = RetrievalDiagnostics((SearchHit(bad, 1.0),), (_row(bad),))
     elif case == "bad_chunk_id":
-        bad = Chunk(hit.chunk.document_id, hit.chunk.chunk_id, "alpha", 0, 5)
+        bad = Chunk(hit.chunk.document_id, hit.chunk.chunk_id, "alpha", 0, 5, (), "", "")
         object.__setattr__(bad, "chunk_id", [])
         trace = RetrievalDiagnostics((SearchHit(bad, 1.0),), (_row(bad),))
     elif case == "content_conflict":
-        conflict = Chunk(hit.chunk.document_id, hit.chunk.chunk_id, "wrong", 0, 5)
+        conflict = Chunk(hit.chunk.document_id, hit.chunk.chunk_id, "wrong", 0, 5, (), "", "")
         trace = RetrievalDiagnostics((SearchHit(conflict, 1.0),), (_row(conflict),))
     elif case == "duplicate_hit":
         trace = RetrievalDiagnostics((hit, hit), (row,))

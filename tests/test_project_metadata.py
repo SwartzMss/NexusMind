@@ -15,7 +15,7 @@ def test_project_exposes_only_the_supported_cli_entrypoint() -> None:
     pyproject = Path(__file__).parents[1] / "pyproject.toml"
     project = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]
 
-    assert project["scripts"] == {"nexusmind": "nexusmind.desktop:main"}
+    assert project["scripts"] == {"nexusmind": "nexusmind.runtime_entrypoint:main"}
     assert any(requirement.startswith("pyinstaller") for requirement in project["optional-dependencies"]["packaging"])
     assert "firecrawl-anydoc==0.2.4" in project["dependencies"]
 

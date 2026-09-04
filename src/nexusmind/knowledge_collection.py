@@ -389,34 +389,31 @@ class KnowledgeCollection:
         self,
         query: str,
         *,
-        limit: int = 10,
-        retrieval_limit: int | None = None,
-        max_passages: int | None = None,
+        retrieval_limit: int = 10,
+        max_passages: int = 10,
         max_chars: int | None = None,
         max_tokens: int | None = None,
     ) -> ContextPackage:
         """Retrieve candidates and assemble a bounded, provenance-preserving context.
 
-        ``limit`` remains the backward-compatible default for both retrieval depth
-        and passage count. Explicit limits separate those two pipeline controls.
+        Retrieval depth and passage count are separate pipeline controls so callers
+        can compare broader candidate retrieval with a bounded model context.
         """
 
-        active_retrieval_limit = limit if retrieval_limit is None else retrieval_limit
-        active_max_passages = limit if max_passages is None else max_passages
         for name, value in (
-            ("retrieval_limit", active_retrieval_limit),
-            ("max_passages", active_max_passages),
+            ("retrieval_limit", retrieval_limit),
+            ("max_passages", max_passages),
         ):
             if type(value) is not int:
                 raise TypeError(f"{name} must be an integer")
             if value <= 0:
                 raise ValueError(f"{name} must be greater than zero")
-        results = self.search(query, limit=active_retrieval_limit)
+        results = self.search(query, limit=retrieval_limit)
         return assemble_context(
             query,
             results,
-            max_passages=active_max_passages,
-            max_candidates=active_retrieval_limit,
+            max_passages=max_passages,
+            max_candidates=retrieval_limit,
             max_chars=max_chars,
             max_tokens=max_tokens,
         )

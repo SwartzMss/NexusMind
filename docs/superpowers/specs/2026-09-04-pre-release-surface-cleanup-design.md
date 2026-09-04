@@ -17,12 +17,11 @@ that publish either obsolete surface. It will update the current README,
 architecture documentation, release notes, packaging metadata tests, release
 workflow tests, and portable packaging expectations as needed.
 
-The existing `src/nexusmind/desktop.py` path remains the CLI/runtime entry
-point. Its name is historical, but renaming it would add entrypoint and
-packaging churn without improving the first-release contract. Historical
-`docs/superpowers/plans/` and `docs/superpowers/specs/` are records of prior
-engineering work and are explicitly out of scope, even when they mention the
-old UI or compatibility choices.
+The executable boundary is named `src/nexusmind/runtime_entrypoint.py` so the
+first release does not publish a historical `desktop.py` module. Historical
+`docs/superpowers/plans/` and `docs/superpowers/specs/` records outside this
+current design and plan are out of scope, even when they mention the old UI or
+compatibility choices.
 
 ## Audit classification
 
@@ -49,6 +48,14 @@ optional backend/provider degradation, and manifest/SQLite integrity and
 current-document safety checks. These are behavior needed by supported
 runtimes or data safety, not compatibility aliases.
 
+The public first-release context API is also explicit: `build_context()` takes
+`retrieval_limit=10` and `max_passages=10` as separate controls and no longer
+accepts `limit`. `WhitespaceLexicalAnalyzer` is retained only as a deterministic
+benchmark comparison control. `Chunk` requires explicit `heading_path`,
+`section_title`, and `source_location`; plain-text chunkers pass empty values
+explicitly, while structure-aware chunkers populate them for context expansion
+and provenance.
+
 ## Resulting architecture
 
 The executable boundary remains:
@@ -57,7 +64,7 @@ The executable boundary remains:
 nexusmind console script
         |
         v
-nexusmind.desktop.main
+nexusmind.runtime_entrypoint.main
         |
         +-- runtime_support (runtime directory and logging)
         +-- cli.main (CLI commands)
@@ -66,20 +73,20 @@ nexusmind.desktop.main
 ```
 
 There is no GUI adapter or second console entry point. The portable PyInstaller
-bundle continues to target `src/nexusmind/desktop.py` and produces the
+bundle targets `src/nexusmind/runtime_entrypoint.py` and produces the
 `nexusmind` executable.
 
 ## Packaging and release contract
 
 `pyproject.toml` and `requirements.txt` will contain only dependencies needed
 by the supported Python 3.11–3.13 matrix. The project will expose only
-`nexusmind = "nexusmind.desktop:main"`. Release workflow clean-install checks
+`nexusmind = "nexusmind.runtime_entrypoint:main"`. Release workflow clean-install checks
 will verify only that entry point; wheel and sdist metadata checks remain
 unchanged otherwise.
 
 README and current release notes will describe CLI + Python API usage and will
 not mention Tkinter, `nexusmind-kb`, or a desktop product interface. Current
-architecture navigation will list `cli.py` and `desktop.py` as the executable
+architecture navigation will list `cli.py` and `runtime_entrypoint.py` as the executable
 boundary. Historical plan/spec documents remain untouched.
 
 ## Testing strategy
@@ -89,7 +96,7 @@ Tests will be changed with the contract:
 - delete UI-only tests together with the deleted module;
 - assert project metadata exposes only `nexusmind` and has no `tomli` shim;
 - assert release workflow verifies only `nexusmind` in clean installs;
-- keep `tests/test_desktop.py` and portable packaging tests focused on the
+- keep `tests/test_runtime_entrypoint.py` and portable packaging tests focused on the
   retained CLI/runtime boundary;
 - add a repository-facing stale-reference check for current product/release
   files, while excluding historical superpowers records;

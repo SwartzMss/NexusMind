@@ -257,8 +257,8 @@ def _query_result(text: str, citation_ids: tuple[str, ...]) -> KnowledgeQueryRes
     document = Document("docs", "doc.md", "fact one\nfact two")
     source = KnowledgeSource(source_id="docs", source_type="test", display_name="Docs")
     chunks = (
-        Chunk(document.document_id, "one", "fact one", 0, 8),
-        Chunk(document.document_id, "two", "fact two", 9, 17),
+        Chunk(document.document_id, "one", "fact one", 0, 8, (), "", ""),
+        Chunk(document.document_id, "two", "fact two", 9, 17, (), "", ""),
     )
     results = tuple(
         KnowledgeSearchResult(source, document, SearchHit(chunk, 1.0, ("facts",)))

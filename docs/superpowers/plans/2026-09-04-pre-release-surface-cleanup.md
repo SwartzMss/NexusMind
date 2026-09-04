@@ -4,7 +4,7 @@
 
 **Goal:** Remove the unreleased Tkinter UI and Python <3.11 compatibility baggage while preserving the nexusmind CLI, Python API, runtime resilience, and persistence safety.
 
-**Architecture:** Keep src/nexusmind/desktop.py as the CLI/runtime boundary and the PyInstaller entry unchanged. Delete the UI module/tests, expose only the nexusmind script, remove tomli, and align current docs, release validation, packaging tests, and metadata tests. Historical docs/superpowers plans/specs are out of scope.
+**Architecture:** Use src/nexusmind/runtime_entrypoint.py as the CLI/runtime boundary and the PyInstaller entry. Delete the UI module/tests, expose only the nexusmind script, remove tomli, remove the build_context(limit) compatibility parameter, require explicit Chunk structure metadata, and align current docs, release validation, packaging tests, and metadata tests. Historical docs/superpowers plans/specs outside this current plan are out of scope.
 
 **Tech Stack:** Python 3.11–3.13, pytest, Hatchling, PyInstaller, GitHub Actions YAML, Markdown.
 
@@ -33,12 +33,12 @@ import tomllib
 Rename the script test to test_project_exposes_only_the_supported_cli_entrypoint and assert:
 
 ~~~
-assert project["scripts"] == {"nexusmind": "nexusmind.desktop:main"}
+assert project["scripts"] == {"nexusmind": "nexusmind.runtime_entrypoint:main"}
 ~~~
 
 - [ ] **Step 2:** Add a stale-reference test that reads exactly README.md, docs/architecture.md, docs/releases/v0.1.0.md, pyproject.toml, requirements.txt, .github/workflows/ci.yml, .github/workflows/release.yml, and packaging/nexusmind.spec. Assert none contains knowledge_base_ui, nexusmind-kb, or tkinter. Exclude tests and historical docs so the check cannot self-match.
 
-- [ ] **Step 3:** Make release fixtures create only nexusmind and require nexusmind --help while rejecting nexusmind-kb. Rename test_pyinstaller_spec_targets_desktop_entry_and_onedir to test_pyinstaller_spec_targets_cli_runtime_entry_and_onedir; keep the desktop.py, COLLECT(, and console=True assertions.
+- [ ] **Step 3:** Make release fixtures create only nexusmind and require nexusmind --help while rejecting nexusmind-kb. Rename the runtime entrypoint test and update the PyInstaller assertion to runtime_entrypoint.py, while keeping the COLLECT( and console=True assertions.
 
 - [ ] **Step 4:** Run:
 
@@ -52,15 +52,15 @@ Expected: old-contract failures identify metadata/workflow/document references. 
 
 **Files:** src/nexusmind/knowledge_base_ui.py, tests/test_knowledge_base_ui.py, pyproject.toml, requirements.txt
 
-- [ ] **Step 1:** Delete only the UI module and UI-only test. Keep desktop.py, cli.py, tests/test_desktop.py, and all core KnowledgeBase/retrieval/query/evaluation modules.
+- [ ] **Step 1:** Delete only the UI module and UI-only test. Rename desktop.py to runtime_entrypoint.py without a forwarding alias; keep cli.py, the renamed runtime-entrypoint tests, and all core KnowledgeBase/retrieval/query/evaluation modules.
 
 - [ ] **Step 2:** Delete tomli>=2,<3; python_version < '3.11' from requirements.txt and its quoted equivalent from pyproject.toml. Keep requires-python >=3.11,<3.14 and runtime/provider/extraction/query-expansion/platform/persistence fallback behavior.
 
 - [ ] **Step 3:** Verify and commit:
 
 ~~~
-PYTHONPATH=src /home/swartz/WorkSpace/NexusMind/.venv/bin/python -c "import tomllib; import nexusmind.desktop; print('supported imports ok')"
-PYTHONPATH=src /home/swartz/WorkSpace/NexusMind/.venv/bin/python -m pytest tests/test_desktop.py tests/test_knowledge_cli.py tests/test_knowledge_query_cli.py -q
+PYTHONPATH=src /home/swartz/WorkSpace/NexusMind/.venv/bin/python -c "import tomllib; import nexusmind.runtime_entrypoint; print('supported imports ok')"
+PYTHONPATH=src /home/swartz/WorkSpace/NexusMind/.venv/bin/python -m pytest tests/test_runtime_entrypoint.py tests/test_knowledge_cli.py tests/test_knowledge_query_cli.py -q
 git add src/nexusmind/knowledge_base_ui.py tests/test_knowledge_base_ui.py pyproject.toml requirements.txt
 git commit -m "refactor: remove unreleased desktop UI surface"
 ~~~
@@ -71,7 +71,7 @@ git commit -m "refactor: remove unreleased desktop UI surface"
 
 - [ ] **Step 1:** In both release clean-install snippets change the entry-point loop from ("nexusmind", "nexusmind-kb") to ("nexusmind",). Preserve version, license, Requires-Python, artifact, publication, and portable build checks.
 
-- [ ] **Step 2:** Remove README desktop/Tkinter instructions and nexusmind-kb usage; rename the install heading to 开发环境安装; change the capability statement to CLI + Python API. Replace the architecture product-entry row with desktop.py / cli.py. Update v0.1.0 notes to mention only CLI + Python API and nexusmind.
+- [ ] **Step 2:** Remove README desktop/Tkinter instructions and nexusmind-kb usage; rename the install heading to 开发环境安装; change the capability statement to CLI + Python API. Replace the architecture product-entry row with runtime_entrypoint.py / cli.py. Update v0.1.0 notes to mention only CLI + Python API and nexusmind.
 
 - [ ] **Step 3:** Run and commit:
 
@@ -85,6 +85,8 @@ git commit -m "build: publish the cli-only first-release surface"
 Expected on Python 3.11–3.13: all selected tests pass.
 
 ## Task 4: Audit retained behavior and verify
+
+- [ ] **Step 0:** Remove the `build_context(limit=...)` compatibility parameter and update callers to pass explicit `retrieval_limit` and `max_passages`. Remove `Chunk` structure-metadata defaults, update every constructor, and document `WhitespaceLexicalAnalyzer` as a benchmark comparison control rather than a legacy compatibility path.
 
 - [ ] **Step 1:** Run:
 

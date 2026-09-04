@@ -67,7 +67,7 @@ flowchart TD
 
 ## 分块与检索
 
-默认 `StructureAwareChunker` 先保护 Markdown heading、段落、fenced code、列表和表格边界，再把相邻小 block 打包到 `chunk_size=1000`；超长 block 按空行、行、空白、字符顺序确定性回退。每个结构 chunk 继承从外层到当前 section 的 `heading_path`，`section_title` 是路径末项，`source_location` 使用 `logical_path:L<line>`。`TextChunker` 仍作为固定窗口 baseline。所有 Chunk 保持 canonical source offsets，ID 由 Document ID、content hash、字符区间、配置和显式算法版本派生。
+默认 `StructureAwareChunker` 先保护 Markdown heading、段落、fenced code、列表和表格边界，再把相邻小 block 打包到 `chunk_size=1000`；超长 block 按空行、行、空白、字符顺序确定性回退。每个结构 chunk 继承从外层到当前 section 的 `heading_path`，`section_title` 是路径末项，`source_location` 使用 `logical_path:L<line>`。`TextChunker` 仍作为固定窗口 baseline，并显式提供空的结构元数据。所有 Chunk 都必须携带这三个字段，因为它们是当前 chunk/context provenance 模型的显式不变量，而不是旧构造方式的兼容默认值。所有 Chunk 保持 canonical source offsets，ID 由 Document ID、content hash、字符区间、配置和显式算法版本派生。
 
 检索 backend 使用 Chunk 的只读 `retrieval_text`（标题路径加换行后的 exact content）建立 lexical、semantic、hybrid 和 reranker 输入；搜索结果、context assembly、引用和 provenance 仍只使用 exact `content`，因此标题上下文不会改变原文偏移或可验证引用。
 
@@ -206,4 +206,4 @@ python -m nexusmind.retrieval_benchmark --write evals/knowledge/benchmark.md
 | `answer_provider.py` | Knowledge-native model provider |
 | `knowledge_answer.py` / `knowledge_query.py` | 引用验证与统一 query pipeline |
 | `knowledge_inspection.py` | inspection 与 diagnostics view |
-| `desktop.py` / `cli.py` | CLI/runtime 产品入口 |
+| `runtime_entrypoint.py` / `cli.py` | CLI/runtime 产品入口 |

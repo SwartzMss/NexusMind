@@ -55,6 +55,9 @@ class _SegmentChunker:
                     segment,
                     start,
                     start + len(segment),
+                    (),
+                    "",
+                    "",
                 )
             )
         return tuple(chunks)

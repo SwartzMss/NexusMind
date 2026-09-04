@@ -25,6 +25,9 @@ def _chunk(chunk_id: str, content: str, document_id: str = "doc-1") -> Chunk:
         content=content,
         start_offset=0,
         end_offset=len(content),
+        heading_path=(),
+        section_title="",
+        source_location="",
     )
 
 

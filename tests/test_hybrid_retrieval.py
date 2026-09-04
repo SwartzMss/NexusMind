@@ -27,6 +27,9 @@ def _chunk(chunk_id: str, content: str | None = None, document_id: str = "doc") 
         content=value,
         start_offset=0,
         end_offset=len(value),
+        heading_path=(),
+        section_title="",
+        source_location="",
     )
 
 

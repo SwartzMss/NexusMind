@@ -99,7 +99,9 @@ def test_answer_generator_is_runtime_checkable_and_injected_into_knowledge_base(
 
 def test_model_context_rendering_is_deterministic_and_replayable(tmp_path: Path) -> None:
     kb = _knowledge_base(tmp_path)
-    context = kb._collection.build_context("Binder credentials?", limit=3)  # noqa: SLF001
+    context = kb._collection.build_context(  # noqa: SLF001
+        "Binder credentials?", retrieval_limit=3, max_passages=3
+    )
     limits = AnswerGenerationLimits()
 
     first = render_model_context(
@@ -270,7 +272,9 @@ def test_answer_generator_configuration_is_runtime_only(tmp_path: Path) -> None:
 
 def test_direct_generation_rejects_invalid_generator_output(tmp_path: Path) -> None:
     kb = _knowledge_base(tmp_path)
-    context = kb._collection.build_context("Binder?", limit=1)  # noqa: SLF001
+    context = kb._collection.build_context(  # noqa: SLF001
+        "Binder?", retrieval_limit=1, max_passages=1
+    )
 
     class InvalidGenerator(FakeGenerator):
         def generate(self, question, context, *, model_context, limits):

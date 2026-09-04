@@ -226,7 +226,7 @@ jobs:
           python -m pip install -e ".[dev,packaging]"
 
       - name: Run portable packaging tests
-        run: python -m pytest tests/test_runtime_support.py tests/test_desktop.py tests/test_portable_packaging.py -vv
+        run: python -m pytest tests/test_runtime_support.py tests/test_runtime_entrypoint.py tests/test_portable_packaging.py -vv
 
       - name: Build and E2E smoke-test portable ZIP
         shell: pwsh

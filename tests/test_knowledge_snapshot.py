@@ -99,6 +99,9 @@ class ConflictingChunker:
                 content=document.content,
                 start_offset=0,
                 end_offset=len(document.content),
+                heading_path=(),
+                section_title="",
+                source_location="",
             ),
         )
 

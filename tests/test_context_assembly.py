@@ -59,6 +59,9 @@ def _result(
                 document.content[start:end],
                 start,
                 end,
+                (),
+                "",
+                "",
             ),
             score,
             ("term",),
@@ -78,7 +81,12 @@ def test_collection_build_context_preserves_complete_provenance() -> None:
     collection = KnowledgeCollection()
     collection.sync(FakeAdapter(source, (document,)))
 
-    context = collection.build_context("Binder caller UID", limit=5, max_chars=8000)
+    context = collection.build_context(
+        "Binder caller UID",
+        retrieval_limit=5,
+        max_passages=5,
+        max_chars=8000,
+    )
 
     assert isinstance(context, ContextPackage)
     assert context.query == "Binder caller UID"
@@ -132,6 +140,13 @@ def test_collection_build_context_separates_retrieval_depth_from_passage_cap(
     assert context.metadata["candidate_count"] == 6
     assert context.metadata["max_candidates"] == 6
     assert context.metadata["max_passages"] == 2
+
+
+def test_collection_build_context_rejects_removed_limit_compatibility_parameter() -> None:
+    collection = KnowledgeCollection()
+
+    with pytest.raises(TypeError):
+        collection.build_context("term", limit=5)  # type: ignore[call-arg]
 
 
 def test_context_passage_is_a_compact_immutable_provenance_reference() -> None:

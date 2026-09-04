@@ -87,6 +87,9 @@ class _LineChunker:
                     line,
                     start,
                     end,
+                    (),
+                    "",
+                    "",
                 )
             )
             search_from = end + 1

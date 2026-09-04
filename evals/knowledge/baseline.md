@@ -28,7 +28,10 @@ The original #69 baseline used the then-default whitespace analyzer. Issue #71
 changed the default index analyzer, so both configurations are recorded rather
 than silently carrying the old values forward.
 
-### Previous baseline: `WhitespaceLexicalAnalyzer`
+### Comparison control: `WhitespaceLexicalAnalyzer`
+
+This analyzer remains as a deterministic comparison control for benchmark
+reports. It is not a legacy public compatibility path or the default analyzer.
 
 | Metric | Value |
 |---|---:|

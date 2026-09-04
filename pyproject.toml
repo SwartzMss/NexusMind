@@ -31,7 +31,7 @@ packaging = [
 ]
 
 [project.scripts]
-nexusmind = "nexusmind.desktop:main"
+nexusmind = "nexusmind.runtime_entrypoint:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

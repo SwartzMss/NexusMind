@@ -31,6 +31,9 @@ def _chunk(chunk_id: str, content: str, document_id: str = "doc-1") -> Chunk:
         content=content,
         start_offset=0,
         end_offset=len(content),
+        heading_path=(),
+        section_title="",
+        source_location="",
     )
 
 
@@ -228,7 +231,7 @@ def test_default_analyzer_matches_across_punctuation_and_han_bigrams() -> None:
     assert hit.matched_terms == ("binder", "安全", "全检", "检索")
 
 
-def test_explicit_whitespace_analyzer_preserves_legacy_matching() -> None:
+def test_explicit_whitespace_analyzer_is_a_stable_benchmark_control() -> None:
     index = InMemoryChunkIndex(analyzer=WhitespaceLexicalAnalyzer())
     index.add((_chunk("punctuated", "alpha,beta"), _chunk("spaced", "alpha beta")))
 

@@ -34,8 +34,8 @@ def test_benchmark_compares_four_backends_offline_and_deterministically() -> Non
 
 
 def test_benchmark_reranker_is_content_driven_and_preserves_candidates() -> None:
-    relevant = Chunk("doc-a", "a", "Binder provides Android IPC", 0, 27)
-    distractor = Chunk("doc-b", "b", "unrelated checkpoint notes", 0, 26)
+    relevant = Chunk("doc-a", "a", "Binder provides Android IPC", 0, 27, (), "", "")
+    distractor = Chunk("doc-b", "b", "unrelated checkpoint notes", 0, 26, (), "", "")
     candidates = (SearchHit(distractor, 2.0), SearchHit(relevant, 1.0))
 
     result = BenchmarkReranker().rerank("cross process IPC", candidates, limit=2)
