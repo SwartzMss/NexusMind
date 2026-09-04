@@ -6,7 +6,14 @@ from dataclasses import dataclass
 from enum import Enum
 import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
+
+from .knowledge import Document, KnowledgeSource
+from .knowledge_answer import AnswerGenerator, GeneratedAnswer, KnowledgeAnswerError
+from .knowledge_base import KnowledgeBase
+from .knowledge_collection import KnowledgeSearchResult
+from .knowledge_query import KnowledgeQueryOptions, KnowledgeQueryResult
 
 
 class AnswerQualityEvaluationError(Exception):
@@ -220,12 +227,224 @@ def _require_text(value: object, name: str) -> str:
     return value
 
 
+@dataclass(frozen=True, slots=True)
+class AnswerQualityRunConfiguration:
+    """One named production-query configuration used by the benchmark."""
+
+    name: str
+    expand_context: bool
+
+    def __post_init__(self) -> None:
+        _require_text(self.name, "configuration name")
+        if type(self.expand_context) is not bool:
+            raise TypeError("expand_context must be a boolean")
+
+
+DEFAULT_ANSWER_QUALITY_CONFIGURATIONS = (
+    AnswerQualityRunConfiguration("expand_context=false", False),
+    AnswerQualityRunConfiguration("expand_context=true", True),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerQualityQueryRun:
+    """One deterministic query execution retained for later scoring."""
+
+    case_id: str
+    configuration: str
+    query_result: KnowledgeQueryResult | None
+    error: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_text(self.case_id, "case_id")
+        _require_text(self.configuration, "configuration")
+        if self.query_result is not None and type(self.query_result) is not KnowledgeQueryResult:
+            raise TypeError("query_result must be a KnowledgeQueryResult or None")
+        if self.error is not None:
+            _require_text(self.error, "error")
+        if self.query_result is not None and self.error is not None:
+            raise ValueError("query run cannot contain both a result and an error")
+
+
+class _FixtureSourceAdapter:
+    def __init__(self, source: KnowledgeSource, document: Document) -> None:
+        self._source = source
+        self._document = document
+
+    def source(self) -> KnowledgeSource:
+        return self._source
+
+    def load_documents(self) -> tuple[Document, ...]:
+        return (self._document,)
+
+
+class _FixtureAnswerGenerator:
+    def __init__(self, case: AnswerQualityCase) -> None:
+        self._case = case
+
+    @property
+    def config_identity(self) -> str:
+        return f"answer-quality-fixture-v1/{self._case.case_id}/{self._case.answer_profile}"
+
+    def generate(self, question, context, *, model_context, limits):
+        available: list[tuple[RequiredAnswerFact, str]] = []
+        for fact in self._case.required_facts:
+            for passage in model_context.passages:
+                if not _fact_evidence_matches(fact, passage) or not any(
+                    _contains(passage.content, phrase) for phrase in fact.match_phrases
+                ):
+                    continue
+                available.append((fact, passage.citation_id))
+                break
+        if self._case.answer_profile == "partial" and available:
+            available = available[:-1]
+        if self._case.answer_profile == "insufficient":
+            return GeneratedAnswer(
+                "Insufficient evidence to answer this question confidently."
+                + _citation_suffix(tuple(item[1] for item in available)),
+                tuple(item[1] for item in available),
+            )
+        parts = [f"{fact.answer} [{citation_id}]" for fact, citation_id in available]
+        if self._case.answer_profile == "unsupported":
+            claim = self._case.forbidden_claims[0] if self._case.forbidden_claims else "This unsupported claim is true."
+            citation_id = available[0][1] if available else "K1"
+            parts.append(f"{claim} [{citation_id}]")
+        if not parts:
+            parts.append("The supplied evidence does not establish an answer. [K1]")
+            return GeneratedAnswer(parts[0], ("K1",))
+        citations = tuple(dict.fromkeys(item[1] for item in available))
+        return GeneratedAnswer(" ".join(parts), citations)
+
+
+def run_answer_quality_queries(
+    cases_path: str | Path,
+    *,
+    corpus_dir: str | Path,
+    configurations: tuple[AnswerQualityRunConfiguration, ...] = DEFAULT_ANSWER_QUALITY_CONFIGURATIONS,
+) -> tuple[AnswerQualityQueryRun, ...]:
+    """Run authored cases through the real query pipeline offline."""
+
+    cases = load_answer_quality_cases(cases_path)
+    if type(configurations) is not tuple or not configurations:
+        raise TypeError("configurations must be a non-empty tuple")
+    if any(type(item) is not AnswerQualityRunConfiguration for item in configurations):
+        raise TypeError("configurations must contain AnswerQualityRunConfiguration values")
+    if len({item.name for item in configurations}) != len(configurations):
+        raise ValueError("configurations must have unique names")
+    root = Path(corpus_dir)
+    try:
+        paths = tuple(sorted(path for path in root.rglob("*.md") if path.is_file()))
+    except OSError as exc:
+        raise AnswerQualityEvaluationDatasetError("failed to read corpus") from exc
+    if not paths:
+        raise AnswerQualityEvaluationDatasetError("corpus must contain Markdown files")
+    documents = tuple(_fixture_document(path, root) for path in paths)
+
+    runs: list[AnswerQualityQueryRun] = []
+    for case in cases:
+        for configuration in sorted(configurations, key=lambda item: item.name):
+            generator = _FixtureAnswerGenerator(case)
+            with TemporaryDirectory(prefix="nexusmind-answer-quality-") as temp_root:
+                knowledge_base = KnowledgeBase.create(
+                    temp_root,
+                    knowledge_base_id=f"answer-quality-{case.case_id}",
+                    answer_generator=generator,
+                )
+                try:
+                    for document in documents:
+                        source = KnowledgeSource(
+                            source_id=document.source_id,
+                            source_type="answer_quality_fixture",
+                            display_name=document.logical_path,
+                        )
+                        knowledge_base._collection.sync(  # noqa: SLF001
+                            _FixtureSourceAdapter(source, document)
+                        )
+                    try:
+                        result = knowledge_base.query(
+                            case.question,
+                            options=KnowledgeQueryOptions(generator=generator),
+                            expand_context=configuration.expand_context,
+                        )
+                    except KnowledgeAnswerError as exc:
+                        runs.append(
+                            AnswerQualityQueryRun(
+                                case.case_id,
+                                configuration.name,
+                                None,
+                                type(exc).__name__,
+                            )
+                        )
+                    else:
+                        runs.append(
+                            AnswerQualityQueryRun(
+                                case.case_id,
+                                configuration.name,
+                                result,
+                            )
+                        )
+                finally:
+                    knowledge_base.close()
+    return tuple(runs)
+
+
+def _fixture_document(path: Path, root: Path) -> Document:
+    try:
+        logical_path = path.relative_to(root).as_posix()
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise AnswerQualityEvaluationDatasetError("failed to read corpus document") from exc
+    source_id = Path(logical_path).with_suffix("").as_posix()
+    return Document(source_id, logical_path, content)
+
+
+def _fact_evidence_matches(
+    fact: RequiredAnswerFact,
+    passage: Any,
+) -> bool:
+    return any(
+        _target_matches(
+            target,
+            source_id=passage.source_id,
+            logical_path=passage.logical_path,
+            chunk_id=passage.chunk_id,
+        )
+        for target in fact.required_evidence
+    )
+
+
+def _target_matches(
+    target: AnswerQualityEvidenceTarget,
+    *,
+    source_id: str,
+    logical_path: str,
+    chunk_id: str,
+) -> bool:
+    return (
+        target.source_id == source_id
+        and target.logical_path == logical_path
+        and (target.chunk_id is None or target.chunk_id == chunk_id)
+    )
+
+
+def _contains(text: str, phrase: str) -> bool:
+    return phrase.casefold() in text.casefold()
+
+
+def _citation_suffix(citation_ids: tuple[str, ...]) -> str:
+    return "" if not citation_ids else " " + " ".join(f"[{item}]" for item in citation_ids)
+
+
 __all__ = [
     "AnswerQualityCase",
     "AnswerQualityEvaluationDatasetError",
     "AnswerQualityEvaluationError",
     "AnswerQualityEvidenceTarget",
+    "AnswerQualityQueryRun",
+    "AnswerQualityRunConfiguration",
     "AnswerQualityStatus",
+    "DEFAULT_ANSWER_QUALITY_CONFIGURATIONS",
     "RequiredAnswerFact",
     "load_answer_quality_cases",
+    "run_answer_quality_queries",
 ]

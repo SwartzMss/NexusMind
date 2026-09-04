@@ -8,6 +8,7 @@ import pytest
 from nexusmind.answer_quality_evaluation import (
     AnswerQualityEvaluationDatasetError,
     load_answer_quality_cases,
+    run_answer_quality_queries,
 )
 
 
@@ -130,3 +131,43 @@ def test_load_cases_rejects_duplicate_fact_ids_and_invalid_evidence_fields(
     )
     with pytest.raises(AnswerQualityEvaluationDatasetError, match="evidence"):
         load_answer_quality_cases(_write_dataset(tmp_path, invalid_evidence))
+
+
+def test_fixture_runner_executes_both_context_configurations(tmp_path: Path) -> None:
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    (corpus_dir / "binder.md").write_text(
+        "# Binder\n\n"
+        "A zero PID can represent an oneway Binder call.\n\n"
+        + ("Padding keeps this section large enough for structural chunking. " * 80)
+        + "\n\nThe nearby caveat says the call still carries caller credentials.",
+        encoding="utf-8",
+    )
+    case_path = _write_dataset(
+        tmp_path,
+        _case_payload(
+            question="zero PID",
+            required_facts=[
+                {
+                    "fact_id": "pid-zero",
+                    "answer": "A zero PID can represent an oneway Binder call.",
+                    "match_phrases": ["zero PID", "oneway Binder call"],
+                    "required_evidence": [
+                        {"source_id": "binder", "logical_path": "binder.md"}
+                    ],
+                }
+            ],
+            required_evidence=[
+                {"source_id": "binder", "logical_path": "binder.md"}
+            ],
+        ),
+    )
+
+    runs = run_answer_quality_queries(case_path, corpus_dir=corpus_dir)
+
+    assert {(item.case_id, item.configuration) for item in runs} == {
+        ("binder", "expand_context=false"),
+        ("binder", "expand_context=true"),
+    }
+    assert all(item.query_result is not None for item in runs)
+    assert all(item.query_result.trace.retrieval_queries == ("zero PID",) for item in runs)
