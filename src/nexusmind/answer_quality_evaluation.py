@@ -247,6 +247,209 @@ DEFAULT_ANSWER_QUALITY_CONFIGURATIONS = (
 
 
 @dataclass(frozen=True, slots=True)
+class AnswerQualityCaseResult:
+    """Inspectable quality metrics for one case/configuration run."""
+
+    case_id: str
+    configuration: str
+    status: AnswerQualityStatus
+    answer: str
+    error: str | None
+    citations: tuple[Any, ...]
+    citation_validity: bool
+    required_fact_coverage: float
+    citation_coverage: float
+    citation_support_precision: float
+    groundedness: float
+    unsupported_claim_rate: float
+    insufficient_evidence_success: bool
+    satisfied_fact_ids: tuple[str, ...]
+    missed_fact_ids: tuple[str, ...]
+    unsupported_fact_ids: tuple[str, ...]
+    forbidden_claims: tuple[str, ...]
+    retrieval_queries: tuple[str, ...]
+    fused_chunk_ids: tuple[str, ...]
+    passage_chunk_ids: tuple[str, ...]
+    context_expansion_enabled: bool | None
+    expanded_passage_count: int
+    expanded_document_count: int
+    retrieval_backend: str | None
+    generator_identity: str | None
+
+
+def evaluate_answer_quality_case(
+    case: AnswerQualityCase,
+    result: KnowledgeQueryResult | None,
+    *,
+    configuration: str = "direct",
+    error: str | None = None,
+) -> AnswerQualityCaseResult:
+    """Score one validated query result against one authored case."""
+
+    if type(case) is not AnswerQualityCase:
+        raise TypeError("case must be an AnswerQualityCase")
+    _require_text(configuration, "configuration")
+    if error is not None:
+        _require_text(error, "error")
+    if result is not None and type(result) is not KnowledgeQueryResult:
+        raise TypeError("result must be a KnowledgeQueryResult or None")
+    if result is None:
+        return AnswerQualityCaseResult(
+            case_id=case.case_id,
+            configuration=configuration,
+            status=AnswerQualityStatus.INCORRECT,
+            answer="",
+            error=error or "query_failed",
+            citations=(),
+            citation_validity=False,
+            required_fact_coverage=0.0,
+            citation_coverage=0.0,
+            citation_support_precision=0.0,
+            groundedness=0.0,
+            unsupported_claim_rate=0.0,
+            insufficient_evidence_success=False,
+            satisfied_fact_ids=(),
+            missed_fact_ids=tuple(item.fact_id for item in case.required_facts),
+            unsupported_fact_ids=(),
+            forbidden_claims=(),
+            retrieval_queries=(),
+            fused_chunk_ids=(),
+            passage_chunk_ids=(),
+            context_expansion_enabled=None,
+            expanded_passage_count=0,
+            expanded_document_count=0,
+            retrieval_backend=None,
+            generator_identity=None,
+        )
+
+    answer = result.answer
+    text = answer.text
+    satisfied: list[str] = []
+    missed: list[str] = []
+    unsupported_facts: list[str] = []
+    citation_by_id = {item.citation_id: item for item in answer.citations}
+    context_by_id = {item.citation_id: item for item in answer.model_context.passages}
+    allowed_targets = set(case.required_evidence)
+    citation_validity = True
+    for citation in answer.citations:
+        passage = context_by_id.get(citation.citation_id)
+        if passage is None or not any(
+            _target_matches(
+                target,
+                source_id=citation.source_id,
+                logical_path=citation.logical_path,
+                chunk_id=citation.chunk_id,
+            )
+            for target in allowed_targets
+        ):
+            citation_validity = False
+
+    fact_support: dict[str, set[str]] = {}
+    for fact in case.required_facts:
+        if any(_contains(text, phrase) for phrase in fact.match_phrases):
+            satisfied.append(fact.fact_id)
+            supported_ids = {
+                citation_id
+                for citation_id, citation in citation_by_id.items()
+                if any(
+                    _target_matches(
+                        target,
+                        source_id=citation.source_id,
+                        logical_path=citation.logical_path,
+                        chunk_id=citation.chunk_id,
+                    )
+                    for target in fact.required_evidence
+                )
+            }
+            fact_support[fact.fact_id] = supported_ids
+            if not supported_ids:
+                unsupported_facts.append(fact.fact_id)
+        else:
+            missed.append(fact.fact_id)
+
+    forbidden = tuple(
+        claim for claim in case.forbidden_claims if _contains(text, claim)
+    )
+    satisfied_set = set(satisfied)
+    supported_fact_ids = {
+        fact_id for fact_id, citation_ids in fact_support.items() if citation_ids
+    }
+    required_count = len(case.required_facts)
+    fact_coverage = len(satisfied) / required_count
+    citation_coverage = len(supported_fact_ids) / required_count
+    supported_citation_ids = set().union(*fact_support.values()) if fact_support else set()
+    citation_support_precision = len(
+        supported_citation_ids & set(citation_by_id)
+    ) / max(1, len(citation_by_id))
+    unsupported_claim_rate = (
+        len(forbidden) + len(unsupported_facts)
+    ) / max(1, len(satisfied) + len(forbidden))
+    insufficient_success = _is_insufficient_answer(text) and case.allow_insufficient_evidence
+    if case.allow_insufficient_evidence:
+        insufficient_success = insufficient_success and not forbidden
+    else:
+        insufficient_success = False
+
+    if forbidden or unsupported_facts or not citation_validity:
+        status = AnswerQualityStatus.UNSUPPORTED
+    elif case.allow_insufficient_evidence and insufficient_success:
+        status = AnswerQualityStatus.FULLY_CORRECT
+    elif (
+        not case.allow_insufficient_evidence
+        and len(satisfied) == required_count
+        and citation_coverage == 1.0
+        and citation_validity
+    ):
+        status = AnswerQualityStatus.FULLY_CORRECT
+    elif satisfied:
+        status = AnswerQualityStatus.PARTIALLY_CORRECT
+    else:
+        status = AnswerQualityStatus.INCORRECT
+
+    trace = result.trace
+    return AnswerQualityCaseResult(
+        case_id=case.case_id,
+        configuration=configuration,
+        status=status,
+        answer=text,
+        error=error,
+        citations=answer.citations,
+        citation_validity=citation_validity,
+        required_fact_coverage=fact_coverage,
+        citation_coverage=citation_coverage,
+        citation_support_precision=citation_support_precision,
+        groundedness=1.0 - unsupported_claim_rate,
+        unsupported_claim_rate=unsupported_claim_rate,
+        insufficient_evidence_success=insufficient_success,
+        satisfied_fact_ids=tuple(satisfied),
+        missed_fact_ids=tuple(missed),
+        unsupported_fact_ids=tuple(unsupported_facts),
+        forbidden_claims=forbidden,
+        retrieval_queries=trace.retrieval_queries,
+        fused_chunk_ids=tuple(item[0] for item in trace.fused_result_provenance),
+        passage_chunk_ids=tuple(item.chunk_id for item in trace.passages),
+        context_expansion_enabled=trace.context_expansion_enabled,
+        expanded_passage_count=trace.expanded_passage_count,
+        expanded_document_count=trace.expanded_document_count,
+        retrieval_backend=trace.retrieval_backend,
+        generator_identity=answer.model_context.generator_config_identity,
+    )
+
+
+def _is_insufficient_answer(text: str) -> bool:
+    return any(
+        _contains(text, phrase)
+        for phrase in (
+            "insufficient evidence",
+            "not enough evidence",
+            "cannot answer",
+            "unable to determine",
+            "does not establish an answer",
+        )
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class AnswerQualityQueryRun:
     """One deterministic query execution retained for later scoring."""
 
@@ -440,11 +643,13 @@ __all__ = [
     "AnswerQualityEvaluationDatasetError",
     "AnswerQualityEvaluationError",
     "AnswerQualityEvidenceTarget",
+    "AnswerQualityCaseResult",
     "AnswerQualityQueryRun",
     "AnswerQualityRunConfiguration",
     "AnswerQualityStatus",
     "DEFAULT_ANSWER_QUALITY_CONFIGURATIONS",
     "RequiredAnswerFact",
     "load_answer_quality_cases",
+    "evaluate_answer_quality_case",
     "run_answer_quality_queries",
 ]

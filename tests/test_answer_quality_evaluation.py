@@ -6,10 +6,33 @@ from pathlib import Path
 import pytest
 
 from nexusmind.answer_quality_evaluation import (
+    AnswerQualityCase,
     AnswerQualityEvaluationDatasetError,
+    AnswerQualityEvidenceTarget,
+    AnswerQualityStatus,
+    RequiredAnswerFact,
+    evaluate_answer_quality_case,
     load_answer_quality_cases,
     run_answer_quality_queries,
 )
+from nexusmind import (
+    AnswerGenerationLimits,
+    AnswerGenerator,
+    ContextPassage,
+    GeneratedAnswer,
+    KnowledgeAnswer,
+    KnowledgeCitation,
+    KnowledgeQueryResult,
+    KnowledgeQueryTrace,
+    ModelContextPassage,
+    ModelContextRecord,
+    SearchHit,
+    assemble_context,
+    generate_knowledge_answer,
+)
+from nexusmind.knowledge import Document, KnowledgeSource
+from nexusmind.knowledge_chunking import Chunk
+from nexusmind.knowledge_collection import KnowledgeSearchResult
 
 
 def _case_payload(**overrides: object) -> dict[str, object]:
@@ -171,3 +194,147 @@ def test_fixture_runner_executes_both_context_configurations(tmp_path: Path) -> 
     }
     assert all(item.query_result is not None for item in runs)
     assert all(item.query_result.trace.retrieval_queries == ("zero PID",) for item in runs)
+
+
+def _two_fact_case() -> AnswerQualityCase:
+    evidence = (
+        AnswerQualityEvidenceTarget("docs", "doc.md", "one"),
+        AnswerQualityEvidenceTarget("docs", "doc.md", "two"),
+    )
+    return AnswerQualityCase(
+        case_id="facts",
+        question="facts",
+        required_facts=(
+            RequiredAnswerFact("one", "fact one", ("fact one",), (evidence[0],)),
+            RequiredAnswerFact("two", "fact two", ("fact two",), (evidence[1],)),
+        ),
+        forbidden_claims=("forbidden claim",),
+        required_evidence=evidence,
+        allow_insufficient_evidence=False,
+    )
+
+
+class _ResultGenerator(AnswerGenerator):
+    def __init__(self, generated: GeneratedAnswer) -> None:
+        self.generated = generated
+
+    @property
+    def config_identity(self) -> str:
+        return "test/result-generator"
+
+    def generate(self, question, context, *, model_context, limits):
+        return self.generated
+
+
+def _query_result(text: str, citation_ids: tuple[str, ...]) -> KnowledgeQueryResult:
+    document = Document("docs", "doc.md", "fact one\nfact two")
+    source = KnowledgeSource(source_id="docs", source_type="test", display_name="Docs")
+    chunks = (
+        Chunk(document.document_id, "one", "fact one", 0, 8),
+        Chunk(document.document_id, "two", "fact two", 9, 17),
+    )
+    results = tuple(
+        KnowledgeSearchResult(source, document, SearchHit(chunk, 1.0, ("facts",)))
+        for chunk in chunks
+    )
+    context = assemble_context("facts", results, max_passages=2, max_candidates=2)
+    answer = generate_knowledge_answer(
+        "facts",
+        context,
+        _ResultGenerator(GeneratedAnswer(text, citation_ids)),
+    )
+    config = answer.model_context.context_config
+    trace = KnowledgeQueryTrace(
+        retrieval_backend="test",
+        passages=answer.model_context.passages,
+        candidate_count=config.candidate_count,
+        context_character_count=config.character_count,
+        context_estimated_token_count=config.estimated_token_count,
+        retrieval_queries=("facts",),
+        fused_result_provenance=(("one", ((0, 1),)), ("two", ((0, 2),))),
+    )
+    return KnowledgeQueryResult(answer, answer.citations, "trace", trace)
+
+
+def test_evaluator_distinguishes_complete_partial_incorrect_and_unsupported() -> None:
+    case = _two_fact_case()
+    complete = evaluate_answer_quality_case(
+        case, _query_result("fact one [K1] fact two [K2]", ("K1", "K2"))
+    )
+    partial = evaluate_answer_quality_case(
+        case, _query_result("fact one [K1]", ("K1",))
+    )
+    incorrect = evaluate_answer_quality_case(
+        case, _query_result("unrelated [K1]", ("K1",))
+    )
+    unsupported = evaluate_answer_quality_case(
+        case,
+        _query_result("fact one [K1] fact two [K2] forbidden claim [K1]", ("K1", "K2")),
+    )
+
+    assert complete.status is AnswerQualityStatus.FULLY_CORRECT
+    assert complete.required_fact_coverage == 1.0
+    assert partial.status is AnswerQualityStatus.PARTIALLY_CORRECT
+    assert partial.required_fact_coverage == 0.5
+    assert incorrect.status is AnswerQualityStatus.INCORRECT
+    assert unsupported.status is AnswerQualityStatus.UNSUPPORTED
+
+
+def test_evaluator_reports_citation_validity_coverage_and_support_precision() -> None:
+    case = _two_fact_case()
+    result = evaluate_answer_quality_case(
+        case, _query_result("fact one [K1] fact two [K2]", ("K1", "K2"))
+    )
+
+    assert result.citation_validity is True
+    assert result.citation_coverage == 1.0
+    assert result.citation_support_precision == 1.0
+    assert result.satisfied_fact_ids == ("one", "two")
+    assert result.missed_fact_ids == ()
+
+
+def test_citation_support_precision_is_bounded_for_shared_evidence() -> None:
+    evidence = AnswerQualityEvidenceTarget("docs", "doc.md", "one")
+    case = AnswerQualityCase(
+        case_id="shared",
+        question="facts",
+        required_facts=(
+            RequiredAnswerFact("one", "fact one", ("fact one",), (evidence,)),
+            RequiredAnswerFact("two", "fact two", ("fact two",), (evidence,)),
+        ),
+        forbidden_claims=(),
+        required_evidence=(evidence,),
+        allow_insufficient_evidence=False,
+    )
+
+    result = evaluate_answer_quality_case(
+        case, _query_result("fact one fact two [K1]", ("K1",))
+    )
+
+    assert result.citation_support_precision == 1.0
+
+
+def test_evaluator_scores_expected_insufficient_evidence_behavior() -> None:
+    case = AnswerQualityCase(
+        case_id="missing",
+        question="missing",
+        required_facts=(
+            RequiredAnswerFact(
+                "missing-fact",
+                "missing fact",
+                ("missing fact",),
+                (AnswerQualityEvidenceTarget("docs", "doc.md"),),
+            ),
+        ),
+        forbidden_claims=(),
+        required_evidence=(AnswerQualityEvidenceTarget("docs", "doc.md"),),
+        allow_insufficient_evidence=True,
+        answer_profile="insufficient",
+    )
+    result = evaluate_answer_quality_case(
+        case,
+        _query_result("Insufficient evidence to answer confidently. [K1]", ("K1",)),
+    )
+
+    assert result.insufficient_evidence_success is True
+    assert result.status is AnswerQualityStatus.FULLY_CORRECT
