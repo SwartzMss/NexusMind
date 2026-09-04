@@ -4,7 +4,7 @@
 
 ## Knowledge Runtime
 
-NexusMind 当前只关注 KnowledgeBase。CLI、Python API 和桌面 UI 都通过公开 `KnowledgeBase` API 进入同一条 Knowledge Runtime，不依赖 Agent Runtime、Tool Loop 或 MCP。
+NexusMind 当前只关注 KnowledgeBase。CLI 和 Python API 都通过公开 `KnowledgeBase` API 进入同一条 Knowledge Runtime，不依赖 Agent Runtime、Tool Loop 或 MCP。
 
 ```mermaid
 flowchart LR
@@ -206,4 +206,4 @@ python -m nexusmind.retrieval_benchmark --write evals/knowledge/benchmark.md
 | `answer_provider.py` | Knowledge-native model provider |
 | `knowledge_answer.py` / `knowledge_query.py` | 引用验证与统一 query pipeline |
 | `knowledge_inspection.py` | inspection 与 diagnostics view |
-| `cli.py` / `knowledge_base_ui.py` | 产品入口 |
+| `desktop.py` / `cli.py` | CLI/runtime 产品入口 |

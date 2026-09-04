@@ -113,4 +113,3 @@ PYTHONPATH=src /home/swartz/WorkSpace/NexusMind/.venv/bin/python -m pytest tests
 - [ ] **Step 3:** Push agent/issue-132-pre-release-cleanup and create a PR titled refactor: remove desktop UI and pre-release compatibility baggage, with Closes #132, the audit table, retained-items rationale, and test results in the body.
 
 - [ ] **Step 4:** Report the PR URL and pending CI status; leave the worktree available for review.
-

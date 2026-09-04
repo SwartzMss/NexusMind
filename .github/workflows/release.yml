@@ -160,7 +160,7 @@ jobs:
           if (metadata.get("License-Expression") or metadata.get("License")) != "MIT":
               raise SystemExit("installed wheel license mismatch")
           scripts = {item.name: item for item in importlib.metadata.entry_points(group="console_scripts")}
-          for name in ("nexusmind", "nexusmind-kb"):
+          for name in ("nexusmind",):
               if not Path(sys.executable).with_name(name).is_file() or name not in scripts or not callable(scripts[name].load()):
                   raise SystemExit(f"installed entrypoint is not usable: {name}")
           PY
@@ -188,7 +188,7 @@ jobs:
           if (metadata.get("License-Expression") or metadata.get("License")) != "MIT":
               raise SystemExit("installed sdist license mismatch")
           scripts = {item.name: item for item in importlib.metadata.entry_points(group="console_scripts")}
-          for name in ("nexusmind", "nexusmind-kb"):
+          for name in ("nexusmind",):
               if not Path(sys.executable).with_name(name).is_file() or name not in scripts or not callable(scripts[name].load()):
                   raise SystemExit(f"installed entrypoint is not usable: {name}")
           PY
