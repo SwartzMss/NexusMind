@@ -1,0 +1,158 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "case_id": "binder-complete",
+      "question": "Why can Binder oneway calling PID be zero?",
+      "required_facts": [
+        {
+          "fact_id": "pid-zero-is-asynchronous",
+          "answer": "An oneway Binder call can report a zero PID because it is processed asynchronously.",
+          "match_phrases": ["oneway Binder call can report a zero PID"],
+          "evidence_match_phrases": ["processed asynchronously"],
+          "required_evidence": [
+            {"source_id": "android-binder", "logical_path": "android-binder.md"}
+          ]
+        },
+        {
+          "fact_id": "credentials-remain-available",
+          "answer": "The kernel still supplies caller credentials for authorization.",
+          "match_phrases": ["kernel still supplies caller credentials"],
+          "evidence_match_phrases": ["kernel still supplies caller credentials"],
+          "required_evidence": [
+            {"source_id": "android-binder", "logical_path": "android-binder.md"}
+          ]
+        }
+      ],
+      "forbidden_claims": ["A zero PID always proves an anonymous caller"],
+      "required_evidence": [
+        {"source_id": "android-binder", "logical_path": "android-binder.md"}
+      ],
+      "allow_insufficient_evidence": false,
+      "answer_profile": "grounded"
+    },
+    {
+      "case_id": "binder-partial",
+      "question": "What does a zero PID mean for Binder authorization?",
+      "required_facts": [
+        {
+          "fact_id": "pid-zero-is-asynchronous",
+          "answer": "An oneway Binder call can report a zero PID because it is processed asynchronously.",
+          "match_phrases": ["oneway Binder call can report a zero PID"],
+          "evidence_match_phrases": ["processed asynchronously"],
+          "required_evidence": [
+            {"source_id": "android-binder", "logical_path": "android-binder.md"}
+          ]
+        },
+        {
+          "fact_id": "credentials-remain-available",
+          "answer": "The kernel still supplies caller credentials for authorization.",
+          "match_phrases": ["kernel still supplies caller credentials"],
+          "evidence_match_phrases": ["kernel still supplies caller credentials"],
+          "required_evidence": [
+            {"source_id": "android-binder", "logical_path": "android-binder.md"}
+          ]
+        }
+      ],
+      "forbidden_claims": ["A zero PID always proves an anonymous caller"],
+      "required_evidence": [
+        {"source_id": "android-binder", "logical_path": "android-binder.md"}
+      ],
+      "allow_insufficient_evidence": false,
+      "answer_profile": "partial"
+    },
+    {
+      "case_id": "qnx-pathname-dispatch",
+      "question": "How does QNX Resource Manager pathname dispatch work?",
+      "required_facts": [
+        {
+          "fact_id": "qnx-dispatch",
+          "answer": "QNX Resource Manager pathname dispatch maps an attached pathname to registered resource-manager connect and I/O functions.",
+          "match_phrases": ["QNX Resource Manager pathname dispatch maps"],
+          "evidence_match_phrases": ["pathname dispatch maps an attached pathname"],
+          "required_evidence": [
+            {"source_id": "qnx-resource-manager", "logical_path": "qnx-resource-manager.md"}
+          ]
+        }
+      ],
+      "forbidden_claims": ["Scheduling priority replaces pathname dispatch"],
+      "required_evidence": [
+        {"source_id": "qnx-resource-manager", "logical_path": "qnx-resource-manager.md"}
+      ],
+      "allow_insufficient_evidence": false,
+      "answer_profile": "grounded"
+    },
+    {
+      "case_id": "trustzone-key-isolation",
+      "question": "Can a normal-world application read TrustZone key material?",
+      "required_facts": [
+        {
+          "fact_id": "secure-world-key-isolation",
+          "answer": "TrustZone keeps secure-world key operations isolated from normal-world applications.",
+          "match_phrases": ["TrustZone keeps secure-world key operations isolated"],
+          "evidence_match_phrases": ["TrustZone keeps secure-world key operations isolated"],
+          "required_evidence": [
+            {"source_id": "security", "logical_path": "security.md"}
+          ]
+        },
+        {
+          "fact_id": "certificate-chain-validation",
+          "answer": "Certificate-chain validation checks signatures, issuer linkage, validity intervals, and the trust anchor.",
+          "match_phrases": ["Certificate-chain validation checks signatures"],
+          "evidence_match_phrases": ["Certificate-chain validation checks signatures"],
+          "required_evidence": [
+            {"source_id": "security", "logical_path": "security.md"}
+          ]
+        }
+      ],
+      "forbidden_claims": ["A certificate file alone proves that its chain is trusted"],
+      "required_evidence": [
+        {"source_id": "security", "logical_path": "security.md"}
+      ],
+      "allow_insufficient_evidence": false,
+      "answer_profile": "grounded"
+    },
+    {
+      "case_id": "insufficient-boot-pin",
+      "question": "What secret boot PIN is stored in the QNX Resource Manager documentation?",
+      "required_facts": [
+        {
+          "fact_id": "secret-boot-pin",
+          "answer": "The corpus does not provide a secret boot PIN.",
+          "match_phrases": ["secret boot PIN"],
+          "evidence_match_phrases": ["secret boot PIN is documented"],
+          "required_evidence": [
+            {"source_id": "qnx-resource-manager", "logical_path": "qnx-resource-manager.md"}
+          ]
+        }
+      ],
+      "forbidden_claims": ["The secret boot PIN is 1234"],
+      "required_evidence": [
+        {"source_id": "qnx-resource-manager", "logical_path": "qnx-resource-manager.md"}
+      ],
+      "allow_insufficient_evidence": true,
+      "answer_profile": "insufficient"
+    },
+    {
+      "case_id": "unsupported-binder-claim",
+      "question": "Does a zero PID prove that a Binder caller is anonymous?",
+      "required_facts": [
+        {
+          "fact_id": "zero-pid-not-anonymous-proof",
+          "answer": "The zero PID describes the asynchronous transaction context and does not prove an anonymous caller.",
+          "match_phrases": ["zero PID describes the asynchronous transaction context"],
+          "evidence_match_phrases": ["asynchronous transaction context"],
+          "required_evidence": [
+            {"source_id": "android-binder", "logical_path": "android-binder.md"}
+          ]
+        }
+      ],
+      "forbidden_claims": ["A zero PID always proves an anonymous caller"],
+      "required_evidence": [
+        {"source_id": "android-binder", "logical_path": "android-binder.md"}
+      ],
+      "allow_insufficient_evidence": false,
+      "answer_profile": "unsupported"
+    }
+  ]
+}
