@@ -64,7 +64,7 @@ def test_release_version_flows_into_build_install_upload_and_publish(workflow: d
         assert f'venv-{kind}/bin/python" -m pip install "$GITHUB_WORKSPACE/dist/{filename}"' in clean_install
         assert f'venv-{kind}/bin/python" -m pip check' in clean_install
         assert f'venv-{kind}/bin/nexusmind" --help' in clean_install
-        assert "nexusmind-kb" in clean_install
+        assert "nexusmind-kb" not in clean_install
         assert filename in step(workflow, "publish", "Create GitHub Release")["run"]
     upload = step(workflow, "python-package", "Upload verified Python distributions")["with"]
     assert upload["path"].splitlines() == [
@@ -178,7 +178,7 @@ def test_clean_install_verifies_final_metadata(workflow, tmp_path, monkeypatch, 
     monkeypatch.setattr(importlib.metadata, "metadata", lambda name: metadata)
     monkeypatch.setattr(sys, "executable", str(tmp_path / "python"))
     scripts = []
-    for name in ("nexusmind", "nexusmind-kb"):
+    for name in ("nexusmind",):
         (tmp_path / name).touch()
         scripts.append(SimpleNamespace(name=name, load=lambda: lambda: None))
     monkeypatch.setattr(importlib.metadata, "entry_points", lambda **kwargs: scripts)

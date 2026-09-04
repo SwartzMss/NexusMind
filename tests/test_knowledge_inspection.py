@@ -55,6 +55,9 @@ class _FixedChunker:
                 content=document.content[start:end],
                 start_offset=start,
                 end_offset=end,
+                heading_path=(),
+                section_title="",
+                source_location="",
             )
             for start, end in ((0, 10), (10, 20))
             if start < len(document.content)
@@ -76,6 +79,9 @@ class _AlternatingChunker:
                 document.content,
                 0,
                 len(document.content),
+                (),
+                "",
+                "",
             ),
         )
 
@@ -286,8 +292,8 @@ def test_inspection_rejects_identical_consecutive_starts_but_accepts_real_overla
     document = _document(content="abcdefghij")
     collection = _collection(chunker, document)
     chunker.returned = (
-        Chunk(document.document_id, "one", "abc", 0, 3),
-        Chunk(document.document_id, "two", "abcde", 0, 5),
+        Chunk(document.document_id, "one", "abc", 0, 3, (), "", ""),
+        Chunk(document.document_id, "two", "abcde", 0, 5, (), "", ""),
     )
 
     with pytest.raises(KnowledgeCollectionError, match="order"):
@@ -357,23 +363,23 @@ def test_inspection_rejects_unknown_document_and_redacts_chunker_failures() -> N
     [
         ([], "tuple"),
         ((object(),), "Chunk"),
-        ((Chunk("wrong", "one", "abc", 0, 3),), "document_id"),
+        ((Chunk("wrong", "one", "abc", 0, 3, (), "", ""),), "document_id"),
         (
             (
-                Chunk("DOC", "same", "abc", 0, 3),
-                Chunk("DOC", "same", "def", 3, 6),
+                Chunk("DOC", "same", "abc", 0, 3, (), "", ""),
+                Chunk("DOC", "same", "def", 3, 6, (), "", ""),
             ),
             "duplicate",
         ),
         (
             (
-                Chunk("DOC", "one", "def", 3, 6),
-                Chunk("DOC", "two", "abc", 0, 3),
+                Chunk("DOC", "one", "def", 3, 6, (), "", ""),
+                Chunk("DOC", "two", "abc", 0, 3, (), "", ""),
             ),
             "order",
         ),
-        ((Chunk("DOC", "one", "abc", -1, 3),), "offset"),
-        ((Chunk("DOC", "one", "wrong", 0, 3),), "content"),
+        ((Chunk("DOC", "one", "abc", -1, 3, (), "", ""),), "offset"),
+        ((Chunk("DOC", "one", "wrong", 0, 3, (), "", ""),), "content"),
     ],
 )
 def test_inspection_rejects_malformed_chunker_output(
@@ -393,6 +399,9 @@ def test_inspection_rejects_malformed_chunker_output(
                         item.content,
                         item.start_offset,
                         item.end_offset,
+                        item.heading_path,
+                        item.section_title,
+                        item.source_location,
                     )
                 )
             else:

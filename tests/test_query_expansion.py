@@ -169,12 +169,18 @@ def test_multi_query_rrf_does_not_rewrite_backend_scores() -> None:
     first = KnowledgeSearchResult(
         source,
         first_document,
-        SearchHit(Chunk(first_document.document_id, "chunk-a", "alpha", 0, 5), 100.0),
+        SearchHit(
+            Chunk(first_document.document_id, "chunk-a", "alpha", 0, 5, (), "", ""),
+            100.0,
+        ),
     )
     second = KnowledgeSearchResult(
         source,
         second_document,
-        SearchHit(Chunk(second_document.document_id, "chunk-b", "beta", 0, 4), 1.0),
+        SearchHit(
+            Chunk(second_document.document_id, "chunk-b", "beta", 0, 4, (), "", ""),
+            1.0,
+        ),
     )
 
     fused, provenance = KnowledgeBase._fuse_query_results(

@@ -147,8 +147,11 @@ def test_chunker_rejects_non_document_input() -> None:
         TextChunker().chunk("not a document")  # type: ignore[arg-type]
 
 
-def test_chunk_defaults_keep_legacy_constructor_and_expose_empty_structure() -> None:
-    chunk = Chunk("doc", "chunk", "body", 0, 4)
+def test_chunk_requires_explicit_structure_metadata() -> None:
+    with pytest.raises(TypeError):
+        Chunk("doc", "chunk", "body", 0, 4)  # type: ignore[call-arg]
+
+    chunk = Chunk("doc", "chunk", "body", 0, 4, (), "", "")
 
     assert chunk.heading_path == ()
     assert chunk.section_title == ""
@@ -191,6 +194,8 @@ def test_chunk_rejects_malformed_heading_path(heading_path: object) -> None:
             0,
             4,
             heading_path=heading_path,  # type: ignore[arg-type]
+            section_title="",
+            source_location="",
         )
 
 

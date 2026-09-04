@@ -6,7 +6,7 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy
 
 
 ROOT = Path(SPECPATH).parent
-ENTRY = "src/nexusmind/desktop.py"
+ENTRY = "src/nexusmind/runtime_entrypoint.py"
 datas = (
     collect_data_files("certifi")
     + copy_metadata("httpx")

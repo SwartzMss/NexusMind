@@ -37,7 +37,7 @@ def _require_plain_str(text: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class WhitespaceLexicalAnalyzer:
-    """Preserve legacy whitespace splitting with Unicode case folding."""
+    """Provide a deterministic whitespace control for benchmark comparisons."""
 
     def analyze(self, text: str) -> tuple[str, ...]:
         _require_plain_str(text)

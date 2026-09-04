@@ -2,7 +2,7 @@
 
 NexusMind 是一个面向本地知识的 Knowledge Runtime / KnowledgeBase 工具。它可以注册本地文本来源、显式同步内容、执行本地检索，并通过模型生成带可验证引用的回答。
 
-你可以通过本地桌面界面管理知识库，通过 CLI 搜索和提问，也可以将 `KnowledgeBase` 作为 Python 库集成到自己的应用中。
+你可以通过 CLI 搜索和提问，也可以将 `KnowledgeBase` 作为 Python 库集成到自己的应用中。
 
 > 当前支持 Windows 与 Python 3.11、3.12、3.13。Linux 和 macOS 暂不属于正式支持平台。
 
@@ -50,12 +50,12 @@ nexusmind inspect --knowledge-base .\security-kb
 - Query Expansion 失败时自动回退到原始问题检索
 - 根据检索内容生成回答，并验证回答中的引用
 - 检查来源、文档、分块和各检索阶段的诊断信息
-- 提供本地桌面界面、CLI 和 Python API
+- 提供 CLI 和 Python API
 - 提供 Windows portable 构建和真实 smoke test
 
 底层数据流、存储格式、检索实现和安全边界请参阅 [技术架构](docs/architecture.md)。
 
-## 开发环境安装与桌面界面
+## 开发环境安装
 
 ### 1. 安装
 
@@ -71,22 +71,6 @@ python -m pip install -e ".[dev]"
 python -m pip install -r requirements.txt
 python -m pip install -e .
 ```
-
-### 2. 打开 KnowledgeBase 界面
-
-```powershell
-nexusmind-kb
-```
-
-在界面中可以：
-
-1. 创建新的 KnowledgeBase，或打开已有知识库；
-2. 注册本地 UTF-8 文件或目录；
-3. 显式同步全部来源或单个来源；
-4. 搜索内容并查看来源、相关度、Chunk ID 和原文片段；
-5. 删除不再需要的来源。
-
-界面基于 Python 标准库 `tkinter`，不需要本地服务器、外部服务或额外账号。
 
 ## 通过 CLI 使用
 
@@ -143,7 +127,7 @@ final Top-K
 
 来源内部 ID 由来源类型和规范化路径稳定派生，用户通过路径注册和删除来源。同一类型和路径在删除后重新注册会得到同一个内部 ID，因此可以继续已有文档版本链。
 
-同一个规范化来源路径在一个 KnowledgeBase 中只能注册一次。CLI、桌面界面和 Python API 都会执行这项检查。
+同一个规范化来源路径在一个 KnowledgeBase 中只能注册一次。CLI 和 Python API 都会执行这项检查。
 
 删除来源及其当前 canonical documents：
 
@@ -220,7 +204,7 @@ nexusmind query "Binder caller UID 是如何获取的？" `
 
 ## Python 接入
 
-NexusMind 提供公开的 `KnowledgeBase` Python API。它适合将本地知识检索嵌入其他服务、脚本或桌面应用。
+NexusMind 提供公开的 `KnowledgeBase` Python API。它适合将本地知识检索嵌入其他服务或脚本。
 
 ### 创建与同步
 

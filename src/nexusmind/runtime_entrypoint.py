@@ -9,7 +9,7 @@ from nexusmind.runtime_support import RuntimeLayoutError, configure_runtime_logg
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Initialize desktop services, dispatch the CLI, and contain unknown errors."""
+    """Initialize runtime services, dispatch the CLI, and contain unknown errors."""
     try:
         layout = create_runtime_layout()
     except RuntimeLayoutError as exc:

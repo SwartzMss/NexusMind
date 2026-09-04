@@ -39,6 +39,9 @@ def _result(document: Document, chunk_id: str) -> KnowledgeSearchResult:
         content=document.content,
         start_offset=0,
         end_offset=len(document.content),
+        heading_path=(),
+        section_title="",
+        source_location="",
     )
     return KnowledgeSearchResult(
         source=_source(),

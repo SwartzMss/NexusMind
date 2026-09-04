@@ -1,11 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - test runner compatibility
-    import tomli as tomllib
+import tomllib
 
 
 def test_supported_python_range_matches_deterministic_unicode_policy() -> None:
@@ -15,13 +11,32 @@ def test_supported_python_range_matches_deterministic_unicode_policy() -> None:
     assert project["project"]["requires-python"] == ">=3.11,<3.14"
 
 
-def test_project_exposes_desktop_entry_and_packaging_extra() -> None:
+def test_project_exposes_only_the_supported_cli_entrypoint() -> None:
     pyproject = Path(__file__).parents[1] / "pyproject.toml"
     project = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]
 
-    assert project["scripts"]["nexusmind"] == "nexusmind.desktop:main"
+    assert project["scripts"] == {"nexusmind": "nexusmind.runtime_entrypoint:main"}
     assert any(requirement.startswith("pyinstaller") for requirement in project["optional-dependencies"]["packaging"])
     assert "firecrawl-anydoc==0.2.4" in project["dependencies"]
+
+
+def test_current_product_contract_has_no_removed_ui_references() -> None:
+    root = Path(__file__).parents[1]
+    current_contract_files = (
+        "README.md",
+        "docs/architecture.md",
+        "docs/releases/v0.1.0.md",
+        "pyproject.toml",
+        "requirements.txt",
+        ".github/workflows/ci.yml",
+        ".github/workflows/release.yml",
+        "packaging/nexusmind.spec",
+    )
+    forbidden_references = ("knowledge_base_ui", "nexusmind-kb", "tkinter")
+
+    for relative_path in current_contract_files:
+        text = (root / relative_path).read_text(encoding="utf-8")
+        assert not any(reference in text for reference in forbidden_references), relative_path
 
 
 def test_readme_documents_windows_portable_runtime() -> None:

@@ -11,10 +11,10 @@ import zipfile
 import pytest
 
 
-def test_pyinstaller_spec_targets_desktop_entry_and_onedir() -> None:
+def test_pyinstaller_spec_targets_cli_runtime_entry_and_onedir() -> None:
     text = Path("packaging/nexusmind.spec").read_text(encoding="utf-8")
 
-    assert "src/nexusmind/desktop.py" in text.replace("\\", "/")
+    assert "src/nexusmind/runtime_entrypoint.py" in text.replace("\\", "/")
     assert "COLLECT(" in text
     assert "console=True" in text
 

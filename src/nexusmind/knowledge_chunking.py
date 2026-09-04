@@ -49,9 +49,9 @@ class Chunk:
     content: str
     start_offset: int
     end_offset: int
-    heading_path: tuple[str, ...] = ()
-    section_title: str = ""
-    source_location: str = ""
+    heading_path: tuple[str, ...]
+    section_title: str
+    source_location: str
 
     def __post_init__(self) -> None:
         if type(self.heading_path) is not tuple:
@@ -137,6 +137,9 @@ class TextChunker:
                     content=document.content[start_offset:end_offset],
                     start_offset=start_offset,
                     end_offset=end_offset,
+                    heading_path=(),
+                    section_title="",
+                    source_location="",
                 )
             )
             if end_offset == len(document.content):

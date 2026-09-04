@@ -23,7 +23,7 @@ from nexusmind.reranking import (
 
 def _chunk(chunk_id: str, content: str | None = None) -> Chunk:
     value = chunk_id if content is None else content
-    return Chunk("doc", chunk_id, value, 0, len(value))
+    return Chunk("doc", chunk_id, value, 0, len(value), (), "", "")
 
 
 class _Index:
@@ -282,7 +282,7 @@ def test_candidate_bounds_and_shape_fail_before_reranker_work() -> None:
 
 
 def test_base_candidate_must_have_valid_canonical_chunk_fields() -> None:
-    malformed = Chunk("doc", "a", "abc", 0, 2)
+    malformed = Chunk("doc", "a", "abc", 0, 2, (), "", "")
     with pytest.raises(RerankerCoherenceError, match="chunk"):
         _wrapper(_Index((SearchHit(malformed, 1.0),)), _Reranker()).search("q")
 
