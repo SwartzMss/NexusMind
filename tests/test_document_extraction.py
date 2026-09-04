@@ -10,6 +10,7 @@ from nexusmind import (
     ANYDOC_CONTENT_TYPES,
     DEFAULT_SUPPORTED_EXTENSIONS,
     AnyDocExtractor,
+    Document,
     DocumentExtractionError,
     FileTooLargeError,
     KnowledgeCollection,
@@ -17,6 +18,7 @@ from nexusmind import (
     LocalFileAdapter,
     LocalIngestionLimits,
     PlainTextDocumentExtractor,
+    StructureAwareChunker,
     TotalBytesLimitError,
     UnsupportedDocumentFormatError,
     select_document_extractor,
@@ -64,6 +66,43 @@ def test_anydoc_extractor_consumes_bytes_and_propagates_original_format() -> Non
     assert extracted.content == "# Extracted\n\nmarker"
     assert extracted.content_type == ANYDOC_CONTENT_TYPES[".docx"]
     assert extracted.metadata == {"extractor": "anydoc", "source_format": "docx"}
+
+
+def test_anydoc_markdown_preserves_heading_metadata_when_chunked() -> None:
+    class RecordingBackend:
+        def to_markdown_bytes(self, data: bytes) -> str:
+            return (
+                "# Android Security\n\n"
+                "## Binder\n\n"
+                "### Transaction\n\n"
+                "The oneway transaction uses pid zero."
+            )
+
+    extracted = AnyDocExtractor(RecordingBackend()).extract(
+        b"verified structured bytes",
+        logical_path="guide.docx",
+    )
+    document = Document(
+        source_id="structured",
+        logical_path="guide.docx",
+        content=extracted.content,
+        content_type=extracted.content_type,
+        metadata=extracted.metadata,
+    )
+
+    chunks = StructureAwareChunker(chunk_size=100, overlap=0).chunk(document)
+    transaction = next(chunk for chunk in chunks if "oneway transaction" in chunk.content)
+
+    assert transaction.heading_path == (
+        "Android Security",
+        "Binder",
+        "Transaction",
+    )
+    assert transaction.section_title == "Transaction"
+    assert transaction.source_location == "guide.docx:L5"
+    assert transaction.content == document.content[
+        transaction.start_offset : transaction.end_offset
+    ]
 
 
 def test_anydoc_extractor_normalizes_backend_and_format_failures() -> None:

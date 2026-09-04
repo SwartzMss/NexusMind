@@ -55,7 +55,7 @@ flowchart TD
 - `KnowledgeSource` 表示上次成功同步后提交的来源 provenance；
 - `Document` 由 `source_id + logical_path` 稳定定位；
 - `content_hash` 使用 UTF-8 SHA-256 检测内容变化；
-- `Chunk` 是 Document 的派生切片，字符偏移采用半开区间 `[start, end)`。
+- `Chunk` 是 Document 的派生切片，字符偏移采用半开区间 `[start, end)`；结构感知分块另外提供 `heading_path`、`section_title` 和文档相对的 `source_location`。
 
 注册配置与 canonical source 不是同一份状态。`add_source()` 只原子保存注册，不读取文件；`sync()` / `sync_source()` 才读取并提交内容。全量同步整批成功后才提交，任一来源失败不会留下部分新状态。
 
@@ -67,7 +67,9 @@ flowchart TD
 
 ## 分块与检索
 
-默认 `StructureAwareChunker` 先保护 Markdown heading、段落、fenced code、列表和表格边界，再把相邻小 block 打包到 `chunk_size=1000`；超长 block 按空行、行、空白、字符顺序确定性回退。`TextChunker` 仍作为固定窗口 baseline。所有 Chunk 保持 canonical source offsets，ID 由 Document ID、content hash、字符区间、配置和显式算法版本派生。
+默认 `StructureAwareChunker` 先保护 Markdown heading、段落、fenced code、列表和表格边界，再把相邻小 block 打包到 `chunk_size=1000`；超长 block 按空行、行、空白、字符顺序确定性回退。每个结构 chunk 继承从外层到当前 section 的 `heading_path`，`section_title` 是路径末项，`source_location` 使用 `logical_path:L<line>`。`TextChunker` 仍作为固定窗口 baseline。所有 Chunk 保持 canonical source offsets，ID 由 Document ID、content hash、字符区间、配置和显式算法版本派生。
+
+检索 backend 使用 Chunk 的只读 `retrieval_text`（标题路径加换行后的 exact content）建立 lexical、semantic、hybrid 和 reranker 输入；搜索结果、context assembly、引用和 provenance 仍只使用 exact `content`，因此标题上下文不会改变原文偏移或可验证引用。
 
 ### Lexical
 

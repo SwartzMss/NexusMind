@@ -128,6 +128,53 @@ def test_reranker_limits_require_positive_plain_integers(
         RerankerLimits(**{field: value})
 
 
+def test_reranker_receives_structural_retrieval_text_and_preserves_exact_chunk() -> None:
+    chunk = Chunk(
+        "doc",
+        "structural",
+        "transaction details",
+        0,
+        len("transaction details"),
+        heading_path=("Android Security", "Binder"),
+        section_title="Binder",
+        source_location="notes.md:L3",
+    )
+    hit = SearchHit(chunk, 1.0)
+    reranker = _Reranker()
+
+    results = _wrapper(_Index((hit,)), reranker).search("query", limit=1)
+
+    assert reranker.calls[0][1][0].chunk.retrieval_text == (
+        "Android Security > Binder\ntransaction details"
+    )
+    assert results[0].chunk.content == "transaction details"
+    assert (results[0].chunk.start_offset, results[0].chunk.end_offset) == (0, 19)
+
+
+def test_reranker_candidate_bound_counts_structural_retrieval_text() -> None:
+    chunk = Chunk(
+        "doc",
+        "structural",
+        "body",
+        0,
+        4,
+        heading_path=("Binder",),
+        section_title="Binder",
+        source_location="notes.md:L1",
+    )
+    reranker = _Reranker()
+    index = _wrapper(
+        _Index((SearchHit(chunk, 1.0),)),
+        reranker,
+        limits=RerankerLimits(
+            max_total_candidate_chars=len(chunk.content),
+        ),
+    )
+
+    with pytest.raises(RerankerLimitError, match="max_total_candidate_chars"):
+        index.search("query", limit=1)
+
+
 def test_reranked_index_exposes_configured_search_capacity_across_clone() -> None:
     index = RerankedChunkIndex(
         base_index_factory=_Index,

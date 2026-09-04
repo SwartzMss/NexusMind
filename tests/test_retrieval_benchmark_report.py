@@ -17,7 +17,7 @@ def test_renderer_is_stable_and_contains_required_diagnostics() -> None:
     first = render_retrieval_comparison(report, DEFAULT_RENDER_CONFIG)
     second = render_retrieval_comparison(report, DEFAULT_RENDER_CONFIG)
     assert first == second
-    assert "| Backend | K | Hit@K | Recall@K | MRR |" in first
+    assert "| Backend | K | Hit@K | Precision@K | Recall@K | MRR |" in first
     assert "## Per-category metrics" in first
     assert "## Selected diagnostics" in first
     assert "max(K)" in first

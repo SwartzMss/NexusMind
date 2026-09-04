@@ -147,6 +147,82 @@ def test_chunker_rejects_non_document_input() -> None:
         TextChunker().chunk("not a document")  # type: ignore[arg-type]
 
 
+def test_chunk_defaults_keep_legacy_constructor_and_expose_empty_structure() -> None:
+    chunk = Chunk("doc", "chunk", "body", 0, 4)
+
+    assert chunk.heading_path == ()
+    assert chunk.section_title == ""
+    assert chunk.source_location == ""
+    assert chunk.retrieval_text == "body"
+    assert chunk.metadata == {
+        "heading_path": [],
+        "section_title": "",
+        "source_location": "",
+    }
+
+
+def test_structural_chunk_retrieval_text_contains_heading_context() -> None:
+    chunk = Chunk(
+        "doc",
+        "chunk",
+        "body",
+        0,
+        4,
+        heading_path=("Android Security", "Binder"),
+        section_title="Binder",
+        source_location="notes.md:L3",
+    )
+
+    assert chunk.retrieval_text == "Android Security > Binder\nbody"
+    assert chunk.metadata == {
+        "heading_path": ["Android Security", "Binder"],
+        "section_title": "Binder",
+        "source_location": "notes.md:L3",
+    }
+
+
+@pytest.mark.parametrize("heading_path", [("",), ["Binder"], (1,)])
+def test_chunk_rejects_malformed_heading_path(heading_path: object) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        Chunk(
+            "doc",
+            "chunk",
+            "body",
+            0,
+            4,
+            heading_path=heading_path,  # type: ignore[arg-type]
+        )
+
+
+def test_structure_chunker_preserves_nested_heading_metadata_and_locations() -> None:
+    content = (
+        "Preamble.\n\n"
+        "# Android Security\n\nSecurity overview.\n\n"
+        "## Binder\n\nBinder manages IPC.\n\n"
+        "### oneway\n\nThe oneway transaction uses pid zero.\n\n"
+        "```text\n# not a heading\n```\n"
+    )
+    document = _document(content)
+
+    chunks = StructureAwareChunker(chunk_size=70, overlap=0).chunk(document)
+
+    binder = next(chunk for chunk in chunks if chunk.content.startswith("## Binder"))
+    oneway = next(chunk for chunk in chunks if chunk.content.startswith("### oneway"))
+    fenced = next(chunk for chunk in chunks if "# not a heading" in chunk.content)
+
+    assert binder.heading_path == ("Android Security", "Binder")
+    assert binder.section_title == "Binder"
+    assert binder.source_location == "notes.txt:L7"
+    assert oneway.heading_path == ("Android Security", "Binder", "oneway")
+    assert oneway.section_title == "oneway"
+    assert oneway.source_location == "notes.txt:L11"
+    assert "not a heading" not in fenced.heading_path
+    assert all(
+        chunk.content == document.content[chunk.start_offset : chunk.end_offset]
+        for chunk in chunks
+    )
+
+
 def test_structure_chunker_keeps_heading_with_following_content() -> None:
     content = (
         "## IAM Token Validation\n\nIAM_Master validates the token.\n\n"

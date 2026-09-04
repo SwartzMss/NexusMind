@@ -189,7 +189,7 @@ class RerankedChunkIndex:
     def _rerank_validated_candidates(
         self, query: str, candidates: tuple[SearchHit, ...], *, limit: int
     ) -> tuple[SearchHit, ...]:
-        total_chars = sum(len(hit.chunk.content) for hit in candidates)
+        total_chars = sum(len(hit.chunk.retrieval_text) for hit in candidates)
         if total_chars > self._limits.max_total_candidate_chars:
             raise RerankerLimitError("candidates exceed max_total_candidate_chars")
         rerank_limit = min(limit, len(candidates))

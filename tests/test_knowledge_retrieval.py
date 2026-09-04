@@ -44,6 +44,28 @@ def test_retrieval_contracts_are_available_from_package_root() -> None:
     assert hit.matched_terms == ("checkpoint",)
 
 
+def test_lexical_index_matches_heading_context_without_changing_chunk_content() -> None:
+    structural = Chunk(
+        document_id="doc-1",
+        chunk_id="structural",
+        content="transaction details",
+        start_offset=0,
+        end_offset=len("transaction details"),
+        heading_path=("Android Security", "Binder"),
+        section_title="Binder",
+        source_location="notes.md:L3",
+    )
+    plain = _chunk("plain", "transaction details", document_id="doc-2")
+    index = InMemoryChunkIndex()
+    index.add((structural, plain))
+
+    hits = index.search("Binder")
+
+    assert [hit.chunk.chunk_id for hit in hits] == ["structural"]
+    assert hits[0].chunk.content == "transaction details"
+    assert (hits[0].chunk.start_offset, hits[0].chunk.end_offset) == (0, 19)
+
+
 def test_lexical_index_exposes_configured_search_capacity_across_clone() -> None:
     index = InMemoryChunkIndex(limits=ChunkIndexLimits(max_results=10))
 

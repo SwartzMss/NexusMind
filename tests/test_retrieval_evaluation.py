@@ -150,6 +150,25 @@ def test_evaluator_computes_later_rank_miss_and_aggregate_means() -> None:
     assert report.mrr == pytest.approx(0.25)
 
 
+def test_evaluator_reports_document_precision_at_k() -> None:
+    relevant = _document("source", "relevant.md")
+    distractor = _document("source", "distractor.md")
+    target = RetrievalTarget("source", "relevant.md")
+    case = RetrievalEvaluationCase(
+        "precision", RetrievalCategory.EXACT_TERM, "query", (target,)
+    )
+    collection = FakeCollection(
+        (relevant, distractor),
+        {"query": (_result(distractor, "d-1"), _result(relevant, "r-1"))},
+    )
+
+    report = evaluate_retrieval(collection, (case,), k=2)  # type: ignore[arg-type]
+
+    assert report.case_results[0].precision_at_k == 0.5
+    assert report.precision_at_k == 0.5
+    assert report.category_reports[0].precision_at_k == 0.5
+
+
 def test_evaluator_rejects_invalid_case_sets_and_k() -> None:
     target = RetrievalTarget("source", "doc.md")
     case = RetrievalEvaluationCase("case", RetrievalCategory.EXACT_TERM, "query", (target,))

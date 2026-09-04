@@ -42,7 +42,7 @@ nexusmind inspect --knowledge-base .\security-kb
 - 创建和重新打开本地持久化 KnowledgeBase
 - 注册本地文件或目录，并显式控制同步时机
 - 保存 canonical document 和不可变的内部文档版本历史
-- 使用确定性的 Markdown 结构感知分块，保护 heading、代码块、列表和表格边界
+- 使用确定性的 Markdown 结构感知分块，保护 heading、代码块、列表和表格边界，并在 Chunk 中保留 heading path、section title 和文档相对位置
 - 默认使用完全离线、支持 Unicode/CJK 的 BM25 检索
 - 可选使用 Semantic、Hybrid-RRF 和 reranker 检索后端
 - 对用户可见搜索结果执行 document-aware diversification，同时保留 backend 原始分数
@@ -435,6 +435,8 @@ CI 在 `windows-latest` 上运行离线测试，不依赖真实 API Key、模型
 - [Document-aware diversification 评测](evals/knowledge/diversification.md)
 - [结构感知分块对照评测](evals/knowledge/chunking.md)
 - [Query Expansion deterministic evaluation](evals/knowledge/query_expansion/)
+
+结构感知 Chunk 的标题路径只作为检索上下文参与 BM25、semantic、Hybrid-RRF 和 reranking；用户看到的原文片段、字符偏移和引用仍来自 canonical content。离线对照评测同时报告 Hit@K、Precision@K、Recall@K 和 MRR。
 
 NexusMind 当前定位是本地 Knowledge Runtime。早期 Agent Runtime、Tool、Workspace、MCP 和 Agent Skill 实现已移除；当前阶段优先通过真实知识库 dogfooding 发现检索、问答、诊断和可用性问题。
 

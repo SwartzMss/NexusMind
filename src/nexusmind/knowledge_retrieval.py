@@ -410,7 +410,7 @@ class InMemoryChunkIndex:
         total_tokens = 0
         total_token_chars = 0
         for chunk_id, chunk in chunks.items():
-            tokens = self._analyze(chunk.content)
+            tokens = self._analyze(chunk.retrieval_text)
             total_tokens += len(tokens)
             if total_tokens > self._limits.max_total_analyzed_tokens:
                 raise ChunkIndexLimitError("index exceeds max_total_analyzed_tokens")

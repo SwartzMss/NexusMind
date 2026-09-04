@@ -22,6 +22,7 @@ def _stable_chunk_id(
     chunk_size: int,
     overlap: int,
     algorithm: str | None = None,
+    metadata: tuple[str, ...] = (),
 ) -> str:
     parts = (
         document.document_id,
@@ -33,6 +34,8 @@ def _stable_chunk_id(
     )
     if algorithm is not None:
         parts += (algorithm,)
+    if metadata:
+        parts += metadata
     canonical = json.dumps(parts, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return f"chunk-{hashlib.sha256(canonical).hexdigest()}"
 
@@ -46,6 +49,37 @@ class Chunk:
     content: str
     start_offset: int
     end_offset: int
+    heading_path: tuple[str, ...] = ()
+    section_title: str = ""
+    source_location: str = ""
+
+    def __post_init__(self) -> None:
+        if type(self.heading_path) is not tuple:
+            raise TypeError("heading_path must be a tuple")
+        if any(type(title) is not str or not title.strip() for title in self.heading_path):
+            raise ValueError("heading_path must contain non-empty strings")
+        if type(self.section_title) is not str:
+            raise TypeError("section_title must be a string")
+        expected_title = self.heading_path[-1] if self.heading_path else ""
+        if self.section_title != expected_title:
+            raise ValueError("section_title must match the final heading_path item")
+        if type(self.source_location) is not str:
+            raise TypeError("source_location must be a string")
+
+    @property
+    def retrieval_text(self) -> str:
+        prefix = " > ".join(self.heading_path)
+        return f"{prefix}\n{self.content}" if prefix else self.content
+
+    @property
+    def metadata(self) -> dict[str, object]:
+        """Return JSON-compatible structural metadata detached from the chunk."""
+
+        return {
+            "heading_path": list(self.heading_path),
+            "section_title": self.section_title,
+            "source_location": self.source_location,
+        }
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -126,6 +160,14 @@ class _Block:
     heading: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class _Heading:
+    start: int
+    level: int
+    title: str
+    line_number: int
+
+
 def _lines(content: str) -> list[tuple[int, int, str]]:
     result: list[tuple[int, int, str]] = []
     offset = 0
@@ -202,6 +244,52 @@ def _markdown_blocks(content: str) -> list[_Block]:
             index += 1
         blocks.append(_Block(start, end))
     return blocks
+
+
+def _markdown_headings(content: str) -> tuple[_Heading, ...]:
+    headings: list[_Heading] = []
+    lines = _lines(content)
+    fence_marker: str | None = None
+    fence_length = 0
+    for line_number, (start, _end, text) in enumerate(lines, start=1):
+        fence = _FENCE.match(text)
+        if fence_marker is not None:
+            closing = rf"^[ \t]{{0,3}}{re.escape(fence_marker)}{{{fence_length},}}[ \t]*$"
+            if re.match(closing, text):
+                fence_marker = None
+                fence_length = 0
+            continue
+        if fence:
+            fence_marker = fence.group(1)[0]
+            fence_length = len(fence.group(1))
+            continue
+        match = _HEADING.match(text)
+        if match is None:
+            continue
+        marker = text.lstrip()[:6]
+        level = len(marker) - len(marker.lstrip("#"))
+        title = text[match.end() :].strip()
+        title = re.sub(r"[ \t]+#+[ \t]*$", "", title).strip()
+        if title:
+            headings.append(_Heading(start, level, title, line_number))
+    return tuple(headings)
+
+
+def _heading_metadata(
+    document: Document,
+    *,
+    end: int,
+    headings: tuple[_Heading, ...],
+) -> tuple[tuple[str, ...], str, str]:
+    path: list[str] = []
+    location = ""
+    active = [heading for heading in headings if heading.start < end]
+    for heading in active:
+        path = path[: heading.level - 1]
+        path.append(heading.title)
+        location = f"{document.logical_path}:L{heading.line_number}"
+    heading_path = tuple(path)
+    return heading_path, heading_path[-1] if heading_path else "", location
 
 
 def _preferred_end(content: str, start: int, limit: int, *, minimum: int = 0) -> int:
@@ -372,23 +460,35 @@ class StructureAwareChunker:
             raise ChunkLimitError(
                 f"document requires {len(packed)} chunks; limit is {self.max_chunks}"
             )
-        return tuple(
-            Chunk(
-                document_id=document.document_id,
-                chunk_id=_stable_chunk_id(
-                    document,
+        headings = _markdown_headings(document.content)
+        structural_chunks: list[Chunk] = []
+        for start, end in packed:
+            heading_path, section_title, source_location = _heading_metadata(
+                document,
+                end=end,
+                headings=headings,
+            )
+            structural_chunks.append(
+                Chunk(
+                    document_id=document.document_id,
+                    chunk_id=_stable_chunk_id(
+                        document,
+                        start_offset=start,
+                        end_offset=end,
+                        chunk_size=self.chunk_size,
+                        overlap=self.overlap,
+                        algorithm="structure-v2",
+                        metadata=heading_path + (source_location,),
+                    ),
+                    content=document.content[start:end],
                     start_offset=start,
                     end_offset=end,
-                    chunk_size=self.chunk_size,
-                    overlap=self.overlap,
-                    algorithm="structure-v1",
-                ),
-                content=document.content[start:end],
-                start_offset=start,
-                end_offset=end,
+                    heading_path=heading_path,
+                    section_title=section_title,
+                    source_location=source_location,
+                )
             )
-            for start, end in packed
-        )
+        return tuple(structural_chunks)
 
 
 __all__ = ["Chunk", "ChunkLimitError", "StructureAwareChunker", "TextChunker"]

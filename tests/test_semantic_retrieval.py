@@ -117,6 +117,31 @@ def test_semantic_add_batches_and_search_ranks_all_cosine_scores() -> None:
     assert all(hit.matched_terms == () for hit in hits)
 
 
+def test_semantic_index_embeds_heading_context_but_returns_exact_chunk_content() -> None:
+    structural = Chunk(
+        document_id="doc-1",
+        chunk_id="structural",
+        content="transaction details",
+        start_offset=0,
+        end_offset=len("transaction details"),
+        heading_path=("Android Security", "Binder"),
+        section_title="Binder",
+        source_location="notes.md:L3",
+    )
+    retrieval_text = structural.retrieval_text
+    provider = _RecordingProvider(
+        {retrieval_text: (1.0, 0.0), "query": (1.0, 0.0)}
+    )
+    index = InMemorySemanticChunkIndex(embedding_provider=provider)
+
+    index.add((structural,))
+    hits = index.search("query")
+
+    assert provider.document_calls == [(retrieval_text,)]
+    assert hits[0].chunk.content == "transaction details"
+    assert (hits[0].chunk.start_offset, hits[0].chunk.end_offset) == (0, 19)
+
+
 def test_semantic_add_splits_provider_requests_at_batch_limit() -> None:
     provider = _RecordingProvider(
         {f"text-{index}": (float(index + 1),) for index in range(5)}
