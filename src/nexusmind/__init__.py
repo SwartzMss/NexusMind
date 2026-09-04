@@ -49,6 +49,12 @@ from .context_assembly import (
     assemble_context,
     estimate_token_count,
 )
+from .context_expansion import (
+    ContextExpansionResult,
+    MAX_CONTEXT_EXPANSION_CANDIDATES,
+    MAX_CONTEXT_EXPANSION_NEIGHBORS,
+    expand_context_candidates,
+)
 from .knowledge_base_manifest import (
     KnowledgeBaseClosedError,
     KnowledgeBaseConfigError,
@@ -224,6 +230,7 @@ __all__ = [
     "AnswerGenerator",
     "AnswerGeneratorError",
     "ContextAssemblyLimitError",
+    "ContextExpansionResult",
     "ContextPackage",
     "ContextPassage",
     "CitationValidationError",
@@ -298,6 +305,9 @@ __all__ = [
     "stable_document_version_id",
     "assemble_context",
     "estimate_token_count",
+    "MAX_CONTEXT_EXPANSION_CANDIDATES",
+    "MAX_CONTEXT_EXPANSION_NEIGHBORS",
+    "expand_context_candidates",
     "DEFAULT_MAX_DIRECTORY_DEPTH",
     "DEFAULT_MAX_DOCUMENTS",
     "DEFAULT_MAX_ENTRIES_SCANNED",
