@@ -8,24 +8,92 @@ import pytest
 
 from nexusmind import (
     AnswerGenerationLimits,
+    Chunk,
     ContextPackage,
+    Document,
     GeneratedAnswer,
     KnowledgeBase,
+    KnowledgeCollection,
     KnowledgeQueryOptions,
     KnowledgeQueryResult,
+    KnowledgeSource,
     LocalFileSourceConfig,
+    SearchHit,
     knowledge_query_result_dict,
 )
 
 
 @dataclass
 class FakeGenerator:
+    def __post_init__(self) -> None:
+        self.calls: list[tuple[object, object, object, object]] = []
+
     @property
     def config_identity(self) -> str:
         return "fake/query-v1"
 
     def generate(self, question, context, *, model_context, limits):
+        self.calls.append((question, context, model_context, limits))
         return GeneratedAnswer("Binder uses kernel credentials [K1]", ("K1",))
+
+
+@dataclass
+class _ChunkAdapter:
+    source_value: KnowledgeSource
+    documents: tuple[Document, ...]
+
+    def source(self) -> KnowledgeSource:
+        return self.source_value
+
+    def load_documents(self) -> tuple[Document, ...]:
+        return self.documents
+
+
+class _PipeChunker:
+    def chunk(self, document: Document) -> tuple[Chunk, ...]:
+        chunks: list[Chunk] = []
+        offset = 0
+        for ordinal, content in enumerate(document.content.split("|")):
+            end = offset + len(content)
+            heading_path = ("Binder",) if ordinal < 3 else ("SELinux",)
+            chunks.append(
+                Chunk(
+                    document.document_id,
+                    ("definition", "anchor", "caveat", "sibling")[ordinal],
+                    content,
+                    offset,
+                    end,
+                    heading_path,
+                    heading_path[-1],
+                    f"guide.md:L{ordinal + 1}",
+                )
+            )
+            offset = end + 1
+        return tuple(chunks)
+
+
+def _multi_chunk_knowledge_base(
+    tmp_path: Path,
+) -> tuple[KnowledgeBase, FakeGenerator]:
+    generator = FakeGenerator()
+    knowledge = KnowledgeBase.create(
+        str(tmp_path / "kb"),
+        knowledge_base_id="query-expansion-test",
+        answer_generator=generator,
+    )
+    source = KnowledgeSource(
+        source_id="docs",
+        source_type="test",
+        display_name="Docs",
+    )
+    document = Document(
+        source_id="docs",
+        logical_path="guide.md",
+        content="definition|anchor|caveat|sibling",
+    )
+    knowledge._collection = KnowledgeCollection(chunker=_PipeChunker())  # noqa: SLF001
+    knowledge._collection.sync(_ChunkAdapter(source, (document,)))  # noqa: SLF001
+    return knowledge, generator
 
 
 def _knowledge_base(tmp_path: Path) -> KnowledgeBase:
@@ -87,3 +155,62 @@ def test_query_options_reject_invalid_retrieval_limits(retrieval_limit: object) 
     error = TypeError if retrieval_limit is True else ValueError
     with pytest.raises(error):
         KnowledgeQueryOptions(retrieval_limit=retrieval_limit)  # type: ignore[arg-type]
+
+
+def test_query_expands_same_section_by_default(tmp_path: Path) -> None:
+    knowledge, generator = _multi_chunk_knowledge_base(tmp_path)
+
+    result = knowledge.query(
+        "anchor",
+        options=KnowledgeQueryOptions(generator=generator),
+    )
+
+    assert [item.chunk_id for item in generator.calls[0][2].passages] == [
+        "anchor",
+        "definition",
+        "caveat",
+    ]
+    assert result.trace.context_expansion_enabled is True
+    assert result.trace.anchor_passage_count == 1
+    assert result.trace.expanded_passage_count == 2
+    assert result.trace.expanded_document_count == 1
+    assert result.trace.section_boundary_skips == 0
+
+
+def test_query_expand_context_false_reproduces_old_context(tmp_path: Path) -> None:
+    knowledge, generator = _multi_chunk_knowledge_base(tmp_path)
+
+    result = knowledge.query(
+        "anchor",
+        expand_context=False,
+        options=KnowledgeQueryOptions(generator=generator),
+    )
+
+    assert [item.chunk_id for item in generator.calls[0][2].passages] == ["anchor"]
+    assert result.trace.context_expansion_enabled is False
+    assert result.trace.anchor_passage_count == 1
+    assert result.trace.expanded_passage_count == 0
+    assert result.trace.expanded_document_count == 0
+
+
+def test_query_rejects_non_boolean_expand_context(tmp_path: Path) -> None:
+    knowledge, _ = _multi_chunk_knowledge_base(tmp_path)
+
+    with pytest.raises(TypeError, match="expand_context"):
+        knowledge.query("anchor", expand_context=1)  # type: ignore[arg-type]
+
+
+def test_query_debug_json_exposes_context_expansion_metadata(tmp_path: Path) -> None:
+    knowledge, generator = _multi_chunk_knowledge_base(tmp_path)
+
+    result = knowledge.query(
+        "anchor",
+        options=KnowledgeQueryOptions(generator=generator),
+    )
+    debug = knowledge_query_result_dict(result, include_debug=True)["debug"]
+
+    assert debug["context_expansion_enabled"] is True
+    assert debug["anchor_passage_count"] == 1
+    assert debug["expanded_passage_count"] == 2
+    assert debug["expanded_document_count"] == 1
+    assert debug["section_boundary_skips"] == 0
