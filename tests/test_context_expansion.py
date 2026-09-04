@@ -146,3 +146,35 @@ def test_expansion_rejects_missing_catalog_entries() -> None:
             (_anchor(fixture, "anchor", 5.0),),
             chunk_catalog={},
         )
+
+
+def test_expansion_tracks_the_document_of_each_neighbor() -> None:
+    first = _fixture()
+    second_document = Document("docs", "other.md", "first\nsecond")
+    second_source = KnowledgeSource(
+        source_id="docs",
+        source_type="test",
+        display_name="Docs",
+    )
+    second_chunks = (
+        Chunk(second_document.document_id, "first", "first", 0, 5, ("Binder",), "Binder", "other.md:L1"),
+        Chunk(second_document.document_id, "second", "second", 6, 12, ("Binder",), "Binder", "other.md:L2"),
+    )
+    second_anchor = KnowledgeSearchResult(
+        source=second_source,
+        document=second_document,
+        hit=SearchHit(second_chunks[0], 5.0, ("anchor",)),
+    )
+
+    expanded = expand_context_candidates(
+        (_anchor(first, "anchor", 6.0), second_anchor),
+        chunk_catalog={
+            first.document.document_id: first.chunks,
+            second_document.document_id: second_chunks,
+        },
+    )
+
+    assert expanded.expanded_document_ids == (
+        first.document.document_id,
+        second_document.document_id,
+    )

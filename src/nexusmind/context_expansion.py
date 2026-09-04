@@ -91,8 +91,8 @@ def expand_context_candidates(
                 )
             )
             expanded_chunk_ids.append(neighbor.chunk_id)
-            if document.document_id not in expanded_document_ids:
-                expanded_document_ids.append(document.document_id)
+            if anchor.document.document_id not in expanded_document_ids:
+                expanded_document_ids.append(anchor.document.document_id)
             expansion_count += 1
 
     return ContextExpansionResult(
