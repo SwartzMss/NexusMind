@@ -222,6 +222,7 @@ class KnowledgeCollection:
             raise TypeError("clock must be callable")
         self._sources: dict[str, KnowledgeSource] = {}
         self._documents: dict[str, dict[str, Document]] = {}
+        self._chunks_by_document: dict[str, tuple[Chunk, ...]] = {}
         self._document_versions: dict[str, tuple[DocumentVersion, ...]] = {}
 
     @property
@@ -301,14 +302,18 @@ class KnowledgeCollection:
 
         staged = self._index.clone()
         self._require_cloneable_index(staged)
+        staged_chunks = dict(self._chunks_by_document)
         for document_id in sorted(removed):
             staged.remove_document(document_id)
+            staged_chunks.pop(document_id, None)
         for document_id in sorted(prepared):
             staged.replace_document(document_id, prepared[document_id])
+            staged_chunks[document_id] = prepared[document_id]
 
         self._index = staged
         self._sources[owned_source.source_id] = owned_source
         self._documents[owned_source.source_id] = incoming
+        self._chunks_by_document = staged_chunks
         self._document_versions = staged_versions
         return KnowledgeSyncResult(
             source_id=owned_source.source_id,
@@ -327,11 +332,14 @@ class KnowledgeCollection:
             return
         staged = self._index.clone()
         self._require_cloneable_index(staged)
+        staged_chunks = dict(self._chunks_by_document)
         for document_id in sorted(documents):
             staged.remove_document(document_id)
+            staged_chunks.pop(document_id, None)
         self._index = staged
         del self._documents[source_id]
         del self._sources[source_id]
+        self._chunks_by_document = staged_chunks
 
     def search(self, query: str, *, limit: int = 10) -> tuple[KnowledgeSearchResult, ...]:
         resolved = self.search_backend(query, limit=limit)
@@ -357,6 +365,25 @@ class KnowledgeCollection:
             raise KnowledgeSearchResolutionError("index search result must be a tuple")
         resolved = tuple(self._resolve_hit(hit) for hit in hits)
         return resolved
+
+    def context_chunk_catalog(
+        self, document_ids: tuple[str, ...]
+    ) -> dict[str, tuple[Chunk, ...]]:
+        """Return the derived canonical chunks for the requested documents."""
+
+        if type(document_ids) is not tuple:
+            raise TypeError("document_ids must be a tuple")
+        result: dict[str, tuple[Chunk, ...]] = {}
+        for document_id in document_ids:
+            if type(document_id) is not str or not document_id.strip():
+                raise ValueError("document_ids must contain non-empty strings")
+            chunks = self._chunks_by_document.get(document_id)
+            if chunks is None:
+                raise KnowledgeInspectionError(
+                    "chunk catalog references an unknown document"
+                )
+            result[document_id] = tuple(chunks)
+        return result
 
     def build_context(
         self,
@@ -975,6 +1002,7 @@ class KnowledgeCollection:
         self._index = staged
         self._sources = restored_sources
         self._documents = restored_documents
+        self._chunks_by_document = dict(prepared)
         self._document_versions = restored_versions
         return KnowledgeRestoreResult(
             sources_restored=len(sources),

@@ -17,6 +17,7 @@ from nexusmind import (
     KnowledgeCollection,
     KnowledgeCollectionLimitError,
     KnowledgeCollectionLimits,
+    KnowledgeInspectionError,
     KnowledgeSearchResult,
     KnowledgeSearchResolutionError,
     KnowledgeSnapshotError,
@@ -626,6 +627,43 @@ def test_successful_sync_snapshot_is_self_restorable() -> None:
     restored.restore(snapshot)
 
     assert restored.snapshot() == snapshot
+
+
+def test_context_chunk_catalog_tracks_sync_restore_and_source_removal() -> None:
+    first = _document("docs", "a.txt", "alpha")
+    second = _document("docs", "b.txt", "beta")
+    collection = KnowledgeCollection()
+    collection.sync(FakeAdapter("docs", (first, second)))
+
+    catalog = collection.context_chunk_catalog((first.document_id, second.document_id))
+
+    assert tuple(catalog) == (first.document_id, second.document_id)
+    assert catalog[first.document_id][0].content == first.content
+    assert catalog[second.document_id][0].content == second.content
+    assert not hasattr(collection.snapshot(), "chunks")
+
+    restored = KnowledgeCollection()
+    restored.restore(collection.snapshot())
+    assert restored.context_chunk_catalog((first.document_id,)) == {
+        first.document_id: catalog[first.document_id]
+    }
+
+    restored.remove_source("docs")
+    with pytest.raises(KnowledgeInspectionError, match="unknown document"):
+        restored.context_chunk_catalog((first.document_id,))
+
+
+def test_context_chunk_catalog_is_unchanged_when_sync_chunking_fails() -> None:
+    old = _document("docs", "a.txt", "old")
+    chunker = CountingChunker(fail_content="broken")
+    collection = KnowledgeCollection(chunker=chunker)
+    collection.sync(FakeAdapter("docs", (old,)))
+    before = collection.context_chunk_catalog((old.document_id,))
+
+    with pytest.raises(RuntimeError, match="chunking failed"):
+        collection.sync(FakeAdapter("docs", (_document("docs", "a.txt", "broken"),)))
+
+    assert collection.context_chunk_catalog((old.document_id,)) == before
 
 
 def test_base_chunk_index_contract_does_not_require_collection_staging() -> None:
