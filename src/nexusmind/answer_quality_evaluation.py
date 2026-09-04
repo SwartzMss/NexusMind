@@ -13,6 +13,7 @@ from .knowledge import Document, KnowledgeSource
 from .knowledge_answer import AnswerGenerator, GeneratedAnswer, KnowledgeAnswerError
 from .knowledge_base import KnowledgeBase
 from .knowledge_collection import KnowledgeSearchResult
+from .knowledge_base_manifest import KnowledgeBaseError
 from .knowledge_query import KnowledgeQueryOptions, KnowledgeQueryResult
 
 
@@ -262,6 +263,7 @@ class AnswerQualityCaseResult:
     citation_support_precision: float
     groundedness: float
     unsupported_claim_rate: float
+    insufficient_evidence_expected: bool
     insufficient_evidence_success: bool
     satisfied_fact_ids: tuple[str, ...]
     missed_fact_ids: tuple[str, ...]
@@ -307,6 +309,7 @@ def evaluate_answer_quality_case(
             citation_support_precision=0.0,
             groundedness=0.0,
             unsupported_claim_rate=0.0,
+            insufficient_evidence_expected=case.allow_insufficient_evidence,
             insufficient_evidence_success=False,
             satisfied_fact_ids=(),
             missed_fact_ids=tuple(item.fact_id for item in case.required_facts),
@@ -420,6 +423,7 @@ def evaluate_answer_quality_case(
         citation_support_precision=citation_support_precision,
         groundedness=1.0 - unsupported_claim_rate,
         unsupported_claim_rate=unsupported_claim_rate,
+        insufficient_evidence_expected=case.allow_insufficient_evidence,
         insufficient_evidence_success=insufficient_success,
         satisfied_fact_ids=tuple(satisfied),
         missed_fact_ids=tuple(missed),
@@ -447,6 +451,175 @@ def _is_insufficient_answer(text: str) -> bool:
             "does not establish an answer",
         )
     )
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerQualityAggregate:
+    """Aggregate quality metrics for one configuration or all runs."""
+
+    configuration: str
+    case_count: int
+    answer_pass_rate: float
+    required_fact_coverage: float
+    citation_coverage: float
+    citation_support_precision: float
+    groundedness: float
+    unsupported_claim_rate: float
+    insufficient_evidence_success_rate: float
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerQualityBenchmarkReport:
+    """Stable per-case and aggregate answer-quality benchmark output."""
+
+    case_results: tuple[AnswerQualityCaseResult, ...]
+    aggregates: tuple[AnswerQualityAggregate, ...]
+
+    @property
+    def aggregate(self) -> AnswerQualityAggregate:
+        """Return the aggregate over every case/configuration result."""
+
+        return _aggregate_results(self.case_results, configuration="all", cases_by_id={})
+
+
+def run_answer_quality_benchmark(
+    cases_path: str | Path,
+    *,
+    corpus_dir: str | Path,
+    configurations: tuple[AnswerQualityRunConfiguration, ...] = DEFAULT_ANSWER_QUALITY_CONFIGURATIONS,
+) -> AnswerQualityBenchmarkReport:
+    """Run and score the deterministic end-to-end answer benchmark."""
+
+    cases = load_answer_quality_cases(cases_path)
+    cases_by_id = {case.case_id: case for case in cases}
+    query_runs = run_answer_quality_queries(
+        cases_path,
+        corpus_dir=corpus_dir,
+        configurations=configurations,
+    )
+    results = tuple(
+        evaluate_answer_quality_case(
+            cases_by_id[run.case_id],
+            run.query_result,
+            configuration=run.configuration,
+            error=run.error,
+        )
+        for run in query_runs
+    )
+    aggregates = tuple(
+        _aggregate_results(
+            tuple(item for item in results if item.configuration == configuration.name),
+            configuration=configuration.name,
+            cases_by_id=cases_by_id,
+        )
+        for configuration in sorted(configurations, key=lambda item: item.name)
+    )
+    return AnswerQualityBenchmarkReport(results, aggregates)
+
+
+def render_answer_quality_report(report: AnswerQualityBenchmarkReport) -> str:
+    """Render a deterministic Markdown report with aggregate diagnostics."""
+
+    if type(report) is not AnswerQualityBenchmarkReport:
+        raise TypeError("report must be an AnswerQualityBenchmarkReport")
+    lines = [
+        "# End-to-End RAG Answer Quality Benchmark",
+        "",
+        "All cases use the same authored corpus and are evaluated with deterministic offline generators.",
+        "",
+        "## Aggregate metrics",
+        "",
+        "| Configuration | Answer pass rate | Required fact coverage | Citation coverage | citation support precision | Groundedness | Unsupported claim rate | Insufficient-evidence success rate |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for aggregate in report.aggregates:
+        lines.append(
+            "| "
+            + " | ".join(
+                (
+                    aggregate.configuration,
+                    f"{aggregate.answer_pass_rate:.6f}",
+                    f"{aggregate.required_fact_coverage:.6f}",
+                    f"{aggregate.citation_coverage:.6f}",
+                    f"{aggregate.citation_support_precision:.6f}",
+                    f"{aggregate.groundedness:.6f}",
+                    f"{aggregate.unsupported_claim_rate:.6f}",
+                    f"{aggregate.insufficient_evidence_success_rate:.6f}",
+                )
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Per-case diagnostics",
+            "",
+            "| Case | Configuration | Expansion | Status | Fact coverage | Citation coverage | Support precision | Final passages | Satisfied facts | Missed facts |",
+            "| --- | --- | --- | --- | ---: | ---: | ---: | --- | --- | --- |",
+        ]
+    )
+    for item in report.case_results:
+        lines.append(
+            f"| {item.case_id} | {item.configuration} | {item.context_expansion_enabled} | {item.status.value} | "
+            f"{item.required_fact_coverage:.6f} | {item.citation_coverage:.6f} | "
+            f"{item.citation_support_precision:.6f} | "
+            f"{','.join(item.passage_chunk_ids)} | {','.join(item.satisfied_fact_ids)} | "
+            f"{','.join(item.missed_fact_ids)} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Reproduction",
+            "",
+            "    PYTHONPATH=src python -m nexusmind.answer_quality_evaluation --cases evals/knowledge/answer_quality/cases.json --corpus evals/knowledge/answer_quality/corpus --write evals/knowledge/answer_quality/baseline.md",
+            "",
+            "Case order, configuration order, metrics, and float formatting are deterministic.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _aggregate_results(
+    results: tuple[AnswerQualityCaseResult, ...],
+    *,
+    configuration: str,
+    cases_by_id: dict[str, AnswerQualityCase],
+) -> AnswerQualityAggregate:
+    count = len(results)
+    if count == 0:
+        return AnswerQualityAggregate(configuration, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    expected_insufficient = sum(item.insufficient_evidence_expected for item in results)
+    successful_insufficient = sum(
+        item.insufficient_evidence_success
+        for item in results
+        if item.insufficient_evidence_expected
+    )
+    return AnswerQualityAggregate(
+        configuration=configuration,
+        case_count=count,
+        answer_pass_rate=sum(item.status is AnswerQualityStatus.FULLY_CORRECT for item in results) / count,
+        required_fact_coverage=sum(item.required_fact_coverage for item in results) / count,
+        citation_coverage=sum(item.citation_coverage for item in results) / count,
+        citation_support_precision=sum(item.citation_support_precision for item in results) / count,
+        groundedness=sum(item.groundedness for item in results) / count,
+        unsupported_claim_rate=sum(item.unsupported_claim_rate for item in results) / count,
+        insufficient_evidence_success_rate=successful_insufficient / max(1, expected_insufficient),
+    )
+
+
+def main(argv: tuple[str, ...] | None = None) -> int:
+    """Generate the checked-in answer-quality Markdown report."""
+
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Generate the answer quality benchmark")
+    parser.add_argument("--cases", type=Path, required=True)
+    parser.add_argument("--corpus", type=Path, required=True)
+    parser.add_argument("--write", type=Path, required=True)
+    args = parser.parse_args(argv)
+    report = run_answer_quality_benchmark(args.cases, corpus_dir=args.corpus)
+    args.write.write_text(render_answer_quality_report(report), encoding="utf-8")
+    return 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -502,10 +675,13 @@ class _FixtureAnswerGenerator:
         if self._case.answer_profile == "partial" and available:
             available = available[:-1]
         if self._case.answer_profile == "insufficient":
+            citations = tuple(item[1] for item in available)
+            if not citations and model_context.passages:
+                citations = (model_context.passages[0].citation_id,)
             return GeneratedAnswer(
                 "Insufficient evidence to answer this question confidently."
-                + _citation_suffix(tuple(item[1] for item in available)),
-                tuple(item[1] for item in available),
+                + _citation_suffix(citations),
+                citations,
             )
         parts = [f"{fact.answer} [{citation_id}]" for fact, citation_id in available]
         if self._case.answer_profile == "unsupported":
@@ -569,7 +745,7 @@ def run_answer_quality_queries(
                             options=KnowledgeQueryOptions(generator=generator),
                             expand_context=configuration.expand_context,
                         )
-                    except KnowledgeAnswerError as exc:
+                    except (KnowledgeAnswerError, KnowledgeBaseError) as exc:
                         runs.append(
                             AnswerQualityQueryRun(
                                 case.case_id,
@@ -639,11 +815,13 @@ def _citation_suffix(citation_ids: tuple[str, ...]) -> str:
 
 
 __all__ = [
+    "AnswerQualityAggregate",
+    "AnswerQualityBenchmarkReport",
     "AnswerQualityCase",
+    "AnswerQualityCaseResult",
     "AnswerQualityEvaluationDatasetError",
     "AnswerQualityEvaluationError",
     "AnswerQualityEvidenceTarget",
-    "AnswerQualityCaseResult",
     "AnswerQualityQueryRun",
     "AnswerQualityRunConfiguration",
     "AnswerQualityStatus",
@@ -651,5 +829,12 @@ __all__ = [
     "RequiredAnswerFact",
     "load_answer_quality_cases",
     "evaluate_answer_quality_case",
+    "main",
+    "render_answer_quality_report",
+    "run_answer_quality_benchmark",
     "run_answer_quality_queries",
 ]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

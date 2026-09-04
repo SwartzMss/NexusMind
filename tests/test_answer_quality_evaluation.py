@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+import nexusmind
 
 from nexusmind.answer_quality_evaluation import (
     AnswerQualityCase,
@@ -13,6 +14,9 @@ from nexusmind.answer_quality_evaluation import (
     RequiredAnswerFact,
     evaluate_answer_quality_case,
     load_answer_quality_cases,
+    main,
+    render_answer_quality_report,
+    run_answer_quality_benchmark,
     run_answer_quality_queries,
 )
 from nexusmind import (
@@ -194,6 +198,10 @@ def test_fixture_runner_executes_both_context_configurations(tmp_path: Path) -> 
     }
     assert all(item.query_result is not None for item in runs)
     assert all(item.query_result.trace.retrieval_queries == ("zero PID",) for item in runs)
+    assert {
+        item.query_result.trace.context_expansion_enabled
+        for item in runs
+    } == {False, True}
 
 
 def _two_fact_case() -> AnswerQualityCase:
@@ -338,3 +346,40 @@ def test_evaluator_scores_expected_insufficient_evidence_behavior() -> None:
 
     assert result.insufficient_evidence_success is True
     assert result.status is AnswerQualityStatus.FULLY_CORRECT
+
+
+def test_report_aggregates_metrics_and_renders_byte_stably(tmp_path: Path) -> None:
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    (corpus_dir / "binder.md").write_text(
+        "# Binder\n\nA zero PID can represent an oneway Binder call.",
+        encoding="utf-8",
+    )
+    cases_path = _write_dataset(tmp_path, _case_payload(question="zero PID"))
+
+    report = run_answer_quality_benchmark(cases_path, corpus_dir=corpus_dir)
+    rendered_once = render_answer_quality_report(report)
+    rendered_twice = render_answer_quality_report(report)
+
+    assert rendered_once == rendered_twice
+    assert 0.0 <= report.aggregate.answer_pass_rate <= 1.0
+    assert "citation support precision" in rendered_once
+    assert "expand_context=true" in rendered_once
+
+    output_path = tmp_path / "report.md"
+    assert (
+        main(
+            (
+                "--cases",
+                str(cases_path),
+                "--corpus",
+                str(corpus_dir),
+                "--write",
+                str(output_path),
+            )
+        )
+        == 0
+    )
+    assert output_path.read_text(encoding="utf-8") == rendered_once
+    assert nexusmind.AnswerQualityCase is AnswerQualityCase
+    assert nexusmind.run_answer_quality_benchmark is run_answer_quality_benchmark
