@@ -569,6 +569,22 @@ def render_answer_quality_report(report: AnswerQualityBenchmarkReport) -> str:
     lines.extend(
         [
             "",
+            "## Answer and evidence details",
+            "",
+            "| Case | Configuration | Answer | Citation validity | Citations | Unsupported facts | Forbidden claims | Retrieval queries | Error |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    for item in report.case_results:
+        lines.append(
+            f"| {item.case_id} | {item.configuration} | {_report_cell(item.answer)} | "
+            f"{item.citation_validity} | {','.join(item.citations[i].citation_id for i in range(len(item.citations)))} | "
+            f"{','.join(item.unsupported_fact_ids)} | {_report_cell(','.join(item.forbidden_claims))} | "
+            f"{_report_cell(','.join(item.retrieval_queries))} | {_report_cell(item.error or '')} |"
+        )
+    lines.extend(
+        [
+            "",
             "## Reproduction",
             "",
             "    PYTHONPATH=src python -m nexusmind.answer_quality_evaluation --cases evals/knowledge/answer_quality/cases.json --corpus evals/knowledge/answer_quality/corpus --write evals/knowledge/answer_quality/baseline.md",
@@ -718,6 +734,7 @@ def run_answer_quality_queries(
     if not paths:
         raise AnswerQualityEvaluationDatasetError("corpus must contain Markdown files")
     documents = tuple(_fixture_document(path, root) for path in paths)
+    _validate_case_evidence(cases, documents)
 
     runs: list[AnswerQualityQueryRun] = []
     for case in cases:
@@ -767,6 +784,29 @@ def run_answer_quality_queries(
     return tuple(runs)
 
 
+def _validate_case_evidence(
+    cases: tuple[AnswerQualityCase, ...],
+    documents: tuple[Document, ...],
+) -> None:
+    known_documents = {(item.source_id, item.logical_path) for item in documents}
+    targets = [
+        target
+        for case in cases
+        for target in case.required_evidence
+    ] + [
+        target
+        for case in cases
+        for fact in case.required_facts
+        for target in fact.required_evidence
+    ]
+    for target in targets:
+        if (target.source_id, target.logical_path) not in known_documents:
+            raise AnswerQualityEvaluationDatasetError(
+                f"evidence target is not present in corpus: "
+                f"{target.source_id}/{target.logical_path}"
+            )
+
+
 def _fixture_document(path: Path, root: Path) -> Document:
     try:
         logical_path = path.relative_to(root).as_posix()
@@ -812,6 +852,10 @@ def _contains(text: str, phrase: str) -> bool:
 
 def _citation_suffix(citation_ids: tuple[str, ...]) -> str:
     return "" if not citation_ids else " " + " ".join(f"[{item}]" for item in citation_ids)
+
+
+def _report_cell(value: str) -> str:
+    return " ".join(value.replace("|", "\\|").splitlines())
 
 
 __all__ = [

@@ -204,6 +204,21 @@ def test_fixture_runner_executes_both_context_configurations(tmp_path: Path) -> 
     } == {False, True}
 
 
+def test_fixture_runner_rejects_evidence_targets_missing_from_corpus(tmp_path: Path) -> None:
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    (corpus_dir / "binder.md").write_text("# Binder\n\nEvidence.", encoding="utf-8")
+    cases_path = _write_dataset(
+        tmp_path,
+        _case_payload(
+            required_evidence=[{"source_id": "missing", "logical_path": "missing.md"}]
+        ),
+    )
+
+    with pytest.raises(AnswerQualityEvaluationDatasetError, match="not present"):
+        run_answer_quality_queries(cases_path, corpus_dir=corpus_dir)
+
+
 def _two_fact_case() -> AnswerQualityCase:
     evidence = (
         AnswerQualityEvidenceTarget("docs", "doc.md", "one"),
@@ -355,7 +370,25 @@ def test_report_aggregates_metrics_and_renders_byte_stably(tmp_path: Path) -> No
         "# Binder\n\nA zero PID can represent an oneway Binder call.",
         encoding="utf-8",
     )
-    cases_path = _write_dataset(tmp_path, _case_payload(question="zero PID"))
+    cases_path = _write_dataset(
+        tmp_path,
+        _case_payload(
+            question="zero PID",
+            required_facts=[
+                {
+                    "fact_id": "pid-zero",
+                    "answer": "A zero PID can represent an oneway Binder call.",
+                    "match_phrases": ["zero PID", "oneway Binder call"],
+                    "required_evidence": [
+                        {"source_id": "binder", "logical_path": "binder.md"}
+                    ],
+                }
+            ],
+            required_evidence=[
+                {"source_id": "binder", "logical_path": "binder.md"}
+            ],
+        ),
+    )
 
     report = run_answer_quality_benchmark(cases_path, corpus_dir=corpus_dir)
     rendered_once = render_answer_quality_report(report)
@@ -364,6 +397,7 @@ def test_report_aggregates_metrics_and_renders_byte_stably(tmp_path: Path) -> No
     assert rendered_once == rendered_twice
     assert 0.0 <= report.aggregate.answer_pass_rate <= 1.0
     assert "citation support precision" in rendered_once
+    assert "Answer and evidence details" in rendered_once
     assert "expand_context=true" in rendered_once
 
     output_path = tmp_path / "report.md"
