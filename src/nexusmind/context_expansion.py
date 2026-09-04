@@ -86,7 +86,7 @@ def expand_context_candidates(
             candidates.append(
                 KnowledgeSearchResult(
                     source=anchor.source,
-                    document=document,
+                    document=anchor.document,
                     hit=SearchHit(neighbor, 0.0, ()),
                 )
             )

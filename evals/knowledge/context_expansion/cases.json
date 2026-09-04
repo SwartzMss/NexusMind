@@ -1,0 +1,90 @@
+[
+  {
+    "case_id": "multi-document-budget",
+    "query": "anchor",
+    "documents": [
+      {
+        "source_id": "docs",
+        "logical_path": "best.md",
+        "chunks": [
+          {"chunk_id": "best-anchor", "content": "best anchor", "heading_path": ["Binder"]},
+          {"chunk_id": "best-caveat", "content": "best caveat", "heading_path": ["Binder"]}
+        ]
+      },
+      {
+        "source_id": "docs",
+        "logical_path": "other.md",
+        "chunks": [
+          {"chunk_id": "second-anchor", "content": "second anchor", "heading_path": ["Binder"]},
+          {"chunk_id": "distractor", "content": "unrelated sibling", "heading_path": ["SELinux"]}
+        ]
+      }
+    ],
+    "anchor_ids": ["best-anchor", "second-anchor"],
+    "relevant_ids": ["best-anchor", "second-anchor", "best-caveat"],
+    "forbidden_ids": ["distractor"],
+    "max_passages": 3,
+    "max_chars": 1000,
+    "max_tokens": 100
+  },
+  {
+    "case_id": "next-caveat",
+    "query": "anchor",
+    "documents": [
+      {
+        "source_id": "docs",
+        "logical_path": "next.md",
+        "chunks": [
+          {"chunk_id": "anchor", "content": "anchor", "heading_path": ["Binder"]},
+          {"chunk_id": "caveat", "content": "caveat", "heading_path": ["Binder"]}
+        ]
+      }
+    ],
+    "anchor_ids": ["anchor"],
+    "relevant_ids": ["anchor", "caveat"],
+    "forbidden_ids": [],
+    "max_passages": 3,
+    "max_chars": 1000,
+    "max_tokens": 100
+  },
+  {
+    "case_id": "previous-definition",
+    "query": "anchor",
+    "documents": [
+      {
+        "source_id": "docs",
+        "logical_path": "previous.md",
+        "chunks": [
+          {"chunk_id": "definition", "content": "definition", "heading_path": ["Binder"]},
+          {"chunk_id": "anchor", "content": "anchor", "heading_path": ["Binder"]}
+        ]
+      }
+    ],
+    "anchor_ids": ["anchor"],
+    "relevant_ids": ["definition", "anchor"],
+    "forbidden_ids": [],
+    "max_passages": 3,
+    "max_chars": 1000,
+    "max_tokens": 100
+  },
+  {
+    "case_id": "sibling-boundary",
+    "query": "anchor",
+    "documents": [
+      {
+        "source_id": "docs",
+        "logical_path": "sibling.md",
+        "chunks": [
+          {"chunk_id": "anchor", "content": "anchor", "heading_path": ["Binder"]},
+          {"chunk_id": "sibling", "content": "unrelated sibling", "heading_path": ["SELinux"]}
+        ]
+      }
+    ],
+    "anchor_ids": ["anchor"],
+    "relevant_ids": ["anchor"],
+    "forbidden_ids": ["sibling"],
+    "max_passages": 3,
+    "max_chars": 1000,
+    "max_tokens": 100
+  }
+]
