@@ -22,6 +22,7 @@ from .knowledge_answer import (
     generate_knowledge_answer,
 )
 from .context_assembly import assemble_context
+from .context_expansion import expand_context_candidates
 from .knowledge_base_manifest import (
     KnowledgeBaseClosedError,
     KnowledgeBaseConfigError,
@@ -765,6 +766,7 @@ class KnowledgeBase:
         question: str,
         *,
         options: KnowledgeQueryOptions | None = None,
+        expand_context: bool = True,
     ) -> KnowledgeQueryResult:
         """Run retrieval, context assembly, answer generation, and citation validation."""
 
@@ -773,6 +775,8 @@ class KnowledgeBase:
             raise TypeError("question must be a string")
         if not question.strip():
             raise ValueError("question must be a non-empty string")
+        if type(expand_context) is not bool:
+            raise TypeError("expand_context must be a boolean")
         active_options = KnowledgeQueryOptions() if options is None else options
         if type(active_options) is not KnowledgeQueryOptions:
             raise TypeError("options must be KnowledgeQueryOptions")
@@ -822,11 +826,28 @@ class KnowledgeBase:
                 fused, fused_provenance = self._fuse_query_results(
                     ranked_lists, limit=active_options.retrieval_limit
                 )
+            if expand_context:
+                catalog = self._collection.context_chunk_catalog(
+                    tuple(item.document.document_id for item in fused)
+                )
+                expansion = expand_context_candidates(
+                    fused,
+                    chunk_catalog=catalog,
+                )
+                context_candidates = expansion.candidates
+                context_max_candidates = max(
+                    active_options.retrieval_limit,
+                    len(context_candidates),
+                )
+            else:
+                expansion = None
+                context_candidates = fused
+                context_max_candidates = active_options.retrieval_limit
             context = assemble_context(
                 question,
-                fused,
+                context_candidates,
                 max_passages=active_limits.max_passages,
-                max_candidates=active_options.retrieval_limit,
+                max_candidates=context_max_candidates,
                 max_chars=active_limits.max_context_chars,
                 max_tokens=active_limits.max_context_tokens,
             )
@@ -836,6 +857,16 @@ class KnowledgeBase:
             if context.metadata.get("candidate_count") == 0:
                 raise KnowledgeBaseSourceError("knowledge retrieval returned no evidence")
             raise AnswerGenerationLimitError("context limits exclude all evidence passages")
+        passage_chunk_ids = {passage.chunk_id for passage in context.passages}
+        anchor_chunk_ids = {item.hit.chunk.chunk_id for item in fused}
+        expanded_chunk_ids = (
+            set(expansion.expanded_chunk_ids) if expansion is not None else set()
+        )
+        expanded_document_ids = {
+            passage.document_id
+            for passage in context.passages
+            if passage.chunk_id in expanded_chunk_ids
+        }
         answer = generate_knowledge_answer(
             question,
             context,
@@ -852,6 +883,13 @@ class KnowledgeBase:
             retrieval_queries=retrieval_queries,
             query_expansion_error=expansion_error,
             fused_result_provenance=fused_provenance,
+            context_expansion_enabled=expand_context,
+            anchor_passage_count=len(passage_chunk_ids & anchor_chunk_ids),
+            expanded_passage_count=len(passage_chunk_ids & expanded_chunk_ids),
+            expanded_document_count=len(expanded_document_ids),
+            section_boundary_skips=(
+                expansion.section_boundary_skips if expansion is not None else 0
+            ),
         )
         return KnowledgeQueryResult(
             answer=answer,

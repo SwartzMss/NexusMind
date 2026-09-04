@@ -46,6 +46,11 @@ class KnowledgeQueryTrace:
     retrieval_queries: tuple[str, ...] = ()
     query_expansion_error: str | None = None
     fused_result_provenance: tuple[tuple[str, tuple[tuple[int, int], ...]], ...] = ()
+    context_expansion_enabled: bool = False
+    anchor_passage_count: int = 0
+    expanded_passage_count: int = 0
+    expanded_document_count: int = 0
+    section_boundary_skips: int = 0
 
     def __post_init__(self) -> None:
         if type(self.retrieval_backend) is not str or not self.retrieval_backend.strip():
@@ -94,6 +99,19 @@ class KnowledgeQueryTrace:
                     or rank[1] <= 0
                 ):
                     raise ValueError("fused result ranks must contain query-index/rank pairs")
+        if type(self.context_expansion_enabled) is not bool:
+            raise TypeError("context_expansion_enabled must be a boolean")
+        for name in (
+            "anchor_passage_count",
+            "expanded_passage_count",
+            "expanded_document_count",
+            "section_boundary_skips",
+        ):
+            value = getattr(self, name)
+            if type(value) is not int:
+                raise TypeError(f"{name} must be an integer")
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +172,11 @@ def knowledge_query_result_dict(
             "context_estimated_token_count": result.trace.context_estimated_token_count,
             "retrieval_queries": list(result.trace.retrieval_queries),
             "query_expansion_error": result.trace.query_expansion_error,
+            "context_expansion_enabled": result.trace.context_expansion_enabled,
+            "anchor_passage_count": result.trace.anchor_passage_count,
+            "expanded_passage_count": result.trace.expanded_passage_count,
+            "expanded_document_count": result.trace.expanded_document_count,
+            "section_boundary_skips": result.trace.section_boundary_skips,
             "fused_results": [
                 {"chunk_id": chunk_id, "ranks": [[query_index, rank] for query_index, rank in ranks]}
                 for chunk_id, ranks in result.trace.fused_result_provenance
